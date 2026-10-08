@@ -124,6 +124,7 @@ struct AuthVisitor<'a> {
     current_function: Option<String>,
     address_params: Vec<String>,
     token_client_vars: Vec<String>,
+    storage_accessor_vars: Vec<String>,
     mutants: Vec<Mutant>,
 }
 
@@ -135,22 +136,36 @@ impl<'a> AuthVisitor<'a> {
             current_function: None,
             address_params: Vec::new(),
             token_client_vars: Vec::new(),
+            storage_accessor_vars: Vec::new(),
             mutants: Vec::new(),
         }
     }
 
-    fn enter_signature(&mut self, sig: &Signature) -> (Option<String>, Vec<String>, Vec<String>) {
+    fn enter_signature(
+        &mut self,
+        sig: &Signature,
+    ) -> (Option<String>, Vec<String>, Vec<String>, Vec<String>) {
         let previous_name = self.current_function.replace(sig.ident.to_string());
         let previous_params = std::mem::replace(&mut self.address_params, address_params(sig));
         let previous_token_clients =
             std::mem::replace(&mut self.token_client_vars, token_client_params(sig));
-        (previous_name, previous_params, previous_token_clients)
+        let previous_storage_accessors = std::mem::take(&mut self.storage_accessor_vars);
+        (
+            previous_name,
+            previous_params,
+            previous_token_clients,
+            previous_storage_accessors,
+        )
     }
 
-    fn leave_signature(&mut self, previous: (Option<String>, Vec<String>, Vec<String>)) {
+    fn leave_signature(
+        &mut self,
+        previous: (Option<String>, Vec<String>, Vec<String>, Vec<String>),
+    ) {
         self.current_function = previous.0;
         self.address_params = previous.1;
         self.token_client_vars = previous.2;
+        self.storage_accessor_vars = previous.3;
     }
 
     fn push_mutant(
@@ -197,11 +212,16 @@ impl<'ast> Visit<'ast> for AuthVisitor<'_> {
 
     fn visit_local(&mut self, node: &'ast Local) {
         if let (Pat::Ident(ident), Some(init)) = (&node.pat, &node.init) {
-            if is_token_client_constructor(&init.expr) {
-                let name = ident.ident.to_string();
-                if !self.token_client_vars.contains(&name) {
-                    self.token_client_vars.push(name);
-                }
+            let name = ident.ident.to_string();
+
+            if is_token_client_constructor(&init.expr) && !self.token_client_vars.contains(&name) {
+                self.token_client_vars.push(name.clone());
+            }
+
+            if is_soroban_storage_accessor(&init.expr)
+                && !self.storage_accessor_vars.contains(&name)
+            {
+                self.storage_accessor_vars.push(name);
             }
         }
 
@@ -232,7 +252,9 @@ impl<'ast> Visit<'ast> for AuthVisitor<'_> {
             }
         }
 
-        if node.method == "extend_ttl" {
+        if node.method == "extend_ttl"
+            && is_ttl_receiver(&node.receiver, &self.storage_accessor_vars)
+        {
             self.push_mutant(
                 "TTL-001",
                 node.span(),
@@ -585,6 +607,43 @@ fn is_token_transfer_receiver(expr: &Expr, known_clients: &[String]) -> bool {
 
     receiver_ident(expr)
         .map(|name| known_clients.iter().any(|candidate| candidate == &name))
+        .unwrap_or(false)
+}
+
+fn is_soroban_storage_accessor(expr: &Expr) -> bool {
+    match expr {
+        Expr::MethodCall(call)
+            if matches!(
+                call.method.to_string().as_str(),
+                "instance" | "persistent" | "temporary"
+            ) =>
+        {
+            storage_chain_contains_storage(&call.receiver)
+        }
+        Expr::Paren(paren) => is_soroban_storage_accessor(&paren.expr),
+        Expr::Reference(reference) => is_soroban_storage_accessor(&reference.expr),
+        _ => false,
+    }
+}
+
+fn storage_chain_contains_storage(expr: &Expr) -> bool {
+    match expr {
+        Expr::MethodCall(call) => {
+            call.method == "storage" || storage_chain_contains_storage(&call.receiver)
+        }
+        Expr::Paren(paren) => storage_chain_contains_storage(&paren.expr),
+        Expr::Reference(reference) => storage_chain_contains_storage(&reference.expr),
+        _ => false,
+    }
+}
+
+fn is_ttl_receiver(expr: &Expr, known_accessors: &[String]) -> bool {
+    if is_soroban_storage_accessor(expr) {
+        return true;
+    }
+
+    receiver_ident(expr)
+        .map(|name| known_accessors.iter().any(|candidate| candidate == &name))
         .unwrap_or(false)
 }
 
@@ -1146,6 +1205,33 @@ mod tests {
             r#"
             fn keep_alive(env: Env) {
                 env.storage().instance().extend_ttl(100, 1000);
+            }
+            "#,
+        );
+
+        assert!(mutants.iter().any(|m| m.operator == "TTL-001"));
+    }
+
+    #[test]
+    fn generic_extend_ttl_method_is_not_treated_as_soroban_storage() {
+        let mutants = mutations_for(
+            r#"
+            fn keep_alive(cache: Cache) {
+                cache.extend_ttl(100, 1000);
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "TTL-001"));
+    }
+
+    #[test]
+    fn local_storage_accessor_gets_ttl_mutant() {
+        let mutants = mutations_for(
+            r#"
+            fn keep_alive(env: Env, key: DataKey) {
+                let persistent = env.storage().persistent();
+                persistent.extend_ttl(&key, 100, 1000);
             }
             "#,
         );

@@ -44,9 +44,9 @@ This operator deliberately avoids broad type inference. Candidate replacement re
 
 ## TTL-001 — remove TTL extension
 
-Recognizes `extend_ttl(...)` method calls and replaces the call expression with `()`.
+Recognizes `extend_ttl(...)` only when it is called on a Soroban `instance`, `persistent`, or `temporary` storage accessor, including simple locals initialized from those accessors, and replaces the call expression with `()`.
 
-The operator asks whether tests actually enforce the expected state-lifetime behavior.
+Arbitrary methods named `extend_ttl` are ignored. The operator asks whether tests actually enforce the expected state-lifetime behavior.
 
 ## EVENT-001 — remove direct event publication
 
