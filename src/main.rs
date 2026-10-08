@@ -385,7 +385,11 @@ fn main() -> Result<()> {
             if count_only {
                 writeln!(report, "{}", mutants.len())?;
             } else if json {
-                writeln!(report, "{}", serde_json::to_string_pretty(&list_report(&mutants))?)?;
+                writeln!(
+                    report,
+                    "{}",
+                    serde_json::to_string_pretty(&list_report(&mutants))?
+                )?;
             } else {
                 print_mutants(&mut report, &mutants)?;
             }
@@ -414,7 +418,11 @@ fn main() -> Result<()> {
             let mut report = report_writer(output.as_deref())?;
             if mutants.is_empty() {
                 if json {
-                    writeln!(report, "{}", serde_json::to_string_pretty(&test_report(&[]))?)?;
+                    writeln!(
+                        report,
+                        "{}",
+                        serde_json::to_string_pretty(&test_report(&[]))?
+                    )?;
                 } else {
                     writeln!(report, "No matching Soroban semantic mutants found.")?;
                 }
@@ -472,7 +480,11 @@ fn main() -> Result<()> {
             }
 
             if json {
-                writeln!(report, "{}", serde_json::to_string_pretty(&test_report(&results))?)?;
+                writeln!(
+                    report,
+                    "{}",
+                    serde_json::to_string_pretty(&test_report(&results))?
+                )?;
             } else {
                 print_summary(&mut report, &results)?;
             }
@@ -1296,9 +1308,9 @@ mod tests {
             .expect("mutant cache should be created");
         fs::write(root.join("keep.txt"), "source").expect("source sentinel should be written");
 
-        let removed = clean_generated_state(&root, None).expect("cleanup should succeed");
+        let removed = clean_generated_state(&root, None, false).expect("cleanup should succeed");
 
-        assert_eq!(removed.len(), 3);
+        assert_eq!(removed.len(), 4);
         assert!(!root.join(".soro-mutants-worktree").exists());
         assert!(!root.join(".soro-mutants-target").exists());
         assert_eq!(
