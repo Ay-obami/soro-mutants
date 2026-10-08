@@ -83,7 +83,7 @@ Real-repository benchmarks now show both sides of the signal:
 
 - **Phoenix Protocol** (`aa9bfc0`): admin-change auth/event mutants survive, while explicit TTL and token-balance tests kill their corresponding mutants.
 - **Soroswap Core** (`6eade00`): the focused token auth test kills both removal of `from.require_auth()` and authentication of `to` instead.
-- **Stellar `soroban-examples`** (`03d42aa`): the official `single_offer` auth assertion kills removal of `seller.require_auth()`.
+- **Stellar `soroban-examples`** (`03d42aa`): the official `single_offer` tests kill removal of `seller.require_auth()` and all three token-direction reversals in `trade()`.
 - **RWA Toolkit Stellar contracts** (`a92ad6a`): sender-auth mutants are killed, while transfer-event deletion mutants survive.
 
 Broken baselines are excluded rather than scored. Blend's integration baseline is therefore not counted as benchmark evidence in the current environment.
