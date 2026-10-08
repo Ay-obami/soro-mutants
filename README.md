@@ -33,10 +33,16 @@ The v0.1 recognizers are intentionally conservative. Generic methods that merely
 
 ## Install and CLI
 
-From a local checkout:
+Install the v0.1.0 pre-release directly from its Git tag:
 
 ```bash
-cargo install --path .
+cargo install --git https://github.com/Ay-obami/soro-mutants --tag v0.1.0 --locked
+```
+
+Or install from a local checkout:
+
+```bash
+cargo install --path . --locked
 ```
 
 The installed binary follows Cargo's subcommand convention, so it can be invoked as `cargo soro-mutants`.
@@ -131,4 +137,4 @@ See [docs/benchmark.md](docs/benchmark.md) for exact commands, commit hashes, ex
 
 ## Status
 
-`0.1.0` is a pre-release implementation. The core hypothesis has been validated against controlled fixtures and multiple public Soroban codebases; the current focus is keeping the five initial semantic operators narrow, reproducible, and low-noise before expanding the operator set.
+[`v0.1.0`](https://github.com/Ay-obami/soro-mutants/releases/tag/v0.1.0) is the first public pre-release. The core hypothesis has been validated against controlled fixtures and multiple public Soroban codebases; the current focus is keeping the five initial semantic operators narrow, reproducible, and low-noise before expanding the operator set.
