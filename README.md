@@ -1,5 +1,7 @@
 # Soro Mutants
 
+[![CI](https://github.com/Ay-obami/soro-mutants/actions/workflows/ci.yml/badge.svg)](https://github.com/Ay-obami/soro-mutants/actions/workflows/ci.yml)
+
 Soroban-aware semantic mutation testing for Stellar smart contracts.
 
 Soro Mutants injects realistic Soroban faults into Rust contract source and runs the existing test suite against each mutant. The goal is not to find vulnerabilities in the current source. The goal is to answer a different question:
