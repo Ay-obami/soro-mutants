@@ -123,6 +123,8 @@ Recommended priority order:
 
 If the repository receives a 500-point per-Wave budget, #1 + #9 + #2 form a balanced 500-point initial set: one authorization operator, one bounded reporting task, and one deeper Soroban event operator. If the actual budget differs, keep the same priority order and add only work that fits the dashboard's current budget.
 
+Set Medium/High complexity in the Drips maintainer dashboard when adding these issues. Adding an issue only through the GitHub Wave label defaults it to Trivial (100 points), so the label-only workflow would not preserve the 150/200-point plan above.
+
 ## Application checklist
 
 Repository-side preparation is complete:
