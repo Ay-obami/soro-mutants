@@ -33,10 +33,10 @@ The v0.1 recognizers are intentionally conservative. Generic methods that merely
 
 ## Install and CLI
 
-Install the v0.1.0 pre-release directly from its Git tag:
+Install the v0.1.1 pre-release directly from its Git tag:
 
 ```bash
-cargo install --git https://github.com/Ay-obami/soro-mutants --tag v0.1.0 --locked
+cargo install --git https://github.com/Ay-obami/soro-mutants --tag v0.1.1 --locked
 ```
 
 Or install from a local checkout:
@@ -87,6 +87,10 @@ cargo soro-mutants test /path/to/project --json
 ```
 
 In JSON mode, stdout is reserved for JSON so it can be piped directly into `jq` or CI tooling. Compiler/test diagnostics may still appear on stderr.
+
+JSON reports include `schema_version: 1` and a `mutants` array (`list`) or `results`
+array (`test`). See the [JSON compatibility policy and example](docs/json-output.md),
+including how to update consumers of the earlier unversioned arrays.
 
 Results are classified as:
 
