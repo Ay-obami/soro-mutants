@@ -77,7 +77,7 @@ Soro Mutants removes each temporary source worktree automatically. Baseline and 
 cargo soro-mutants clean /path/to/project
 ```
 
-If `--target-dir` was used for mutation runs, pass the same value to `clean`; only Soro Mutants' `baseline` and `mutants-shared` subdirectories are removed.
+If `--target-dir` was used for mutation runs, pass the same value to `clean`; only Soro Mutants' `baseline` and `mutants-shared` subdirectories are removed. See the [troubleshooting guide](docs/troubleshooting.md) for disk-usage checks and Soroban dependency/toolchain failures.
 
 Machine-readable output is available on both commands:
 
@@ -134,6 +134,7 @@ See [docs/benchmark.md](docs/benchmark.md) for exact commands, commit hashes, ex
 - [Architecture](docs/architecture.md)
 - [Operator specification](docs/operators.md)
 - [Benchmark evidence](docs/benchmark.md)
+- [Troubleshooting](docs/troubleshooting.md)
 - [Roadmap](docs/roadmap.md)
 - [Drips / Stellar Wave maintainer brief](docs/drips-application.md)
 - [Contributing](CONTRIBUTING.md)
