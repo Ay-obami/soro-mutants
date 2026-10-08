@@ -492,6 +492,10 @@ fn swapped_transfer_replacement(source: &str, node: &ExprMethodCall) -> Option<S
     let second = source_for_span(source, args.next()?.span())?;
     let third = source_for_span(source, args.next()?.span())?;
 
+    if first.trim() == second.trim() {
+        return None;
+    }
+
     Some(format!(
         "{}.transfer({}, {}, {})",
         receiver, second, first, third
@@ -682,15 +686,35 @@ fn copy_wasm_fixtures(root: &Path, destination: &Path) -> Result<()> {
 }
 
 fn compile_command_for(test_command: &str) -> Option<String> {
-    let marker = "cargo test";
-    let index = test_command.find(marker)?;
     if test_command.contains("--no-run") {
         return Some(test_command.to_string());
     }
+
+    let cargo_index = test_command.find("cargo ")?;
+    let after_cargo = cargo_index + "cargo ".len();
+    let tail = &test_command[after_cargo..];
+
+    let test_offset = if tail.starts_with("test") {
+        0
+    } else if tail.starts_with('+') {
+        let toolchain_end = tail.find(' ')?;
+        let after_toolchain = &tail[toolchain_end + 1..];
+        if after_toolchain.starts_with("test") {
+            toolchain_end + 1
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    let test_start = after_cargo + test_offset;
+    let test_end = test_start + "test".len();
+
     Some(format!(
-        "{}cargo test --no-run{}",
-        &test_command[..index],
-        &test_command[index + marker.len()..]
+        "{}test --no-run{}",
+        &test_command[..test_start],
+        &test_command[test_end..]
     ))
 }
 
@@ -983,6 +1007,19 @@ mod tests {
     }
 
     #[test]
+    fn token_direction_skips_identical_sender_and_recipient() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(token: TokenClient, owner: Address, amount: i128) {
+                token.transfer(&owner, &owner, &amount);
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
+    }
+
+    #[test]
     fn compile_gate_preserves_test_prefix_and_arguments() {
         assert_eq!(
             compile_command_for("RUSTFLAGS='-Dwarnings' cargo test -q -p pool auth").as_deref(),
@@ -991,6 +1028,14 @@ mod tests {
         assert_eq!(
             compile_command_for("cargo test --no-run -q").as_deref(),
             Some("cargo test --no-run -q")
+        );
+        assert_eq!(
+            compile_command_for("cargo +1.91.0 test -q -p pool").as_deref(),
+            Some("cargo +1.91.0 test --no-run -q -p pool")
+        );
+        assert_eq!(
+            compile_command_for("cd contracts && cargo +stable test auth").as_deref(),
+            Some("cd contracts && cargo +stable test --no-run auth")
         );
         assert_eq!(compile_command_for("cargo nextest run"), None);
     }
