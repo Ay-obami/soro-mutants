@@ -6,3 +6,5 @@
 *.rc
 /.fixture-cache/
 /.phoenix-benchmark-target/
+/.ci-target/
+/.single-offer-benchmark-target/

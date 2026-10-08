@@ -900,4 +900,88 @@ mod tests {
 
         assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
     }
+
+    #[test]
+    fn auth_wrong_address_ignores_non_address_parameters() {
+        let mutants = mutations_for(
+            r#"
+            use soroban_sdk::Address;
+
+            fn update(admin: Address, label: String, amount: i128) {
+                admin.require_auth();
+            }
+            "#,
+        );
+
+        assert!(mutants.iter().any(|m| m.operator == "AUTH-001"));
+        assert!(!mutants.iter().any(|m| m.operator == "AUTH-002"));
+    }
+
+    #[test]
+    fn auth_wrong_address_requires_a_distinct_address_parameter() {
+        let mutants = mutations_for(
+            r#"
+            use soroban_sdk::Address;
+
+            fn update(admin: Address) {
+                admin.require_auth();
+            }
+            "#,
+        );
+
+        assert_eq!(
+            mutants.iter().filter(|m| m.operator == "AUTH-001").count(),
+            1
+        );
+        assert_eq!(
+            mutants.iter().filter(|m| m.operator == "AUTH-002").count(),
+            0
+        );
+    }
+
+    #[test]
+    fn generic_publish_is_not_treated_as_soroban_event_publication() {
+        let mutants = mutations_for(
+            r#"
+            fn log(logger: Logger) {
+                logger.publish("hello");
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn token_direction_mutant_preserves_complex_amount_expression() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(token: TokenClient, from: Address, to: Address, amount: i128) {
+                token.transfer(&from, &to, &(amount - 1));
+            }
+            "#,
+        );
+
+        let mutant = mutants
+            .iter()
+            .find(|m| m.operator == "TOKEN-001")
+            .expect("TOKEN-001 should be generated");
+
+        assert!(mutant
+            .replacement
+            .contains("transfer(&to, &from, &(amount - 1))"));
+    }
+
+    #[test]
+    fn compile_gate_preserves_test_prefix_and_arguments() {
+        assert_eq!(
+            compile_command_for("RUSTFLAGS='-Dwarnings' cargo test -q -p pool auth").as_deref(),
+            Some("RUSTFLAGS='-Dwarnings' cargo test --no-run -q -p pool auth")
+        );
+        assert_eq!(
+            compile_command_for("cargo test --no-run -q").as_deref(),
+            Some("cargo test --no-run -q")
+        );
+        assert_eq!(compile_command_for("cargo nextest run"), None);
+    }
 }
