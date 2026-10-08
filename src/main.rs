@@ -63,6 +63,13 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Remove Soro Mutants scratch and build-cache directories.
+    Clean {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        target_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -356,6 +363,19 @@ fn main() -> Result<()> {
                 print_summary(&results);
             }
         }
+        Commands::Clean { path, target_dir } => {
+            let root = path
+                .canonicalize()
+                .with_context(|| format!("cannot resolve {}", path.display()))?;
+            let removed = clean_generated_state(&root, target_dir.as_deref())?;
+            if removed.is_empty() {
+                println!("No Soro Mutants generated state found.");
+            } else {
+                for path in removed {
+                    println!("Removed {}", path.display());
+                }
+            }
+        }
     }
 
     Ok(())
@@ -582,6 +602,35 @@ fn target_dirs(root: &Path, target_dir: Option<&Path>) -> (PathBuf, PathBuf) {
     (base.join("baseline"), base.join("mutants-shared"))
 }
 
+fn clean_generated_state(root: &Path, target_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
+    let scratch = root.join(".soro-mutants-worktree");
+    let (baseline, mutants) = target_dirs(root, target_dir);
+    let mut removed = Vec::new();
+
+    for path in [scratch, baseline, mutants] {
+        if path.exists() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            removed.push(path);
+        }
+    }
+
+    if target_dir.is_none() {
+        let default_root = root.join(".soro-mutants-target");
+        if default_root.exists()
+            && fs::read_dir(&default_root)
+                .with_context(|| format!("failed to inspect {}", default_root.display()))?
+                .next()
+                .is_none()
+        {
+            fs::remove_dir(&default_root)
+                .with_context(|| format!("failed to remove {}", default_root.display()))?;
+        }
+    }
+
+    Ok(removed)
+}
+
 fn execute_mutant(
     root: &Path,
     mutant: &Mutant,
@@ -598,30 +647,45 @@ fn execute_mutant(
     copy_project(root, &scratch)?;
     apply_mutant(&scratch, mutant)?;
 
-    let target_dir = if shared_target {
-        target_root.to_path_buf()
-    } else {
-        target_root.join(&mutant.id)
-    };
-    let scratch_cwd = test_dir
-        .map(|dir| scratch.join(dir))
-        .unwrap_or_else(|| scratch.clone());
+    let result = (|| -> Result<Outcome> {
+        let target_dir = if shared_target {
+            target_root.to_path_buf()
+        } else {
+            target_root.join(&mutant.id)
+        };
+        let scratch_cwd = test_dir
+            .map(|dir| scratch.join(dir))
+            .unwrap_or_else(|| scratch.clone());
 
-    if let Some(compile_command) = compile_command_for(test_command) {
-        match run_process(&scratch_cwd, &compile_command, timeout, &target_dir)? {
-            ProcessResult::Failed => return Ok(Outcome::Unviable),
-            ProcessResult::Timeout => return Ok(Outcome::Timeout),
-            ProcessResult::Passed => {}
+        if let Some(compile_command) = compile_command_for(test_command) {
+            match run_process(&scratch_cwd, &compile_command, timeout, &target_dir)? {
+                ProcessResult::Failed => return Ok(Outcome::Unviable),
+                ProcessResult::Timeout => return Ok(Outcome::Timeout),
+                ProcessResult::Passed => {}
+            }
         }
-    }
 
-    Ok(
-        match run_process(&scratch_cwd, test_command, timeout, &target_dir)? {
-            ProcessResult::Passed => Outcome::Survived,
-            ProcessResult::Failed => Outcome::Killed,
-            ProcessResult::Timeout => Outcome::Timeout,
-        },
-    )
+        Ok(
+            match run_process(&scratch_cwd, test_command, timeout, &target_dir)? {
+                ProcessResult::Passed => Outcome::Survived,
+                ProcessResult::Failed => Outcome::Killed,
+                ProcessResult::Timeout => Outcome::Timeout,
+            },
+        )
+    })();
+
+    let cleanup_result = if scratch.exists() {
+        fs::remove_dir_all(&scratch)
+            .with_context(|| format!("failed to clean mutation scratch {}", scratch.display()))
+    } else {
+        Ok(())
+    };
+
+    match (result, cleanup_result) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Ok(outcome), Ok(())) => Ok(outcome),
+    }
 }
 
 fn copy_project(root: &Path, destination: &Path) -> Result<()> {
@@ -841,6 +905,36 @@ mod tests {
     }
 
     #[test]
+    fn clean_removes_only_generated_state() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("soro-mutants-clean-{nonce}"));
+        fs::create_dir_all(root.join(".soro-mutants-worktree"))
+            .expect("scratch directory should be created");
+        fs::create_dir_all(root.join(".soro-mutants-target/baseline"))
+            .expect("baseline directory should be created");
+        fs::create_dir_all(root.join(".soro-mutants-target/mutants-shared"))
+            .expect("mutant cache should be created");
+        fs::write(root.join("keep.txt"), "source").expect("source sentinel should be written");
+
+        let removed = clean_generated_state(&root, None).expect("cleanup should succeed");
+
+        assert_eq!(removed.len(), 3);
+        assert!(!root.join(".soro-mutants-worktree").exists());
+        assert!(!root.join(".soro-mutants-target").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("keep.txt")).expect("source sentinel should remain"),
+            "source"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn baseline_and_mutant_targets_are_always_separate() {
         let root = Path::new("/tmp/example-project");
 
@@ -1017,6 +1111,66 @@ mod tests {
         );
 
         assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
+    }
+
+    #[test]
+    fn execute_mutant_cleans_scratch_worktree() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("soro-mutants-runner-{nonce}"));
+        let target = env::temp_dir().join(format!("soro-mutants-runner-target-{nonce}"));
+        fs::create_dir_all(root.join("src")).expect("fixture directory should be created");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "runner-fixture"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .expect("fixture manifest should be written");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+pub struct Address;
+
+impl Address {
+    pub fn require_auth(&self) {}
+}
+
+pub fn guarded(user: Address) {
+    user.require_auth();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn functional_only() {
+        guarded(Address);
+    }
+}
+"#,
+        )
+        .expect("fixture source should be written");
+
+        let mutants = discover_mutants(&root, Some("AUTH-001"), None, None)
+            .expect("fixture mutation discovery should work");
+        let mutant = mutants.first().expect("AUTH-001 should be discovered");
+
+        let outcome = execute_mutant(&root, mutant, None, "cargo test -q", 30, &target, true)
+            .expect("mutant execution should succeed");
+
+        assert!(matches!(outcome, Outcome::Survived));
+        assert!(!root.join(".soro-mutants-worktree").exists());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&target);
     }
 
     #[test]

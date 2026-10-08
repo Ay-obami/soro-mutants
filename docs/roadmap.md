@@ -17,6 +17,7 @@ Implemented:
 - `KILLED / SURVIVED / UNVIABLE / TIMEOUT` outcomes
 - text and JSON output
 - real-repository benchmark notes
+- explicit cleanup command for Soro Mutants scratch/build caches
 
 ## Next operator families
 

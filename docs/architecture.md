@@ -34,7 +34,7 @@ The AST is used for recognition only. Mutations are applied to the original sour
 
 ## Execution isolation
 
-The target repository is never mutated in place. Each mutant is applied to a copied scratch worktree under `.soro-mutants-worktree`.
+The target repository is never mutated in place. Each mutant is applied to a copied scratch worktree under `.soro-mutants-worktree`. The scratch worktree is removed after each mutant, including compile-invalid and timed-out outcomes.
 
 The clean baseline uses:
 
@@ -48,7 +48,7 @@ Mutated runs use a separate cache:
 .soro-mutants-target/mutants-shared
 ```
 
-This prevents mutant build artifacts from contaminating the baseline while still allowing dependencies to be reused between mutant runs.
+This prevents mutant build artifacts from contaminating the baseline while still allowing dependencies to be reused between mutant runs. Build caches persist deliberately for performance and can be removed with `cargo soro-mutants clean`; cleanup never removes the target repository's normal Cargo cache or source files.
 
 ## Classification
 

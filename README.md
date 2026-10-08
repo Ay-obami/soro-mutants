@@ -65,6 +65,14 @@ cargo soro-mutants test /path/to/project \
   --test-command 'cargo test -q -p phoenix-pool admin_change'
 ```
 
+Soro Mutants removes each temporary source worktree automatically. Baseline and mutant Cargo build caches are intentionally retained for reuse between runs. Remove those generated caches explicitly when disk space matters:
+
+```bash
+cargo soro-mutants clean /path/to/project
+```
+
+If `--target-dir` was used for mutation runs, pass the same value to `clean`; only Soro Mutants' `baseline` and `mutants-shared` subdirectories are removed.
+
 Machine-readable output is available on both commands:
 
 ```bash
