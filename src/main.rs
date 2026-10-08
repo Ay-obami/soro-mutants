@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
 use proc_macro2::Span;
 use serde::Serialize;
 use std::{
@@ -353,7 +353,13 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse_from(normalized_args());
+    let mut command = Cli::command();
+    if env::var_os("NO_COLOR").is_some() {
+        // Apply before parsing so help and argument errors also honor NO_COLOR.
+        command = command.color(ColorChoice::Never);
+    }
+    let matches = command.get_matches_from(normalized_args());
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
 
     match cli.command {
         Commands::List {
