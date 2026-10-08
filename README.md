@@ -47,6 +47,11 @@ cargo install --path . --locked
 
 The installed binary follows Cargo's subcommand convention, so it can be invoked as `cargo soro-mutants`.
 
+Set `NO_COLOR` (for example, `NO_COLOR=1 cargo soro-mutants --help`) to disable
+ANSI color in Soro Mutants output, including help and argument errors. Any value,
+including an empty value, disables color. Mutation reports are already plain text;
+`--json` output is unchanged.
+
 List semantic mutants without executing them:
 
 ```bash
