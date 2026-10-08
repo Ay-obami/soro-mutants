@@ -42,6 +42,7 @@ The public repository already contains:
 - `KILLED / SURVIVED / UNVIABLE / TIMEOUT` classifications;
 - text and JSON output;
 - operator/file/function filtering;
+- automatic scratch cleanup plus an explicit cache-clean command;
 - five Soroban semantic operators;
 - weak/strong controlled fixtures;
 - CI;
@@ -87,22 +88,22 @@ Current areas include:
 
 ### Semantic operators
 
-- #1 — `require_auth_for_args` mutation support
-- #2 — typed Soroban event mutation
-- #3 — TTL threshold/target mutation
-- #4 — allowance owner/spender substitution
-- #5 — cross-contract address substitution
+- [#1 — `require_auth_for_args` mutation support](https://github.com/Ay-obami/soro-mutants/issues/1)
+- [#2 — typed Soroban event mutation](https://github.com/Ay-obami/soro-mutants/issues/2)
+- [#3 — TTL threshold/target mutation](https://github.com/Ay-obami/soro-mutants/issues/3)
+- [#4 — allowance owner/spender substitution](https://github.com/Ay-obami/soro-mutants/issues/4)
+- [#5 — cross-contract address substitution](https://github.com/Ay-obami/soro-mutants/issues/5)
 
 ### Runner and performance
 
-- #6 — changed-file / changed-function selection
-- #7 — isolated parallel mutant execution
-- #10 — optional `cargo nextest` runner
+- [#6 — changed-file / changed-function selection](https://github.com/Ay-obami/soro-mutants/issues/6)
+- [#7 — isolated parallel mutant execution](https://github.com/Ay-obami/soro-mutants/issues/7)
+- [#10 — optional `cargo nextest` runner](https://github.com/Ay-obami/soro-mutants/issues/10)
 
 ### Reporting
 
-- #8 — SARIF output
-- #9 — versioned JSON result schema
+- [#8 — SARIF output](https://github.com/Ay-obami/soro-mutants/issues/8)
+- [#9 — versioned JSON result schema](https://github.com/Ay-obami/soro-mutants/issues/9)
 
 The roadmap leaves additional room for storage-class mutations, upgrade/admin semantics, event-value substitutions, richer token mutations, equivalent-mutant reduction, caching, sharding, corpus expansion, and additional integrations.
 
