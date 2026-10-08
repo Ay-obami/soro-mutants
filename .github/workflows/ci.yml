@@ -24,3 +24,38 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Package
         run: cargo package --allow-dirty --locked
+
+  semantic-fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91.0"
+      - name: Build CLI
+        run: cargo build --locked
+      - name: Weak authorization tests must miss both auth mutants
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-auth \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target" \
+            --timeout 240 \
+            --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^SURVIVED[[:space:]]+AUTH-001' <<<"$output"
+          grep -Eq '^SURVIVED[[:space:]]+AUTH-002' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Strong authorization assertion must kill both auth mutants
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-auth \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target" \
+            --timeout 240 \
+            --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^KILLED[[:space:]]+AUTH-001' <<<"$output"
+          grep -Eq '^KILLED[[:space:]]+AUTH-002' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"

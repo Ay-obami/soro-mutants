@@ -98,6 +98,8 @@ The controlled fixtures demonstrate the intended behavior:
 - weak auth fixture: `AUTH-001` and `AUTH-002` both survive;
 - strong auth fixture: both mutants are killed by an explicit authorization assertion.
 
+Those opposite outcomes are enforced by the `semantic-fixtures` GitHub Actions job so the core signal cannot silently regress.
+
 Real-repository benchmarks now show both sides of the signal:
 
 - **Phoenix Protocol** (`aa9bfc0`): admin-change auth/event mutants survive, while explicit TTL and token-balance tests kill their corresponding mutants.
