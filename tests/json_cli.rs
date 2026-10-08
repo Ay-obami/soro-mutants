@@ -32,7 +32,7 @@ fn list_json_preserves_discovered_fields_and_ids() {
 #[test]
 fn empty_list_and_test_json_use_versioned_envelopes() {
     for (command, field) in [("list", "mutants"), ("test", "results")] {
-        let output = run(command, &["--operator", "NO-MATCH", "--json"]);
+        let output = run(command, &["--operator", "TOKEN-001", "--json"]);
         assert!(output.status.success());
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report.as_object().unwrap().len(), 2);

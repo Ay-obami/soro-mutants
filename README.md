@@ -33,10 +33,10 @@ The v0.1 recognizers are intentionally conservative. Generic methods that merely
 
 ## Install and CLI
 
-Install the v0.1.0 pre-release directly from its Git tag:
+Install the v0.1.1 pre-release directly from its Git tag:
 
 ```bash
-cargo install --git https://github.com/Ay-obami/soro-mutants --tag v0.1.0 --locked
+cargo install --git https://github.com/Ay-obami/soro-mutants --tag v0.1.1 --locked
 ```
 
 Or install from a local checkout:
