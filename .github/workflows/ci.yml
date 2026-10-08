@@ -23,7 +23,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Package
-        run: cargo package --allow-dirty --locked
+        run: cargo package --locked
 
   semantic-fixtures:
     runs-on: ubuntu-latest
@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           output=$(./target/debug/cargo-soro-mutants test fixtures/weak-auth \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target" \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
             --timeout 240 \
             --test-command "cargo test -q --locked")
           printf '%s\n' "$output"
@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           output=$(./target/debug/cargo-soro-mutants test fixtures/strong-auth \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target" \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
             --timeout 240 \
             --test-command "cargo test -q --locked")
           printf '%s\n' "$output"

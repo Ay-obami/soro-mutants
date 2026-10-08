@@ -7,4 +7,5 @@
 /.fixture-cache/
 /.phoenix-benchmark-target/
 /.ci-target/
+/.ci-fixture-target/
 /.single-offer-benchmark-target/
