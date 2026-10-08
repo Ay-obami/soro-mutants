@@ -13,7 +13,7 @@ use std::{
 use syn::{
     spanned::Spanned,
     visit::{self, Visit},
-    Expr, ExprMethodCall, FnArg, ImplItemFn, ItemFn, Pat, Signature, Type,
+    Expr, ExprMethodCall, FnArg, ImplItemFn, ItemFn, Local, Pat, Signature, Type,
 };
 use wait_timeout::ChildExt;
 use walkdir::{DirEntry, WalkDir};
@@ -123,6 +123,7 @@ struct AuthVisitor<'a> {
     file: PathBuf,
     current_function: Option<String>,
     address_params: Vec<String>,
+    token_client_vars: Vec<String>,
     mutants: Vec<Mutant>,
 }
 
@@ -133,19 +134,23 @@ impl<'a> AuthVisitor<'a> {
             file,
             current_function: None,
             address_params: Vec::new(),
+            token_client_vars: Vec::new(),
             mutants: Vec::new(),
         }
     }
 
-    fn enter_signature(&mut self, sig: &Signature) -> (Option<String>, Vec<String>) {
+    fn enter_signature(&mut self, sig: &Signature) -> (Option<String>, Vec<String>, Vec<String>) {
         let previous_name = self.current_function.replace(sig.ident.to_string());
         let previous_params = std::mem::replace(&mut self.address_params, address_params(sig));
-        (previous_name, previous_params)
+        let previous_token_clients =
+            std::mem::replace(&mut self.token_client_vars, token_client_params(sig));
+        (previous_name, previous_params, previous_token_clients)
     }
 
-    fn leave_signature(&mut self, previous: (Option<String>, Vec<String>)) {
+    fn leave_signature(&mut self, previous: (Option<String>, Vec<String>, Vec<String>)) {
         self.current_function = previous.0;
         self.address_params = previous.1;
+        self.token_client_vars = previous.2;
     }
 
     fn push_mutant(
@@ -190,6 +195,19 @@ impl<'ast> Visit<'ast> for AuthVisitor<'_> {
         self.leave_signature(previous);
     }
 
+    fn visit_local(&mut self, node: &'ast Local) {
+        if let (Pat::Ident(ident), Some(init)) = (&node.pat, &node.init) {
+            if is_token_client_constructor(&init.expr) {
+                let name = ident.ident.to_string();
+                if !self.token_client_vars.contains(&name) {
+                    self.token_client_vars.push(name);
+                }
+            }
+        }
+
+        visit::visit_local(self, node);
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
         if node.method == "publish" && is_events_receiver(&node.receiver) {
             self.push_mutant(
@@ -200,7 +218,9 @@ impl<'ast> Visit<'ast> for AuthVisitor<'_> {
             );
         }
 
-        if node.method == "transfer" && node.args.len() == 3 && !is_events_receiver(&node.receiver)
+        if node.method == "transfer"
+            && node.args.len() == 3
+            && is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
         {
             if let Some(replacement) = swapped_transfer_replacement(self.source, node) {
                 self.push_mutant(
@@ -489,6 +509,83 @@ fn type_is_address(ty: &Type) -> bool {
         Type::Reference(reference) => type_is_address(&reference.elem),
         _ => false,
     }
+}
+
+fn token_client_params(sig: &Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(pat_type) if type_is_token_client(&pat_type.ty) => {
+                match pat_type.pat.as_ref() {
+                    Pat::Ident(ident) => Some(ident.ident.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn type_is_token_client(ty: &Type) -> bool {
+    match ty {
+        Type::Path(type_path) => path_is_token_client(&type_path.path),
+        Type::Reference(reference) => type_is_token_client(&reference.elem),
+        _ => false,
+    }
+}
+
+fn path_is_token_client(path: &syn::Path) -> bool {
+    let names = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let Some(last) = names.last() else {
+        return false;
+    };
+
+    last.contains("tokenclient")
+        || (last == "client"
+            && names[..names.len().saturating_sub(1)]
+                .iter()
+                .any(|name| name.contains("token")))
+}
+
+fn is_token_client_constructor(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(call) => match call.func.as_ref() {
+            Expr::Path(path) => {
+                let names = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string().to_ascii_lowercase())
+                    .collect::<Vec<_>>();
+                names.last().map(|name| name == "new").unwrap_or(false)
+                    && names[..names.len().saturating_sub(1)]
+                        .iter()
+                        .any(|name| name.contains("token"))
+                    && names[..names.len().saturating_sub(1)]
+                        .last()
+                        .map(|name| name.contains("client"))
+                        .unwrap_or(false)
+            }
+            _ => false,
+        },
+        Expr::Paren(paren) => is_token_client_constructor(&paren.expr),
+        Expr::Reference(reference) => is_token_client_constructor(&reference.expr),
+        _ => false,
+    }
+}
+
+fn is_token_transfer_receiver(expr: &Expr, known_clients: &[String]) -> bool {
+    if is_token_client_constructor(expr) {
+        return true;
+    }
+
+    receiver_ident(expr)
+        .map(|name| known_clients.iter().any(|candidate| candidate == &name))
+        .unwrap_or(false)
 }
 
 fn is_events_receiver(expr: &Expr) -> bool {
@@ -983,6 +1080,46 @@ mod tests {
         );
 
         assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
+    }
+
+    #[test]
+    fn generic_three_argument_transfer_is_not_treated_as_token_transfer() {
+        let mutants = mutations_for(
+            r#"
+            fn move_data(bus: MessageBus, from: Address, to: Address, amount: i128) {
+                bus.transfer(&from, &to, &amount);
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
+    }
+
+    #[test]
+    fn local_token_client_binding_gets_token_direction_mutant() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(env: Env, token: Address, from: Address, to: Address, amount: i128) {
+                let token_client = token::Client::new(&env, &token);
+                token_client.transfer(&from, &to, &amount);
+            }
+            "#,
+        );
+
+        assert!(mutants.iter().any(|m| m.operator == "TOKEN-001"));
+    }
+
+    #[test]
+    fn direct_token_client_constructor_gets_token_direction_mutant() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(env: Env, token: Address, from: Address, to: Address, amount: i128) {
+                token_contract::Client::new(&env, &token).transfer(&from, &to, &amount);
+            }
+            "#,
+        );
+
+        assert!(mutants.iter().any(|m| m.operator == "TOKEN-001"));
     }
 
     #[test]

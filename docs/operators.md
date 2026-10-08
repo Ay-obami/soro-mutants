@@ -56,7 +56,7 @@ It does not yet cover every typed event abstraction.
 
 ## TOKEN-001 — reverse direct transfer direction
 
-Recognizes a direct three-argument method call named `transfer` whose receiver is not an event helper and swaps the first two arguments while preserving the third.
+Recognizes a direct three-argument method call named `transfer` only when the receiver is a known Soroban token client. v0.1 recognizes explicit `TokenClient` / `token::Client` parameters, local variables initialized from token-client constructors, and direct token-client constructor chains. It then swaps the first two arguments while preserving the third.
 
 Example:
 
@@ -70,7 +70,7 @@ becomes:
 token.transfer(&to, &from, &amount)
 ```
 
-The recognizer intentionally excludes receiver chains containing `.events()` so event helper methods named `transfer` are not treated as asset movements.
+The recognizer is deliberately conservative: arbitrary three-argument `.transfer(...)` methods and event helper transfers are ignored. This reduces false positives at the cost of not yet following token clients through struct fields, aliases, or helper-returned values.
 
 ## Classification
 
