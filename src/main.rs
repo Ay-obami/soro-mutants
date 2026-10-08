@@ -31,42 +31,58 @@ struct Cli {
 enum Commands {
     /// Discover semantic mutants without executing them.
     List {
+        /// Cargo project or workspace to inspect.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Only list mutants produced by this operator ID, such as AUTH-001.
         #[arg(long)]
         operator: Option<String>,
+        /// Only list mutants in source files ending with this path.
         #[arg(long)]
         file: Option<String>,
+        /// Only list mutants inside this function.
         #[arg(long)]
         function: Option<String>,
+        /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
     },
     /// Execute semantic mutants against a Cargo test suite.
     Test {
+        /// Cargo project or workspace to mutate.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Only execute mutants produced by this operator ID, such as AUTH-001.
         #[arg(long)]
         operator: Option<String>,
+        /// Only execute mutants in source files ending with this path.
         #[arg(long)]
         file: Option<String>,
+        /// Only execute mutants inside this function.
         #[arg(long)]
         function: Option<String>,
+        /// Run the configured test command from this directory relative to PATH.
         #[arg(long)]
         test_dir: Option<PathBuf>,
+        /// Store Soro Mutants baseline and mutant Cargo caches under this directory.
         #[arg(long)]
         target_dir: Option<PathBuf>,
+        /// Command used for the clean baseline and each viable mutant.
         #[arg(long, default_value = "cargo test -q")]
         test_command: String,
+        /// Per-command timeout in seconds.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
+        /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
     },
     /// Remove Soro Mutants scratch and build-cache directories.
     Clean {
+        /// Cargo project or workspace whose generated state should be removed.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Clean the same custom cache directory previously passed to --target-dir.
         #[arg(long)]
         target_dir: Option<PathBuf>,
     },
@@ -268,7 +284,9 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             );
         }
 
-        if node.method == "require_auth" {
+        if node.method == "require_auth"
+            && (!self.env_params.is_empty() || !self.address_params.is_empty())
+        {
             let receiver = receiver_ident(&node.receiver);
 
             self.push_mutant(
@@ -1283,6 +1301,20 @@ mod tests {
         );
 
         assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn generic_require_auth_is_not_treated_as_soroban_authorization() {
+        let mutants = mutations_for(
+            r#"
+            fn authenticate(session: Session) {
+                session.require_auth();
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "AUTH-001"));
+        assert!(!mutants.iter().any(|m| m.operator == "AUTH-002"));
     }
 
     #[test]

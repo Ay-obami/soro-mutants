@@ -25,11 +25,11 @@ Soro Mutants targets those semantics.
 | --- | --- |
 | `AUTH-001` | Remove `require_auth()` |
 | `AUTH-002` | Authenticate a different in-scope `Address` |
-| `TTL-001` | Remove `extend_ttl()` |
-| `EVENT-001` | Remove `env.events().publish(...)` |
-| `TOKEN-001` | Swap sender and recipient on a direct three-argument `.transfer(...)` call |
+| `TTL-001` | Remove `extend_ttl()` from recognized Soroban storage accessors |
+| `EVENT-001` | Remove direct `Env.events().publish(...)` publication |
+| `TOKEN-001` | Swap sender and recipient on recognized Soroban token-client transfers |
 
-The prototype intentionally excludes event helper calls such as `events().transfer(...)` from `TOKEN-001`.
+The v0.1 recognizers are intentionally conservative. Generic methods that merely share names such as `transfer`, `extend_ttl`, or `publish` are ignored unless the surrounding AST matches a supported Soroban pattern. See [the operator specification](docs/operators.md) for exact boundaries.
 
 ## Install and CLI
 

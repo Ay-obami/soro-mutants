@@ -4,7 +4,9 @@ This document defines the semantic contract of the v0.1 mutation operators.
 
 ## AUTH-001 — remove authorization
 
-Recognizes a Rust method call named `require_auth` and replaces the call expression with `()`.
+Recognizes a Rust method call named `require_auth` only inside a function with explicit Soroban context: at least one `Env` / `&Env` or `Address` / `&Address` parameter. The call expression is replaced with `()`.
+
+This intentionally skips ambiguous `require_auth` methods in generic Rust code instead of assuming every same-named method is Soroban authorization.
 
 Example:
 
