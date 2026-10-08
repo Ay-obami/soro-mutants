@@ -63,6 +63,15 @@ cargo soro-mutants test /path/to/project \
   --test-command 'cargo test -q -p phoenix-pool admin_change'
 ```
 
+Machine-readable output is available on both commands:
+
+```bash
+cargo soro-mutants list /path/to/project --json
+cargo soro-mutants test /path/to/project --json
+```
+
+In JSON mode, stdout is reserved for JSON so it can be piped directly into `jq` or CI tooling. Compiler/test diagnostics may still appear on stderr.
+
 Results are classified as:
 
 - `KILLED`: at least one configured test failed after the mutation.

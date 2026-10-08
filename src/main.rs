@@ -293,7 +293,11 @@ fn main() -> Result<()> {
                 function.as_deref(),
             )?;
             if mutants.is_empty() {
-                println!("No matching Soroban semantic mutants found.");
+                if json {
+                    println!("[]");
+                } else {
+                    println!("No matching Soroban semantic mutants found.");
+                }
                 return Ok(());
             }
 
@@ -307,9 +311,15 @@ fn main() -> Result<()> {
                 .as_deref()
                 .map(|dir| root.join(dir))
                 .unwrap_or_else(|| root.clone());
-            println!("Baseline: {}", test_command);
+            if !json {
+                println!("Baseline: {}", test_command);
+            }
             match run_process(&test_cwd, &test_command, timeout, &baseline_target_dir)? {
-                ProcessResult::Passed => println!("Baseline PASS\n"),
+                ProcessResult::Passed => {
+                    if !json {
+                        println!("Baseline PASS\n");
+                    }
+                }
                 ProcessResult::Failed => {
                     bail!("baseline tests failed; mutation results would be invalid")
                 }
