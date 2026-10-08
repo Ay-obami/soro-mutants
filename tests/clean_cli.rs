@@ -13,10 +13,8 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "soro-mutants-clean-{}-{nonce}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("soro-mutants-clean-{}-{nonce}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -70,7 +68,9 @@ fn dry_run_lists_every_managed_path_without_removing_anything() {
     assert_eq!(preview.lines().count(), paths.len());
     for path in &paths {
         assert!(
-            preview.lines().any(|line| line == format!("Would remove {}", path.display())),
+            preview
+                .lines()
+                .any(|line| line == format!("Would remove {}", path.display())),
             "missing {} in {preview}",
             path.display()
         );
@@ -82,7 +82,11 @@ fn dry_run_lists_every_managed_path_without_removing_anything() {
     let actual = stdout(&run(root, &[]));
     for path in &paths {
         assert!(actual.contains(&format!("Removed {}", path.display())));
-        assert!(!path.exists(), "{} should have been removed", path.display());
+        assert!(
+            !path.exists(),
+            "{} should have been removed",
+            path.display()
+        );
     }
 }
 
@@ -91,7 +95,10 @@ fn nothing_to_clean_succeeds_in_both_modes() {
     let temp = TempDir::new();
     for args in [&["--dry-run"][..], &[][..]] {
         let output = run(temp.path(), args);
-        assert_eq!(stdout(&output).trim(), "No Soro Mutants generated state found.");
+        assert_eq!(
+            stdout(&output).trim(),
+            "No Soro Mutants generated state found."
+        );
     }
 }
 
@@ -105,12 +112,17 @@ fn dry_run_and_clean_keep_unmanaged_siblings() {
 
     let preview = stdout(&run(temp.path(), &["--dry-run"]));
     assert!(preview.contains(&format!("Would remove {}", baseline.display())));
-    assert!(!preview.contains(&format!("Would remove {}", cache.display())));
+    assert!(!preview
+        .lines()
+        .any(|line| line == format!("Would remove {}", cache.display())));
     assert!(baseline.exists());
 
     stdout(&run(temp.path(), &[]));
     assert!(!baseline.exists());
-    assert_eq!(fs::read_to_string(cache.join("unmanaged.txt")).unwrap(), "keep");
+    assert_eq!(
+        fs::read_to_string(cache.join("unmanaged.txt")).unwrap(),
+        "keep"
+    );
 }
 
 #[test]
@@ -127,11 +139,16 @@ fn custom_cache_only_removes_managed_subdirectories() {
         assert!(preview.contains(&format!("Would remove {}", custom.join(subdir).display())));
         assert!(custom.join(subdir).exists());
     }
-    assert!(!preview.contains(&format!("Would remove {}", custom.display())));
+    assert!(!preview
+        .lines()
+        .any(|line| line == format!("Would remove {}", custom.display())));
     assert!(!preview.contains("other"));
 
     stdout(&run(temp.path(), &["--target-dir", "custom"]));
     assert!(!custom.join("baseline").exists());
     assert!(!custom.join("mutants-shared").exists());
-    assert_eq!(fs::read_to_string(custom.join("other/keep.txt")).unwrap(), "keep");
+    assert_eq!(
+        fs::read_to_string(custom.join("other/keep.txt")).unwrap(),
+        "keep"
+    );
 }
