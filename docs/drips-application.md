@@ -56,6 +56,8 @@ Controlled fixtures show the intended discrimination:
 - a functional-only authorization test allows both `AUTH-001` and `AUTH-002` to survive;
 - an explicit authorization-tree assertion kills both mutants.
 
+The public `semantic-fixtures` GitHub Actions job enforces those opposite outcomes on every push and pull request, so the project's core claim is regression-tested rather than documented only.
+
 Public repository benchmarks provide both positive and negative controls:
 
 - Phoenix Protocol contains selected admin-change tests where authorization/event semantic mutants survive;
@@ -120,8 +122,9 @@ Contributor work should remain real and reviewable:
 
 ## Repository
 
-https://github.com/Ay-obami/soro-mutants
+- Repository: https://github.com/Ay-obami/soro-mutants
+- v0.1.0 pre-release: https://github.com/Ay-obami/soro-mutants/releases/tag/v0.1.0
 
 ## Suggested application summary
 
-Soro Mutants is an open-source semantic mutation-testing engine for Stellar Soroban contracts. It complements generic Rust mutation tools by injecting Stellar-specific faults such as removed/wrong-address authorization, missing TTL extension, removed contract events, and reversed token transfer direction, then runs the project's existing tests to determine whether those behaviors are actually enforced. The v0.1 core is working, CI-backed, and validated against controlled fixtures plus multiple public Soroban repositories. The repository has a scoped contributor roadmap spanning new semantic operators, runner performance, reporting, and integrations, with each task defined around testable acceptance criteria.
+Soro Mutants is an open-source semantic mutation-testing engine for Stellar Soroban contracts. It complements generic Rust mutation tools by injecting Stellar-specific faults such as removed/wrong-address authorization, missing TTL extension, removed contract events, and reversed token transfer direction, then runs the project's existing tests to determine whether those behaviors are actually enforced. The v0.1.0 core is publicly released, CI-backed, and validated against controlled fixtures plus multiple public Soroban repositories. The repository has a scoped contributor roadmap spanning new semantic operators, runner performance, reporting, and integrations, with each task defined around testable acceptance criteria.
