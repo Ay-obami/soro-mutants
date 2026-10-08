@@ -24,4 +24,19 @@ fn count_only_respects_existing_filters_and_zero_matches() {
     let none = run(&["--operator", "TOKEN-001", "--count-only"]);
     assert!(none.status.success());
     assert_eq!(String::from_utf8(none.stdout).unwrap().trim(), "0");
+
+    let file = run(&["--file", "src/lib.rs", "--count-only"]);
+    assert!(file.status.success());
+    assert_eq!(String::from_utf8(file.stdout).unwrap().trim(), "2");
+
+    let function = run(&["--function", "change_admin", "--count-only"]);
+    assert!(function.status.success());
+    assert_eq!(String::from_utf8(function.stdout).unwrap().trim(), "2");
+
+    let missing_function = run(&["--function", "missing", "--count-only"]);
+    assert!(missing_function.status.success());
+    assert_eq!(
+        String::from_utf8(missing_function.stdout).unwrap().trim(),
+        "0"
+    );
 }
