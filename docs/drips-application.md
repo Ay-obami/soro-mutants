@@ -109,6 +109,40 @@ Current areas include:
 
 The roadmap leaves additional room for storage-class mutations, upgrade/admin semantics, event-value substitutions, richer token mutations, equivalent-mutant reduction, caching, sharding, corpus expansion, and additional integrations.
 
+## First-Wave issue priority
+
+Do not add the entire GitHub backlog to the Program at once. Drips counts every active issue against the repository's configured points budget, and unresolved issues carry over to later Waves.
+
+Recommended priority order:
+
+1. **#1 — AUTH-003 `require_auth_for_args` support** — Medium (150 points).
+2. **#9 — versioned JSON result schema** — Medium (150 points); also the best newcomer entry point.
+3. **#2 — typed Soroban event mutation** — High (200 points).
+4. **#6 — changed-file / changed-function selection** — Medium (150 points).
+5. **#8 — SARIF output** — Medium (150 points).
+
+If the repository receives a 500-point per-Wave budget, #1 + #9 + #2 form a balanced 500-point initial set: one authorization operator, one bounded reporting task, and one deeper Soroban event operator. If the actual budget differs, keep the same priority order and add only work that fits the dashboard's current budget.
+
+## Application checklist
+
+Repository-side preparation is complete:
+
+- public GitHub repository with Apache-2.0 license;
+- tagged `v0.1.0` pre-release;
+- CI for formatting, unit tests, Clippy, packaging, and weak/strong semantic fixture outcomes;
+- reproducible benchmark notes against public Soroban repositories;
+- contribution guide, security policy, architecture, operator specification, and roadmap;
+- ten open contribution issues with scoped acceptance criteria, difficulty labels, and category labels.
+
+Drips-side steps still require the maintainer account:
+
+1. Sign in to Drips Wave with GitHub.
+2. Install/authorize the Drips Wave GitHub App for the account or organization hosting this repository.
+3. Sync `Ay-obami/soro-mutants`.
+4. Apply the repository to the Stellar Wave Program.
+5. Wait for organizer approval.
+6. After approval, add only the prioritized issues that fit the repository's displayed points budget and set their complexity in the Drips dashboard.
+
 ## Maintainer principles
 
 Contributor work should remain real and reviewable:
