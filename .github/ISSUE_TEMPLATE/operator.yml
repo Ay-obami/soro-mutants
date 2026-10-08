@@ -1,0 +1,38 @@
+name: New semantic operator
+description: Propose or implement a narrowly scoped Soroban semantic mutation
+title: "[Operator]: "
+labels: ["operator"]
+body:
+  - type: textarea
+    id: semantic-risk
+    attributes:
+      label: Soroban semantic behavior
+      description: What Stellar/Soroban behavior would this mutation deliberately break?
+    validations:
+      required: true
+  - type: textarea
+    id: transform
+    attributes:
+      label: Source transformation
+      description: Show the smallest original -> mutant example.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Recognition boundaries
+      description: Define what should and should not match so the operator stays low-noise.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Include discovery, viable mutation, weak-test survivor, strong-test kill, and regression coverage where applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Ecosystem evidence
+      description: Link public Stellar code, docs, or issues showing why this semantic fault matters. Do not post undisclosed exploit details.

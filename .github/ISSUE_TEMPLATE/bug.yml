@@ -1,0 +1,35 @@
+name: Bug report
+description: Report incorrect discovery, patching, execution, or classification
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproducer
+      description: Include the smallest source pattern, command, and output needed to reproduce the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Soro Mutants version or commit
+    validations:
+      required: true
+  - type: input
+    id: rust
+    attributes:
+      label: Rust toolchain
+      placeholder: rustc 1.xx.x

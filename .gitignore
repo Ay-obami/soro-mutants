@@ -1,0 +1,8 @@
+**/target/
+**/.soro-mutants-target/
+**/.soro-mutants-worktree/
+**/test_snapshots/
+*.log
+*.rc
+/.fixture-cache/
+/.phoenix-benchmark-target/

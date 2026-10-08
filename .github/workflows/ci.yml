@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85.0"
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Test
+        run: cargo test --all
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Package
+        run: cargo package --allow-dirty --locked

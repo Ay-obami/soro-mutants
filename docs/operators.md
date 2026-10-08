@@ -1,0 +1,82 @@
+# Operator Specification
+
+This document defines the semantic contract of the v0.1 mutation operators.
+
+## AUTH-001 — remove authorization
+
+Recognizes a Rust method call named `require_auth` and replaces the call expression with `()`.
+
+Example:
+
+```rust
+from.require_auth();
+```
+
+becomes:
+
+```rust
+();
+```
+
+A survivor means the configured tests did not distinguish removal of that authorization call.
+
+## AUTH-002 — authenticate another address
+
+When a `require_auth()` receiver is a simple identifier and the enclosing function has another parameter explicitly typed `Address`, Soro Mutants substitutes that parameter as the authorization receiver.
+
+Example:
+
+```rust
+fn transfer(env: Env, from: Address, to: Address) {
+    from.require_auth();
+}
+```
+
+may become:
+
+```rust
+fn transfer(env: Env, from: Address, to: Address) {
+    to.require_auth();
+}
+```
+
+This operator deliberately avoids broad type inference. Candidate replacement receivers must be explicit `Address` parameters.
+
+## TTL-001 — remove TTL extension
+
+Recognizes `extend_ttl(...)` method calls and replaces the call expression with `()`.
+
+The operator asks whether tests actually enforce the expected state-lifetime behavior.
+
+## EVENT-001 — remove direct event publication
+
+Recognizes direct Soroban event publication through an `.events().publish(...)` receiver chain and replaces the publication with `()`.
+
+It does not yet cover every typed event abstraction.
+
+## TOKEN-001 — reverse direct transfer direction
+
+Recognizes a direct three-argument method call named `transfer` whose receiver is not an event helper and swaps the first two arguments while preserving the third.
+
+Example:
+
+```rust
+token.transfer(&from, &to, &amount)
+```
+
+becomes:
+
+```rust
+token.transfer(&to, &from, &amount)
+```
+
+The recognizer intentionally excludes receiver chains containing `.events()` so event helper methods named `transfer` are not treated as asset movements.
+
+## Classification
+
+- `KILLED`: configured tests failed after applying the viable mutant.
+- `SURVIVED`: configured tests still passed.
+- `UNVIABLE`: the mutant failed the compile-only gate.
+- `TIMEOUT`: compile or test execution exceeded the configured timeout.
+
+A survivor is evidence about the configured tests, not by itself a vulnerability finding.
