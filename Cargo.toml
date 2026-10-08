@@ -6,6 +6,7 @@ rust-version = "1.85"
 description = "Soroban-aware semantic mutation testing for Stellar smart contracts"
 license = "Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/Ay-obami/soro-mutants"
 keywords = ["stellar", "soroban", "mutation-testing", "smart-contracts", "testing"]
 categories = ["development-tools::testing"]
 
