@@ -77,13 +77,23 @@ cargo soro-mutants test /path/to/project \
   --test-command 'cargo test -q -p phoenix-pool admin_change'
 ```
 
-Soro Mutants removes each temporary source worktree automatically. Baseline and mutant Cargo build caches are intentionally retained for reuse between runs. Remove those generated caches explicitly when disk space matters:
+Soro Mutants removes each temporary source worktree automatically. Baseline and mutant Cargo build caches are intentionally retained for reuse between runs. Preview exactly which Soro Mutants-managed paths would be removed before reclaiming disk space:
 
 ```bash
+cargo soro-mutants clean /path/to/project --dry-run
 cargo soro-mutants clean /path/to/project
 ```
 
-If `--target-dir` was used for mutation runs, pass the same value to `clean`; only Soro Mutants' `baseline` and `mutants-shared` subdirectories are removed. See the [troubleshooting guide](docs/troubleshooting.md) for disk-usage checks and Soroban dependency/toolchain failures.
+The dry run prints every path the real clean would remove without deleting anything, and succeeds when there is nothing to clean. A normal clean only removes its scratch worktree and its own build-cache directories; it may also remove the empty default cache parent. It never cleans global Cargo caches.
+
+If `--target-dir` was used for mutation runs, pass the same value to both preview and cleanup; only Soro Mutants' `baseline` and `mutants-shared` subdirectories are removed from that target directory:
+
+```bash
+cargo soro-mutants clean /path/to/project --target-dir ./custom-cache --dry-run
+cargo soro-mutants clean /path/to/project --target-dir ./custom-cache
+```
+
+See the [troubleshooting guide](docs/troubleshooting.md) for disk-usage checks and Soroban dependency/toolchain failures.
 
 Machine-readable output is available on both commands:
 
@@ -92,7 +102,18 @@ cargo soro-mutants list /path/to/project --json
 cargo soro-mutants test /path/to/project --json
 ```
 
-In JSON mode, stdout is reserved for JSON so it can be piped directly into `jq` or CI tooling. Compiler/test diagnostics may still appear on stderr.
+Save text or JSON reports directly to a file with `--output <path>` (the file is created or overwritten):
+
+```bash
+cargo soro-mutants list /path/to/project --output mutants.txt
+cargo soro-mutants list /path/to/project --json --output mutants.json
+cargo soro-mutants test /path/to/project --output results.txt
+cargo soro-mutants test /path/to/project --json --output results.json
+```
+
+Without `--output`, all existing stdout behavior remains unchanged. With `--output`, the selected report is written to the specified file instead of stdout; missing parent directories or unwritable destinations produce an error. The `list --count-only` result can also be saved to a file.
+
+In JSON mode, stdout (when no `--output` is set) is reserved for JSON so it can be piped directly into `jq` or CI tooling. Compiler/test diagnostics may still appear on stderr.
 
 JSON reports include `schema_version: 1` and a `mutants` array (`list`) or `results`
 array (`test`). See the [JSON compatibility policy and example](docs/json-output.md),
