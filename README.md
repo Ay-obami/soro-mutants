@@ -29,7 +29,7 @@ Soro Mutants targets those semantics.
 | `EVENT-001` | Remove direct `Env.events().publish(...)` publication |
 | `TOKEN-001` | Swap sender and recipient on recognized Soroban token-client transfers |
 
-The v0.1 recognizers are intentionally conservative. Generic methods that merely share names such as `transfer`, `extend_ttl`, or `publish` are ignored unless the surrounding AST matches a supported Soroban pattern. See [the operator specification](docs/operators.md) for exact boundaries.
+The v0.1 recognizers are intentionally conservative. Generic methods that merely share names such as `require_auth`, `transfer`, `extend_ttl`, or `publish` are ignored unless the surrounding AST matches a supported Soroban pattern. See [the operator specification](docs/operators.md) for exact boundaries.
 
 ## Install and CLI
 
