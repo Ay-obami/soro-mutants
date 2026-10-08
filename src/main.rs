@@ -6,6 +6,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -49,6 +50,9 @@ enum Commands {
         /// Print only the number of matching semantic mutants.
         #[arg(long, conflicts_with = "json")]
         count_only: bool,
+        /// Write the selected text, count, or JSON report to a file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     /// Execute semantic mutants against a Cargo test suite.
     Test {
@@ -79,6 +83,9 @@ enum Commands {
         /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
+        /// Write the selected text or JSON report to a file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     /// Remove Soro Mutants scratch and build-cache directories.
     Clean {
@@ -88,6 +95,9 @@ enum Commands {
         /// Clean the same custom cache directory previously passed to --target-dir.
         #[arg(long)]
         target_dir: Option<PathBuf>,
+        /// List managed paths without removing any files.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -363,6 +373,7 @@ fn main() -> Result<()> {
             function,
             json,
             count_only,
+            output,
         } => {
             let mutants = discover_mutants(
                 &path,
@@ -370,12 +381,13 @@ fn main() -> Result<()> {
                 file.as_deref(),
                 function.as_deref(),
             )?;
+            let mut report = report_writer(output.as_deref())?;
             if count_only {
-                println!("{}", mutants.len());
+                writeln!(report, "{}", mutants.len())?;
             } else if json {
-                println!("{}", serde_json::to_string_pretty(&list_report(&mutants))?);
+                writeln!(report, "{}", serde_json::to_string_pretty(&list_report(&mutants))?)?;
             } else {
-                print_mutants(&mutants);
+                print_mutants(&mut report, &mutants)?;
             }
         }
         Commands::Test {
@@ -388,6 +400,7 @@ fn main() -> Result<()> {
             test_command,
             timeout,
             json,
+            output,
         } => {
             let root = path
                 .canonicalize()
@@ -398,11 +411,12 @@ fn main() -> Result<()> {
                 file.as_deref(),
                 function.as_deref(),
             )?;
+            let mut report = report_writer(output.as_deref())?;
             if mutants.is_empty() {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&test_report(&[]))?);
+                    writeln!(report, "{}", serde_json::to_string_pretty(&test_report(&[]))?)?;
                 } else {
-                    println!("No matching Soroban semantic mutants found.");
+                    writeln!(report, "No matching Soroban semantic mutants found.")?;
                 }
                 return Ok(());
             }
@@ -418,12 +432,12 @@ fn main() -> Result<()> {
                 .map(|dir| root.join(dir))
                 .unwrap_or_else(|| root.clone());
             if !json {
-                println!("Baseline: {}", test_command);
+                writeln!(report, "Baseline: {}", test_command)?;
             }
             match run_process(&test_cwd, &test_command, timeout, &baseline_target_dir)? {
                 ProcessResult::Passed => {
                     if !json {
-                        println!("Baseline PASS\n");
+                        writeln!(report, "Baseline PASS\n")?;
                     }
                 }
                 ProcessResult::Failed => {
@@ -444,40 +458,60 @@ fn main() -> Result<()> {
                     shared_target,
                 )?;
                 if !json {
-                    println!(
+                    writeln!(
+                        report,
                         "{:<10} {:<8} {}:{} {}",
                         outcome_label(&outcome),
                         mutant.operator,
                         mutant.file.display(),
                         mutant.span.line,
                         mutant.description
-                    );
+                    )?;
                 }
                 results.push(MutantResult { mutant, outcome });
             }
 
             if json {
-                println!("{}", serde_json::to_string_pretty(&test_report(&results))?);
+                writeln!(report, "{}", serde_json::to_string_pretty(&test_report(&results))?)?;
             } else {
-                print_summary(&results);
+                print_summary(&mut report, &results)?;
             }
         }
-        Commands::Clean { path, target_dir } => {
+        Commands::Clean {
+            path,
+            target_dir,
+            dry_run,
+        } => {
             let root = path
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
-            let removed = clean_generated_state(&root, target_dir.as_deref())?;
-            if removed.is_empty() {
+            let paths = clean_generated_state(&root, target_dir.as_deref(), dry_run)?;
+            if paths.is_empty() {
                 println!("No Soro Mutants generated state found.");
             } else {
-                for path in removed {
-                    println!("Removed {}", path.display());
+                for path in paths {
+                    println!(
+                        "{} {}",
+                        if dry_run { "Would remove" } else { "Removed" },
+                        path.display()
+                    );
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn report_writer(output: Option<&Path>) -> Result<Box<dyn Write>> {
+    match output {
+        Some(path) => {
+            let file = fs::File::create(path)
+                .with_context(|| format!("cannot create report at {}", path.display()))?;
+            Ok(Box::new(file))
+        }
+        None => Ok(Box::new(io::stdout())),
+    }
 }
 
 fn normalized_args() -> Vec<OsString> {
@@ -843,33 +877,54 @@ fn target_dirs(root: &Path, target_dir: Option<&Path>) -> (PathBuf, PathBuf) {
     (base.join("baseline"), base.join("mutants-shared"))
 }
 
-fn clean_generated_state(root: &Path, target_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
+fn managed_cleanup_paths(root: &Path, target_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
     let scratch = root.join(".soro-mutants-worktree");
     let (baseline, mutants) = target_dirs(root, target_dir);
-    let mut removed = Vec::new();
+    let mut paths: Vec<PathBuf> = [scratch, baseline, mutants]
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect();
 
-    for path in [scratch, baseline, mutants] {
-        if path.exists() {
-            fs::remove_dir_all(&path)
-                .with_context(|| format!("failed to remove {}", path.display()))?;
-            removed.push(path);
-        }
-    }
-
+    // The default cache root is also removed when no unrelated content remains.
+    // Determine this without mutating anything, so a dry run is accurate.
     if target_dir.is_none() {
         let default_root = root.join(".soro-mutants-target");
-        if default_root.exists()
-            && fs::read_dir(&default_root)
+        if default_root.is_dir() {
+            let entries = fs::read_dir(&default_root)
                 .with_context(|| format!("failed to inspect {}", default_root.display()))?
-                .next()
-                .is_none()
-        {
-            fs::remove_dir(&default_root)
-                .with_context(|| format!("failed to remove {}", default_root.display()))?;
+                .collect::<std::io::Result<Vec<_>>>()?;
+            if entries.iter().all(|entry| {
+                matches!(
+                    entry.file_name().to_str(),
+                    Some("baseline" | "mutants-shared")
+                ) && paths.iter().any(|path| path == &entry.path())
+            }) {
+                paths.push(default_root);
+            }
         }
     }
 
-    Ok(removed)
+    Ok(paths)
+}
+
+fn clean_generated_state(
+    root: &Path,
+    target_dir: Option<&Path>,
+    dry_run: bool,
+) -> Result<Vec<PathBuf>> {
+    let paths = managed_cleanup_paths(root, target_dir)?;
+    if !dry_run {
+        for path in &paths {
+            if target_dir.is_none() && path == &root.join(".soro-mutants-target") {
+                fs::remove_dir(path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            } else {
+                fs::remove_dir_all(path)
+                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            }
+        }
+    }
+    Ok(paths)
 }
 
 fn execute_mutant(
@@ -1076,23 +1131,25 @@ fn run_process(
     }
 }
 
-fn print_mutants(mutants: &[Mutant]) {
-    println!("Discovered {} semantic mutants\n", mutants.len());
+fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
+    writeln!(report, "Discovered {} semantic mutants\n", mutants.len())?;
     for mutant in mutants {
-        println!(
+        writeln!(
+            report,
             "{} {:<8} {}:{} {}",
             mutant.id,
             mutant.operator,
             mutant.file.display(),
             mutant.span.line,
             mutant.description
-        );
-        println!("    - {}", mutant.original.trim());
-        println!("    + {}\n", mutant.replacement.trim());
+        )?;
+        writeln!(report, "    - {}", mutant.original.trim())?;
+        writeln!(report, "    + {}\n", mutant.replacement.trim())?;
     }
+    Ok(())
 }
 
-fn print_summary(results: &[MutantResult]) {
+fn print_summary(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
     let killed = results
         .iter()
         .filter(|result| matches!(result.outcome, Outcome::Killed))
@@ -1116,13 +1173,14 @@ fn print_summary(results: &[MutantResult]) {
         killed as f64 * 100.0 / viable as f64
     };
 
-    println!("\nSummary");
-    println!("  Generated : {}", results.len());
-    println!("  Killed    : {}", killed);
-    println!("  Survived  : {}", survived);
-    println!("  Unviable  : {}", unviable);
-    println!("  Timeout   : {}", timeout);
-    println!("  Score     : {:.1}%", score);
+    writeln!(report, "\nSummary")?;
+    writeln!(report, "  Generated : {}", results.len())?;
+    writeln!(report, "  Killed    : {}", killed)?;
+    writeln!(report, "  Survived  : {}", survived)?;
+    writeln!(report, "  Unviable  : {}", unviable)?;
+    writeln!(report, "  Timeout   : {}", timeout)?;
+    writeln!(report, "  Score     : {:.1}%", score)?;
+    Ok(())
 }
 
 fn outcome_label(outcome: &Outcome) -> &'static str {
