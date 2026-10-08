@@ -197,6 +197,27 @@ The unmodified SDK-28 example passed its baseline test.
 
 The official example explicitly checks the authorization tree after creating an offer, so deleting `seller.require_auth()` is detected. This is an external positive control independent of the Phoenix fixtures.
 
+
+### `single_offer::trade` token direction
+
+Configured test command:
+
+```bash
+RUSTUP_TOOLCHAIN=1.95.0 cargo test -q
+```
+
+`trade()` performs three direct token transfers: buyer → contract, contract → buyer, and contract → seller. `TOKEN-001` reversed the sender/recipient arguments independently for each transfer.
+
+| Operator | Mutation | Result |
+| --- | --- | --- |
+| TOKEN-001 | reverse buyer → contract transfer | KILLED |
+| TOKEN-001 | reverse contract → buyer transfer | KILLED |
+| TOKEN-001 | reverse contract → seller transfer | KILLED |
+
+Semantic mutation score for the three token-direction mutants: **100%**.
+
+The example asserts the resulting token balances and authorization structure, so every reversed value-flow direction is detected. This provides an external positive control for `TOKEN-001`.
+
 ## RWA Toolkit Stellar contracts
 
 Repository: `RWA-ToolKit/stellar-rwa-contracts`
