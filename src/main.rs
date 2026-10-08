@@ -118,17 +118,26 @@ enum ProcessResult {
     Timeout,
 }
 
-struct AuthVisitor<'a> {
+struct FunctionState {
+    current_function: Option<String>,
+    address_params: Vec<String>,
+    token_client_vars: Vec<String>,
+    storage_accessor_vars: Vec<String>,
+    env_params: Vec<String>,
+}
+
+struct SemanticVisitor<'a> {
     source: &'a str,
     file: PathBuf,
     current_function: Option<String>,
     address_params: Vec<String>,
     token_client_vars: Vec<String>,
     storage_accessor_vars: Vec<String>,
+    env_params: Vec<String>,
     mutants: Vec<Mutant>,
 }
 
-impl<'a> AuthVisitor<'a> {
+impl<'a> SemanticVisitor<'a> {
     fn new(source: &'a str, file: PathBuf) -> Self {
         Self {
             source,
@@ -137,35 +146,30 @@ impl<'a> AuthVisitor<'a> {
             address_params: Vec::new(),
             token_client_vars: Vec::new(),
             storage_accessor_vars: Vec::new(),
+            env_params: Vec::new(),
             mutants: Vec::new(),
         }
     }
 
-    fn enter_signature(
-        &mut self,
-        sig: &Signature,
-    ) -> (Option<String>, Vec<String>, Vec<String>, Vec<String>) {
-        let previous_name = self.current_function.replace(sig.ident.to_string());
-        let previous_params = std::mem::replace(&mut self.address_params, address_params(sig));
-        let previous_token_clients =
-            std::mem::replace(&mut self.token_client_vars, token_client_params(sig));
-        let previous_storage_accessors = std::mem::take(&mut self.storage_accessor_vars);
-        (
-            previous_name,
-            previous_params,
-            previous_token_clients,
-            previous_storage_accessors,
-        )
+    fn enter_signature(&mut self, sig: &Signature) -> FunctionState {
+        FunctionState {
+            current_function: self.current_function.replace(sig.ident.to_string()),
+            address_params: std::mem::replace(&mut self.address_params, address_params(sig)),
+            token_client_vars: std::mem::replace(
+                &mut self.token_client_vars,
+                token_client_params(sig),
+            ),
+            storage_accessor_vars: std::mem::take(&mut self.storage_accessor_vars),
+            env_params: std::mem::replace(&mut self.env_params, env_params(sig)),
+        }
     }
 
-    fn leave_signature(
-        &mut self,
-        previous: (Option<String>, Vec<String>, Vec<String>, Vec<String>),
-    ) {
-        self.current_function = previous.0;
-        self.address_params = previous.1;
-        self.token_client_vars = previous.2;
-        self.storage_accessor_vars = previous.3;
+    fn leave_signature(&mut self, previous: FunctionState) {
+        self.current_function = previous.current_function;
+        self.address_params = previous.address_params;
+        self.token_client_vars = previous.token_client_vars;
+        self.storage_accessor_vars = previous.storage_accessor_vars;
+        self.env_params = previous.env_params;
     }
 
     fn push_mutant(
@@ -197,7 +201,7 @@ impl<'a> AuthVisitor<'a> {
     }
 }
 
-impl<'ast> Visit<'ast> for AuthVisitor<'_> {
+impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         let previous = self.enter_signature(&node.sig);
         visit::visit_item_fn(self, node);
@@ -229,7 +233,8 @@ impl<'ast> Visit<'ast> for AuthVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if node.method == "publish" && is_events_receiver(&node.receiver) {
+        if node.method == "publish" && is_soroban_events_receiver(&node.receiver, &self.env_params)
+        {
             self.push_mutant(
                 "EVENT-001",
                 node.span(),
@@ -469,7 +474,7 @@ fn discover_mutants(
             .unwrap_or(entry.path())
             .to_path_buf();
 
-        let mut visitor = AuthVisitor::new(&source, relative);
+        let mut visitor = SemanticVisitor::new(&source, relative);
         visitor.visit_file(&syntax);
         mutants.extend(visitor.mutants);
     }
@@ -529,6 +534,32 @@ fn type_is_address(ty: &Type) -> bool {
             .map(|segment| segment.ident == "Address")
             .unwrap_or(false),
         Type::Reference(reference) => type_is_address(&reference.elem),
+        _ => false,
+    }
+}
+
+fn env_params(sig: &Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(pat_type) if type_is_env(&pat_type.ty) => match pat_type.pat.as_ref() {
+                Pat::Ident(ident) => Some(ident.ident.to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn type_is_env(ty: &Type) -> bool {
+    match ty {
+        Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident == "Env")
+            .unwrap_or(false),
+        Type::Reference(reference) => type_is_env(&reference.elem),
         _ => false,
     }
 }
@@ -647,11 +678,13 @@ fn is_ttl_receiver(expr: &Expr, known_accessors: &[String]) -> bool {
         .unwrap_or(false)
 }
 
-fn is_events_receiver(expr: &Expr) -> bool {
+fn is_soroban_events_receiver(expr: &Expr, env_params: &[String]) -> bool {
     match expr {
-        Expr::MethodCall(call) => call.method == "events" || is_events_receiver(&call.receiver),
-        Expr::Reference(reference) => is_events_receiver(&reference.expr),
-        Expr::Paren(paren) => is_events_receiver(&paren.expr),
+        Expr::MethodCall(call) if call.method == "events" => receiver_ident(&call.receiver)
+            .map(|name| env_params.iter().any(|candidate| candidate == &name))
+            .unwrap_or(false),
+        Expr::Reference(reference) => is_soroban_events_receiver(&reference.expr, env_params),
+        Expr::Paren(paren) => is_soroban_events_receiver(&paren.expr, env_params),
         _ => false,
     }
 }
@@ -1055,7 +1088,7 @@ mod tests {
 
     fn mutations_for(source: &str) -> Vec<Mutant> {
         let syntax = syn::parse_file(source).expect("test source should parse");
-        let mut visitor = AuthVisitor::new(source, PathBuf::from("src/lib.rs"));
+        let mut visitor = SemanticVisitor::new(source, PathBuf::from("src/lib.rs"));
         visitor.visit_file(&syntax);
         visitor.mutants
     }
@@ -1301,6 +1334,32 @@ mod tests {
         );
 
         assert!(!mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn generic_events_publish_chain_is_not_treated_as_soroban_event_publication() {
+        let mutants = mutations_for(
+            r#"
+            fn log(logger: Logger) {
+                logger.events().publish("hello");
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn borrowed_env_event_publication_is_detected() {
+        let mutants = mutations_for(
+            r#"
+            fn emit(env: &Env) {
+                env.events().publish(("admin", "changed"), ());
+            }
+            "#,
+        );
+
+        assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
     }
 
     #[test]

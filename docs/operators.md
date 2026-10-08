@@ -50,9 +50,9 @@ Arbitrary methods named `extend_ttl` are ignored. The operator asks whether test
 
 ## EVENT-001 — remove direct event publication
 
-Recognizes direct Soroban event publication through an `.events().publish(...)` receiver chain and replaces the publication with `()`.
+Recognizes direct Soroban event publication through `.events().publish(...)` when `.events()` is called on an explicit `Env` / `&Env` function parameter, and replaces the publication with `()`.
 
-It does not yet cover every typed event abstraction.
+Generic objects that happen to expose `.events().publish(...)` are ignored. It does not yet cover every typed event abstraction or event accessors stored in locals/fields.
 
 ## TOKEN-001 — reverse direct transfer direction
 
