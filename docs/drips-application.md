@@ -132,7 +132,7 @@ Repository-side preparation is complete:
 - CI for formatting, unit tests, Clippy, packaging, and weak/strong semantic fixture outcomes;
 - reproducible benchmark notes against public Soroban repositories;
 - contribution guide, security policy, architecture, operator specification, and roadmap;
-- ten open contribution issues with scoped acceptance criteria, difficulty labels, and category labels.
+- ten open contribution issues with scoped acceptance criteria and suggested difficulty documented in each issue.
 
 Drips-side steps still require the maintainer account:
 
