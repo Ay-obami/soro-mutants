@@ -104,6 +104,7 @@ See [docs/benchmark.md](docs/benchmark.md) for exact commands, commit hashes, ex
 - [Operator specification](docs/operators.md)
 - [Benchmark evidence](docs/benchmark.md)
 - [Roadmap](docs/roadmap.md)
+- [Drips / Stellar Wave maintainer brief](docs/drips-application.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
