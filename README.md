@@ -88,6 +88,10 @@ cargo soro-mutants test /path/to/project --json
 
 In JSON mode, stdout is reserved for JSON so it can be piped directly into `jq` or CI tooling. Compiler/test diagnostics may still appear on stderr.
 
+JSON reports include `schema_version: 1` and a `mutants` array (`list`) or `results`
+array (`test`). See the [JSON compatibility policy and example](docs/json-output.md),
+including how to update consumers of the earlier unversioned arrays.
+
 Results are classified as:
 
 - `KILLED`: at least one configured test failed after the mutation.

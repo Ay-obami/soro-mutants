@@ -127,6 +127,34 @@ struct MutantResult {
     outcome: Outcome,
 }
 
+const JSON_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Serialize)]
+struct ListReport<'a> {
+    schema_version: u32,
+    mutants: &'a [Mutant],
+}
+
+#[derive(Serialize)]
+struct TestReport<'a> {
+    schema_version: u32,
+    results: &'a [MutantResult],
+}
+
+fn list_report(mutants: &[Mutant]) -> ListReport<'_> {
+    ListReport {
+        schema_version: JSON_SCHEMA_VERSION,
+        mutants,
+    }
+}
+
+fn test_report(results: &[MutantResult]) -> TestReport<'_> {
+    TestReport {
+        schema_version: JSON_SCHEMA_VERSION,
+        results,
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ProcessResult {
     Passed,
@@ -339,7 +367,7 @@ fn main() -> Result<()> {
                 function.as_deref(),
             )?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&mutants)?);
+                println!("{}", serde_json::to_string_pretty(&list_report(&mutants))?);
             } else {
                 print_mutants(&mutants);
             }
@@ -366,7 +394,7 @@ fn main() -> Result<()> {
             )?;
             if mutants.is_empty() {
                 if json {
-                    println!("[]");
+                    println!("{}", serde_json::to_string_pretty(&test_report(&[]))?);
                 } else {
                     println!("No matching Soroban semantic mutants found.");
                 }
@@ -423,7 +451,7 @@ fn main() -> Result<()> {
             }
 
             if json {
-                println!("{}", serde_json::to_string_pretty(&results)?);
+                println!("{}", serde_json::to_string_pretty(&test_report(&results))?);
             } else {
                 print_summary(&results);
             }
@@ -1103,6 +1131,82 @@ fn outcome_label(outcome: &Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn report_mutant() -> Mutant {
+        Mutant {
+            id: "M0001".into(),
+            operator: "AUTH-001".into(),
+            file: PathBuf::from("src/lib.rs"),
+            function: Some("guarded".into()),
+            span: SourceSpan {
+                line: 2,
+                column: 4,
+                end_line: 2,
+                end_column: 23,
+            },
+            original: "user.require_auth()".into(),
+            replacement: "()".into(),
+            description: "remove user.require_auth()".into(),
+            start_byte: 35,
+            end_byte: 54,
+        }
+    }
+
+    #[test]
+    fn json_list_preserves_mutant_fields() {
+        let mutants = [report_mutant()];
+        let report = serde_json::to_value(list_report(&mutants)).unwrap();
+        assert_eq!(
+            report,
+            serde_json::json!({
+                "schema_version": 1,
+                "mutants": [{
+                "id": "M0001", "operator": "AUTH-001",
+                    "file": "src/lib.rs", "function": "guarded",
+                "span": {"line": 2, "column": 4, "end_line": 2, "end_column": 23},
+                "original": "user.require_auth()", "replacement": "()",
+                "description": "remove user.require_auth()"
+                }]
+            })
+        );
+        let mut mutant = report_mutant();
+        mutant.function = None;
+        let report = serde_json::to_value(list_report(&[mutant])).unwrap();
+        assert!(report["mutants"][0]["function"].is_null());
+    }
+
+    #[test]
+    fn json_test_preserves_results_and_outcome_labels() {
+        for (outcome, label) in [
+            (Outcome::Killed, "KILLED"),
+            (Outcome::Survived, "SURVIVED"),
+            (Outcome::Unviable, "UNVIABLE"),
+            (Outcome::Timeout, "TIMEOUT"),
+        ] {
+            let results = [MutantResult {
+                mutant: report_mutant(),
+                outcome,
+            }];
+            let report = serde_json::to_value(test_report(&results)).unwrap();
+            let example: serde_json::Value =
+                serde_json::from_str(include_str!("../docs/json-report-example.json")).unwrap();
+            let mut expected = example;
+            expected["results"][0]["outcome"] = label.into();
+            assert_eq!(report, expected);
+        }
+    }
+
+    #[test]
+    fn empty_json_reports_are_versioned() {
+        assert_eq!(
+            serde_json::to_value(list_report(&[])).unwrap(),
+            serde_json::json!({"schema_version": 1, "mutants": []})
+        );
+        assert_eq!(
+            serde_json::to_value(test_report(&[])).unwrap(),
+            serde_json::json!({"schema_version": 1, "results": []})
+        );
+    }
 
     fn mutations_for(source: &str) -> Vec<Mutant> {
         let syntax = syn::parse_file(source).expect("test source should parse");

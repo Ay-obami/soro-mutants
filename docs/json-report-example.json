@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "results": [
+    {
+      "mutant": {
+        "id": "M0001",
+        "operator": "AUTH-001",
+        "file": "src/lib.rs",
+        "function": "guarded",
+        "span": { "line": 2, "column": 4, "end_line": 2, "end_column": 23 },
+        "original": "user.require_auth()",
+        "replacement": "()",
+        "description": "remove user.require_auth()"
+      },
+      "outcome": "SURVIVED"
+    }
+  ]
+}
