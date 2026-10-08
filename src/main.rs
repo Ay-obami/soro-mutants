@@ -46,6 +46,9 @@ enum Commands {
         /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
+        /// Print only the number of matching semantic mutants.
+        #[arg(long, conflicts_with = "json")]
+        count_only: bool,
     },
     /// Execute semantic mutants against a Cargo test suite.
     Test {
@@ -359,6 +362,7 @@ fn main() -> Result<()> {
             file,
             function,
             json,
+            count_only,
         } => {
             let mutants = discover_mutants(
                 &path,
@@ -366,7 +370,9 @@ fn main() -> Result<()> {
                 file.as_deref(),
                 function.as_deref(),
             )?;
-            if json {
+            if count_only {
+                println!("{}", mutants.len());
+            } else if json {
                 println!("{}", serde_json::to_string_pretty(&list_report(&mutants))?);
             } else {
                 print_mutants(&mutants);

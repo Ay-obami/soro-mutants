@@ -53,6 +53,12 @@ List semantic mutants without executing them:
 cargo soro-mutants list /path/to/project
 ```
 
+For scripts that only need the number of matching mutants:
+
+```bash
+count=$(cargo soro-mutants list /path/to/project --operator AUTH-001 --count-only)
+```
+
 Filter by operator, file, or function:
 
 ```bash
