@@ -29,6 +29,31 @@ struct Cli {
     command: Commands,
 }
 
+/// All built-in mutation operators, sorted by ID.
+///
+/// Each entry is `(id, one-line description)`. The slice is kept in ascending
+/// lexicographic order so that `cargo soro-mutants operators` always emits a
+/// deterministic list without any runtime sorting.
+const BUILTIN_OPERATORS: &[(&str, &str)] = &[
+    ("AUTH-001", "remove a require_auth() call"),
+    (
+        "AUTH-002",
+        "replace require_auth() receiver with a different Address parameter",
+    ),
+    (
+        "EVENT-001",
+        "remove a Soroban event publication (env.events().publish(...))",
+    ),
+    (
+        "TOKEN-001",
+        "swap the sender and recipient arguments of a token transfer",
+    ),
+    (
+        "TTL-001",
+        "remove an extend_ttl() call on a Soroban storage accessor",
+    ),
+];
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Discover semantic mutants without executing them.
@@ -112,6 +137,8 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Print all built-in operator IDs and their descriptions.
+    Operators,
 }
 
 const OPERATOR_IDS: &[&str] = &["AUTH-001", "AUTH-002", "EVENT-001", "TOKEN-001", "TTL-001"];
@@ -604,6 +631,9 @@ fn main() -> Result<()> {
                     );
                 }
             }
+        }
+        Commands::Operators => {
+            print_operators(&mut io::stdout())?;
         }
     }
 
@@ -1258,6 +1288,14 @@ fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
     Ok(())
 }
 
+fn print_operators(report: &mut dyn Write) -> Result<()> {
+    for (id, description) in BUILTIN_OPERATORS {
+        writeln!(report, "{:<10}  {}", id, description)?;
+    }
+    writeln!(report, "\n{} built-in operators", BUILTIN_OPERATORS.len())?;
+    Ok(())
+}
+
 fn print_summary(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
     let killed = results
         .iter()
@@ -1304,6 +1342,51 @@ fn outcome_label(outcome: &Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_operators_are_sorted_by_id() {
+        let ids: Vec<&str> = BUILTIN_OPERATORS.iter().map(|(id, _)| *id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            ids, sorted,
+            "BUILTIN_OPERATORS must be in ascending lexicographic order"
+        );
+    }
+
+    #[test]
+    fn builtin_operator_ids_are_unique() {
+        let ids: Vec<&str> = BUILTIN_OPERATORS.iter().map(|(id, _)| *id).collect();
+        let mut seen = std::collections::HashSet::new();
+        for id in &ids {
+            assert!(seen.insert(*id), "duplicate operator ID: {id}");
+        }
+    }
+
+    #[test]
+    fn builtin_operator_descriptions_are_non_empty() {
+        for (id, desc) in BUILTIN_OPERATORS {
+            assert!(!desc.is_empty(), "operator {id} has an empty description");
+        }
+    }
+
+    #[test]
+    fn print_operators_emits_every_id_with_count() {
+        let mut buf = Vec::new();
+        print_operators(&mut buf).expect("print_operators should succeed");
+        let output = String::from_utf8(buf).unwrap();
+        for (id, _desc) in BUILTIN_OPERATORS {
+            assert!(
+                output.contains(id),
+                "output should contain operator id {id}"
+            );
+        }
+        let count_line = format!("{} built-in operators", BUILTIN_OPERATORS.len());
+        assert!(
+            output.contains(&count_line),
+            "output should contain operator count; got:\n{output}"
+        );
+    }
 
     fn report_mutant() -> Mutant {
         Mutant {
