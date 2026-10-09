@@ -33,3 +33,5 @@ serde_json = "1"
 syn = { version = "2", features = ["full", "visit"] }
 walkdir = "2"
 wait-timeout = "0.2"
+# Keep compatibility with the Rust 1.85 MSRV (newer globset releases require 1.88).
+globset = "=0.4.18"
