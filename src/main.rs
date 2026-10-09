@@ -35,10 +35,22 @@ struct Cli {
 /// deterministic list without any runtime sorting.
 const BUILTIN_OPERATORS: &[(&str, &str)] = &[
     ("AUTH-001", "remove a require_auth() call"),
-    ("AUTH-002", "replace require_auth() receiver with a different Address parameter"),
-    ("EVENT-001", "remove a Soroban event publication (env.events().publish(...))"),
-    ("TOKEN-001", "swap the sender and recipient arguments of a token transfer"),
-    ("TTL-001",   "remove an extend_ttl() call on a Soroban storage accessor"),
+    (
+        "AUTH-002",
+        "replace require_auth() receiver with a different Address parameter",
+    ),
+    (
+        "EVENT-001",
+        "remove a Soroban event publication (env.events().publish(...))",
+    ),
+    (
+        "TOKEN-001",
+        "swap the sender and recipient arguments of a token transfer",
+    ),
+    (
+        "TTL-001",
+        "remove an extend_ttl() call on a Soroban storage accessor",
+    ),
 ];
 
 #[derive(Subcommand, Debug)]
@@ -1245,7 +1257,10 @@ mod tests {
         let ids: Vec<&str> = BUILTIN_OPERATORS.iter().map(|(id, _)| *id).collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
-        assert_eq!(ids, sorted, "BUILTIN_OPERATORS must be in ascending lexicographic order");
+        assert_eq!(
+            ids, sorted,
+            "BUILTIN_OPERATORS must be in ascending lexicographic order"
+        );
     }
 
     #[test]
@@ -1270,7 +1285,10 @@ mod tests {
         print_operators(&mut buf).expect("print_operators should succeed");
         let output = String::from_utf8(buf).unwrap();
         for (id, _desc) in BUILTIN_OPERATORS {
-            assert!(output.contains(id), "output should contain operator id {id}");
+            assert!(
+                output.contains(id),
+                "output should contain operator id {id}"
+            );
         }
         let count_line = format!("{} built-in operators", BUILTIN_OPERATORS.len());
         assert!(
