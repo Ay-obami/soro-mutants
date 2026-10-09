@@ -141,15 +141,17 @@ enum Commands {
     Operators,
 }
 
-const OPERATOR_IDS: &[&str] = &["AUTH-001", "AUTH-002", "EVENT-001", "TOKEN-001", "TTL-001"];
-
 fn parse_operator(value: &str) -> std::result::Result<String, String> {
-    if OPERATOR_IDS.contains(&value) {
+    if BUILTIN_OPERATORS.iter().any(|(id, _)| *id == value) {
         Ok(value.to_owned())
     } else {
+        let valid_ids = BUILTIN_OPERATORS
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+            .join(", ");
         Err(format!(
-            "unknown operator ID {value:?}; valid IDs: {}",
-            OPERATOR_IDS.join(", ")
+            "unknown operator ID {value:?}; valid IDs: {valid_ids}"
         ))
     }
 }
