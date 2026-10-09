@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use proc_macro2::Span;
 use serde::Serialize;
 use std::{
@@ -61,8 +62,14 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Only list mutants produced by this operator ID, such as AUTH-001.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_operator)]
         operator: Option<String>,
+        /// Exclude a project-relative file or directory glob (repeatable).
+        #[arg(long, value_name = "GLOB", value_parser = parse_exclude_glob)]
+        exclude_path: Vec<globset::Glob>,
+        /// Select shard INDEX/TOTAL (one-based), after discovery filters.
+        #[arg(long, value_name = "INDEX/TOTAL")]
+        shard: Option<Shard>,
         /// Only list mutants in source files ending with this path.
         #[arg(long)]
         file: Option<String>,
@@ -85,8 +92,14 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Only execute mutants produced by this operator ID, such as AUTH-001.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_operator)]
         operator: Option<String>,
+        /// Exclude a project-relative file or directory glob (repeatable).
+        #[arg(long, value_name = "GLOB", value_parser = parse_exclude_glob)]
+        exclude_path: Vec<globset::Glob>,
+        /// Select shard INDEX/TOTAL (one-based), after discovery filters.
+        #[arg(long, value_name = "INDEX/TOTAL")]
+        shard: Option<Shard>,
         /// Only execute mutants in source files ending with this path.
         #[arg(long)]
         file: Option<String>,
@@ -126,6 +139,76 @@ enum Commands {
     },
     /// Print all built-in operator IDs and their descriptions.
     Operators,
+}
+
+fn parse_operator(value: &str) -> std::result::Result<String, String> {
+    if BUILTIN_OPERATORS.iter().any(|(id, _)| *id == value) {
+        Ok(value.to_owned())
+    } else {
+        let valid_ids = BUILTIN_OPERATORS
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(format!(
+            "unknown operator ID {value:?}; valid IDs: {valid_ids}"
+        ))
+    }
+}
+
+fn parse_exclude_glob(value: &str) -> std::result::Result<globset::Glob, String> {
+    GlobBuilder::new(value)
+        .literal_separator(true)
+        .backslash_escape(true)
+        .build()
+        .map_err(|error| format!("invalid exclude-path glob {value:?}: {error}"))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Shard {
+    index: usize,
+    total: usize,
+}
+
+impl std::str::FromStr for Shard {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let invalid =
+            || "expected INDEX/TOTAL with 1 <= INDEX <= TOTAL (positive integers)".to_owned();
+        let (index, total) = value.split_once('/').ok_or_else(invalid)?;
+        if index.is_empty()
+            || total.is_empty()
+            || !index.bytes().all(|b| b.is_ascii_digit())
+            || !total.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(invalid());
+        }
+        let index = index.parse::<usize>().map_err(|_| invalid())?;
+        let total = total.parse::<usize>().map_err(|_| invalid())?;
+        if index == 0 || total == 0 || index > total {
+            return Err(invalid());
+        }
+        Ok(Self { index, total })
+    }
+}
+
+fn select_shard(mutants: Vec<Mutant>, shard: Option<Shard>) -> Vec<Mutant> {
+    let Some(shard) = shard else { return mutants };
+    mutants
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| index % shard.total == shard.index - 1)
+        .map(|(_, mutant)| mutant)
+        .collect()
+}
+
+fn exclusion_set(patterns: Vec<globset::Glob>) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(pattern);
+    }
+    builder.build().context("cannot build exclude-path matcher")
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -402,6 +485,8 @@ fn main() -> Result<()> {
         Commands::List {
             path,
             operator,
+            exclude_path,
+            shard,
             file,
             function,
             json,
@@ -413,7 +498,9 @@ fn main() -> Result<()> {
                 operator.as_deref(),
                 file.as_deref(),
                 function.as_deref(),
+                &exclusion_set(exclude_path)?,
             )?;
+            let mutants = select_shard(mutants, shard);
             let mut report = report_writer(output.as_deref())?;
             if count_only {
                 writeln!(report, "{}", mutants.len())?;
@@ -430,6 +517,8 @@ fn main() -> Result<()> {
         Commands::Test {
             path,
             operator,
+            exclude_path,
+            shard,
             file,
             function,
             test_dir,
@@ -447,7 +536,9 @@ fn main() -> Result<()> {
                 operator.as_deref(),
                 file.as_deref(),
                 function.as_deref(),
+                &exclusion_set(exclude_path)?,
             )?;
+            let mutants = select_shard(mutants, shard);
             let mut report = report_writer(output.as_deref())?;
             if mutants.is_empty() {
                 if json {
@@ -579,16 +670,18 @@ fn discover_mutants(
     operator: Option<&str>,
     file_filter: Option<&str>,
     function_filter: Option<&str>,
+    exclusions: &GlobSet,
 ) -> Result<Vec<Mutant>> {
     let root = root
         .canonicalize()
         .with_context(|| format!("cannot resolve {}", root.display()))?;
     let mut mutants = Vec::new();
 
-    for entry in WalkDir::new(&root)
-        .into_iter()
-        .filter_entry(|entry| !ignored_entry(entry, &root))
-    {
+    for entry in WalkDir::new(&root).into_iter().filter_entry(|entry| {
+        !ignored_entry(entry, &root)
+            && (entry.path() == root
+                || !exclusions.is_match(entry.path().strip_prefix(&root).unwrap_or(entry.path())))
+    }) {
         let entry = entry?;
         if !entry.file_type().is_file()
             || entry.path().extension().and_then(|s| s.to_str()) != Some("rs")
@@ -1742,7 +1835,7 @@ mod tests {
         )
         .expect("fixture source should be written");
 
-        let mutants = discover_mutants(&root, Some("AUTH-001"), None, None)
+        let mutants = discover_mutants(&root, Some("AUTH-001"), None, None, &GlobSet::empty())
             .expect("fixture mutation discovery should work");
         let mutant = mutants.first().expect("AUTH-001 should be discovered");
 

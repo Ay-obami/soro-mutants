@@ -82,6 +82,61 @@ cargo soro-mutants test /path/to/project \
   --test-command 'cargo test -q -p phoenix-pool admin_change'
 ```
 
+### Discovery filters and CI shards
+
+Both `list` and `test` validate `--operator` before accessing the project. IDs are
+case-sensitive: `AUTH-001`, `AUTH-002`, `EVENT-001`, `TOKEN-001`, and `TTL-001`.
+Unknown IDs exit with code 2 and list valid IDs; a valid ID with no matches succeeds.
+
+Exclude generated or vendored sources from discovery with repeatable globs:
+
+```bash
+cargo soro-mutants list /path/to/project \
+  --exclude-path 'vendor' --exclude-path 'generated/**' \
+  --exclude-path '**/*_generated.rs'
+```
+
+Patterns match the entire project-relative path, using `/` separators. `*` matches
+within one path component, `?` matches one non-separator character, and `**/`
+matches zero or more directory levels. Character classes (`[ab]`) and alternatives
+(`{generated,vendor}/**`) are supported; backslash escapes a literal metacharacter.
+Quote patterns to prevent shell expansion. A matching directory is pruned with all
+its descendants, so `vendor` excludes the root vendor directory, while `**/vendor`
+also matches nested vendor directories. `*.rs` matches only root Rust files;
+`**/*.rs` matches Rust files at any depth. These are globs, not gitignore rules:
+there is no negation/re-inclusion, and directory patterns need no trailing slash.
+Malformed patterns exit with code 2.
+
+Exclusions apply before reading/parsing source and win over `--file`, `--function`,
+and `--operator` filters. Existing ignored directories (`.git`, `target`,
+`.soro-mutants-target`, `.soro-mutants-worktree`, `mutants.out`, `node_modules`)
+remain ignored. Excluded source is still copied into mutation worktrees so builds
+and tests can use it; exclusions change mutation discovery only.
+
+Use `--shard INDEX/TOTAL` to divide a filtered mutant set into CI jobs:
+
+```bash
+cargo soro-mutants list /path/to/project --shard 1/4 --json
+cargo soro-mutants test /path/to/project --shard 1/4 --json --output shard-1.json
+```
+
+Shard numbers are one-based (`1 <= INDEX <= TOTAL`); invalid values exit with code
+2. After all discovery filters, mutants are sorted by relative file path, source
+byte offset, operator ID, and replacement text, then assigned IDs. The mutant at
+zero-based position `i` belongs to shard `(i % TOTAL) + 1`. IDs are retained rather
+than renumbered within each shard. For identical source and filters, shards are
+repeatable and disjoint, and their union equals the unsharded set. Changing the
+source or filters can change IDs and shard membership.
+
+`list`, `test`, text, JSON, and `--output` use the same selected order; `--count-only`
+counts only the selected shard. JSON schema and mutant fields remain unchanged.
+Empty shards succeed with no mutants and do not run a baseline. Each nonempty
+shard runs its own baseline, then executes its mutants serially. Run concurrent
+shards in **separate project checkouts and cache directories** (for example, separate
+CI jobs); the runner's scratch directory is shared within one checkout. Keep the
+same source revision, filters, and total shard count across all jobs. Scores in
+individual reports describe only that shard; aggregate results for a whole-run score.
+
 Soro Mutants removes each temporary source worktree automatically. Baseline and mutant Cargo build caches are intentionally retained for reuse between runs. Preview exactly which Soro Mutants-managed paths would be removed before reclaiming disk space:
 
 ```bash
