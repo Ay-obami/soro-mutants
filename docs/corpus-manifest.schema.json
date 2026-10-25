@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Ay-obami/soro-mutants/blob/main/docs/corpus-manifest.schema.json",
+  "title": "Soro Mutants corpus manifest v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "entries"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Major schema version. Readers must reject versions they do not support."
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/entry"
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "nonempty": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "outcome": {
+      "enum": [
+        "KILLED",
+        "SURVIVED",
+        "UNVIABLE",
+        "TIMEOUT"
+      ]
+    },
+    "entry": {
+      "type": "object",
+      "required": [
+        "id",
+        "operator",
+        "source_pattern",
+        "mutation",
+        "expectations",
+        "provenance"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonempty"
+        },
+        "operator": {
+          "type": "string",
+          "pattern": "^[A-Z]+-[0-9]{3}$"
+        },
+        "source_pattern": {
+          "type": "object",
+          "required": [
+            "language",
+            "code"
+          ],
+          "properties": {
+            "language": {
+              "const": "rust"
+            },
+            "code": {
+              "$ref": "#/$defs/nonempty"
+            }
+          },
+          "additionalProperties": true
+        },
+        "mutation": {
+          "type": "object",
+          "required": [
+            "original",
+            "replacement"
+          ],
+          "properties": {
+            "original": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "replacement": {
+              "$ref": "#/$defs/nonempty"
+            }
+          },
+          "additionalProperties": true
+        },
+        "expectations": {
+          "type": "object",
+          "required": [
+            "weak",
+            "strong"
+          ],
+          "properties": {
+            "weak": {
+              "$ref": "#/$defs/outcome"
+            },
+            "strong": {
+              "$ref": "#/$defs/outcome"
+            }
+          },
+          "additionalProperties": true
+        },
+        "provenance": {
+          "type": "object",
+          "required": [
+            "kind",
+            "reference"
+          ],
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/nonempty"
+            },
+            "reference": {
+              "$ref": "#/$defs/nonempty"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

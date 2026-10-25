@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "auth-001-required-authorization",
+      "operator": "AUTH-001",
+      "source_pattern": {
+        "language": "rust",
+        "code": "pub fn guarded(user: Address) { user.require_auth(); }"
+      },
+      "mutation": {
+        "original": "user.require_auth()",
+        "replacement": "()"
+      },
+      "expectations": {
+        "weak": "SURVIVED",
+        "strong": "KILLED"
+      },
+      "provenance": {
+        "kind": "repository-fixture",
+        "reference": "fixtures/weak-auth/src/lib.rs",
+        "note": "Authorization removal should be caught by strong tests."
+      }
+    },
+    {
+      "id": "event-001-publish-removal",
+      "operator": "EVENT-001",
+      "source_pattern": {
+        "language": "rust",
+        "code": "env.events().publish((symbol_short!(\"paid\"),), amount);"
+      },
+      "mutation": {
+        "original": "env.events().publish((symbol_short!(\"paid\"),), amount)",
+        "replacement": "()"
+      },
+      "expectations": {
+        "weak": "SURVIVED",
+        "strong": "KILLED"
+      },
+      "provenance": {
+        "kind": "operator-specification",
+        "reference": "docs/operators.md",
+        "note": "Event assertions are needed to kill publication-removal mutants."
+      }
+    }
+  ]
+}

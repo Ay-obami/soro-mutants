@@ -168,6 +168,16 @@ jobs:
 
 This workflow uses the current `main` branch for illustration; pin the tool to a reviewed commit or a release that includes `--github-summary` for reproducible CI. The command still runs the normal baseline and mutant tests, so its exit status is preserved. The GitHub summary file is appended to, not replaced.
 
+### Versioned mutation corpus manifest
+
+Corpus contributors can describe generalized Soroban source patterns, mutation operators, expected weak/strong test outcomes, and provenance using the [version 1 JSON manifest format](docs/corpus-manifest.md). A [JSON Schema](docs/corpus-manifest.schema.json) and [two-entry example](docs/corpus-example.json) are included.
+
+```bash
+cargo soro-mutants validate-corpus docs/corpus-example.json
+```
+
+The validator checks required fields, supported schema versions, unique identifiers, operator format, source snippets, expectations, and provenance without running mutations. Unknown optional fields remain compatible within version 1; breaking changes require a new major version.
+
 ### Deterministic mutant ordering
 
 Discovery sorts mutants by project-relative file path, source start byte, operator ID, and replacement text. Remaining ties are resolved using the source end byte, original text, function name, and description. IDs (`M0001`, `M0002`, …) are assigned only after this sort. Filesystem traversal order does not determine report or shard order.

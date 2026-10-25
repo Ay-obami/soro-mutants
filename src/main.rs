@@ -3,7 +3,7 @@ use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, Valu
 use clap_complete::{generate, Shell};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use proc_macro2::Span;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     env,
     ffi::OsString,
@@ -155,6 +155,11 @@ enum Commands {
         /// List managed paths without removing any files.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Validate a versioned JSON mutation-corpus manifest.
+    ValidateCorpus {
+        /// Path to the JSON corpus manifest.
+        path: PathBuf,
     },
     /// Print all built-in operator IDs and their descriptions.
     Operators,
@@ -847,6 +852,10 @@ fn run() -> Result<()> {
                 }
             }
         }
+        Commands::ValidateCorpus { path } => {
+            let count = validate_corpus(&path)?;
+            println!("Validated {count} corpus entries (schema version 1).");
+        }
         Commands::Operators => {
             print_operators(&mut io::stdout())?;
         }
@@ -862,6 +871,113 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+const CORPUS_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Deserialize)]
+struct CorpusManifest {
+    schema_version: u32,
+    entries: Vec<CorpusEntry>,
+}
+
+#[derive(Deserialize)]
+struct CorpusEntry {
+    id: String,
+    operator: String,
+    source_pattern: CorpusSourcePattern,
+    mutation: CorpusMutation,
+    expectations: CorpusExpectations,
+    provenance: CorpusProvenance,
+}
+
+#[derive(Deserialize)]
+struct CorpusSourcePattern {
+    language: String,
+    code: String,
+}
+
+#[derive(Deserialize)]
+struct CorpusMutation {
+    original: String,
+    replacement: String,
+}
+
+#[derive(Deserialize)]
+struct CorpusExpectations {
+    weak: String,
+    strong: String,
+}
+
+#[derive(Deserialize)]
+struct CorpusProvenance {
+    kind: String,
+    reference: String,
+}
+
+fn validate_corpus(path: &Path) -> Result<usize> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("cannot read corpus manifest {}", path.display()))?;
+    let manifest: CorpusManifest = serde_json::from_str(&content)
+        .with_context(|| format!("invalid corpus manifest JSON at {}", path.display()))?;
+    if manifest.schema_version != CORPUS_SCHEMA_VERSION {
+        bail!(
+            "unsupported corpus schema_version {}; expected {}",
+            manifest.schema_version,
+            CORPUS_SCHEMA_VERSION
+        );
+    }
+    if manifest.entries.is_empty() {
+        bail!("corpus manifest entries must not be empty");
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (index, entry) in manifest.entries.iter().enumerate() {
+        let location = format!("entries[{index}]");
+        if entry.id.trim().is_empty() {
+            bail!("{location}.id must not be empty");
+        }
+        if !seen.insert(entry.id.as_str()) {
+            bail!("{location}.id is duplicate: {}", entry.id);
+        }
+        let valid_operator = entry
+            .operator
+            .split_once('-')
+            .is_some_and(|(name, number)| {
+                !name.is_empty()
+                    && name.bytes().all(|byte| byte.is_ascii_uppercase())
+                    && number.len() == 3
+                    && number.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        if !valid_operator {
+            bail!("{location}.operator must match NAME-000 (uppercase family, three digits)");
+        }
+        if entry.source_pattern.language != "rust" {
+            bail!("{location}.source_pattern.language must be rust");
+        }
+        for (field, value) in [
+            ("source_pattern.code", entry.source_pattern.code.as_str()),
+            ("mutation.original", entry.mutation.original.as_str()),
+            ("mutation.replacement", entry.mutation.replacement.as_str()),
+            ("provenance.kind", entry.provenance.kind.as_str()),
+            ("provenance.reference", entry.provenance.reference.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                bail!("{location}.{field} must not be empty");
+            }
+        }
+        if entry.mutation.original == entry.mutation.replacement {
+            bail!("{location}.mutation replacement must differ from original");
+        }
+        for (field, value) in [
+            ("expectations.weak", entry.expectations.weak.as_str()),
+            ("expectations.strong", entry.expectations.strong.as_str()),
+        ] {
+            if !matches!(value, "KILLED" | "SURVIVED" | "UNVIABLE" | "TIMEOUT") {
+                bail!("{location}.{field} must be a known mutation outcome");
+            }
+        }
+    }
+    Ok(manifest.entries.len())
 }
 
 fn append_github_summary(results: &[MutantResult]) -> Result<()> {
