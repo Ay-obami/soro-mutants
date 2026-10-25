@@ -101,6 +101,16 @@ cargo soro-mutants test /path/to/project \
   --test-command 'cargo test -q -p phoenix-pool admin_change'
 ```
 
+For different compile and test budgets, use `--compile-timeout` and `--test-timeout` (seconds):
+
+```bash
+cargo soro-mutants test /path/to/project \
+  --compile-timeout 300 \
+  --test-timeout 60
+```
+
+The existing `--timeout` option defaults to 120 seconds and remains the fallback for both phases. A phase-specific option overrides it only for that phase. The baseline uses the test timeout; a mutant's separate Cargo `--no-run` compile gate uses the compile timeout; mutant test execution uses the test timeout. Custom commands without a recognizable Cargo compile gate run entirely within the test timeout (including any compilation they perform). A timeout during either mutant phase still produces `TIMEOUT`.
+
 ### Deterministic mutant ordering
 
 Discovery sorts mutants by project-relative file path, source start byte, operator ID, and replacement text. Remaining ties are resolved using the source end byte, original text, function name, and description. IDs (`M0001`, `M0002`, …) are assigned only after this sort. Filesystem traversal order does not determine report or shard order.
