@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{fs, process::Command};
 
 fn run(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
@@ -39,6 +39,78 @@ fn markdown_report_is_deterministic_and_includes_links_and_score() {
         "## Timeout (0)\n\n_None._\n\n",
     );
     assert_eq!(report, expected, "Markdown snapshot changed unexpectedly");
+}
+
+#[test]
+fn github_summary_appends_survivors_without_replacing_stdout() {
+    let summary_path = std::env::temp_dir().join(format!(
+        "soro-mutants-summary-{}-{}.md",
+        std::process::id(),
+        "survivors"
+    ));
+    fs::write(&summary_path, "Prior job content\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
+        .args([
+            "test",
+            "fixtures/weak-auth",
+            "--operator",
+            "AUTH-001",
+            "--test-command",
+            "true",
+            "--github-summary",
+        ])
+        .env("GITHUB_STEP_SUMMARY", &summary_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Summary"));
+    let summary = fs::read_to_string(&summary_path).unwrap();
+    assert!(summary.starts_with("Prior job content\n# Soro Mutants Report"));
+    assert!(summary.contains("| Survived | 1 |"));
+    assert!(summary.contains("**Semantic score: 0.0%**"));
+    assert!(summary.contains("[src/lib.rs:11](src/lib.rs#L11)"));
+    fs::remove_file(summary_path).unwrap();
+}
+
+#[test]
+fn github_summary_handles_empty_results_and_missing_environment() {
+    let summary_path = std::env::temp_dir().join(format!(
+        "soro-mutants-summary-{}-empty.md",
+        std::process::id()
+    ));
+    let empty = Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
+        .args([
+            "test",
+            "fixtures/weak-auth",
+            "--operator",
+            "TOKEN-001",
+            "--github-summary",
+        ])
+        .env("GITHUB_STEP_SUMMARY", &summary_path)
+        .output()
+        .unwrap();
+    assert!(empty.status.success());
+    let summary = fs::read_to_string(&summary_path).unwrap();
+    assert!(summary.contains("| Generated | 0 |"));
+    assert!(summary.contains("## Survived (0)"));
+    fs::remove_file(summary_path).unwrap();
+    let local = Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
+        .args([
+            "test",
+            "fixtures/weak-auth",
+            "--operator",
+            "TOKEN-001",
+            "--github-summary",
+        ])
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .output()
+        .unwrap();
+    assert!(local.status.success());
+    assert!(String::from_utf8_lossy(&local.stdout).contains("No matching"));
 }
 
 #[test]

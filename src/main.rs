@@ -131,6 +131,9 @@ enum Commands {
         /// Emit a Markdown report suitable for issues and pull requests.
         #[arg(long, conflicts_with = "json")]
         markdown: bool,
+        /// Append a Markdown report to GITHUB_STEP_SUMMARY when set.
+        #[arg(long)]
+        github_summary: bool,
         /// Write the selected text, JSON, or Markdown report to a file.
         #[arg(long)]
         output: Option<PathBuf>,
@@ -646,6 +649,7 @@ fn run() -> Result<()> {
             test_timeout,
             json,
             markdown,
+            github_summary,
             output,
         } => {
             let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
@@ -673,6 +677,9 @@ fn run() -> Result<()> {
                     print_markdown_report(&mut report, &[])?;
                 } else {
                     writeln!(report, "No matching Soroban semantic mutants found.")?;
+                }
+                if github_summary {
+                    append_github_summary(&[])?;
                 }
                 return Ok(());
             }
@@ -748,6 +755,9 @@ fn run() -> Result<()> {
             } else {
                 print_summary(&mut report, &results)?;
             }
+            if github_summary {
+                append_github_summary(&results)?;
+            }
         }
         Commands::Clean {
             path,
@@ -784,6 +794,21 @@ fn run() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn append_github_summary(results: &[MutantResult]) -> Result<()> {
+    let Some(path) = env::var_os("GITHUB_STEP_SUMMARY").filter(|value| !value.is_empty()) else {
+        // An explicit opt-in remains safe for local runs and non-GitHub CI.
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    let mut summary = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("cannot append GitHub job summary at {}", path.display()))?;
+    print_markdown_report(&mut summary, results)?;
     Ok(())
 }
 
