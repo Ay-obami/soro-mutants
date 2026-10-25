@@ -83,6 +83,15 @@ enum Commands {
         /// Only list mutants inside this function.
         #[arg(long)]
         function: Option<String>,
+        /// Restrict selection to these project-relative paths (repeatable).
+        #[arg(long, value_name = "PATH", conflicts_with = "diff_base")]
+        changed_file: Vec<PathBuf>,
+        /// Restrict selection to files changed against this Git revision.
+        #[arg(long, value_name = "REV", conflicts_with = "changed_file")]
+        diff_base: Option<String>,
+        /// With --diff-base, select only functions intersecting changed lines.
+        #[arg(long, requires = "diff_base")]
+        changed_functions: bool,
         /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
@@ -113,6 +122,15 @@ enum Commands {
         /// Only execute mutants inside this function.
         #[arg(long)]
         function: Option<String>,
+        /// Restrict selection to these project-relative paths (repeatable).
+        #[arg(long, value_name = "PATH", conflicts_with = "diff_base")]
+        changed_file: Vec<PathBuf>,
+        /// Restrict selection to files changed against this Git revision.
+        #[arg(long, value_name = "REV", conflicts_with = "changed_file")]
+        diff_base: Option<String>,
+        /// With --diff-base, select only functions intersecting changed lines.
+        #[arg(long, requires = "diff_base")]
+        changed_functions: bool,
         /// Run the configured test command from this directory relative to PATH.
         #[arg(long)]
         test_dir: Option<PathBuf>,
@@ -688,6 +706,9 @@ fn run() -> Result<()> {
             shard,
             file,
             function,
+            changed_file,
+            diff_base,
+            changed_functions,
             json,
             count_only,
             output,
@@ -698,6 +719,13 @@ fn run() -> Result<()> {
                 file.as_deref(),
                 function.as_deref(),
                 &exclusion_set(exclude_path)?,
+            )?;
+            let mutants = filter_changed_mutants(
+                &path,
+                mutants,
+                &changed_file,
+                diff_base.as_deref(),
+                changed_functions,
             )?;
             let mutants = select_shard(mutants, shard);
             let mut report = report_writer(output.as_deref())?;
@@ -720,6 +748,9 @@ fn run() -> Result<()> {
             shard,
             file,
             function,
+            changed_file,
+            diff_base,
+            changed_functions,
             test_dir,
             target_dir,
             test_command,
@@ -748,6 +779,13 @@ fn run() -> Result<()> {
                 file.as_deref(),
                 function.as_deref(),
                 &exclusion_set(exclude_path)?,
+            )?;
+            let mutants = filter_changed_mutants(
+                &root,
+                mutants,
+                &changed_file,
+                diff_base.as_deref(),
+                changed_functions,
             )?;
             let mutants = select_shard(mutants, shard);
             if !mutants.is_empty() && runner == Runner::Nextest {
@@ -1048,6 +1086,245 @@ fn normalized_args() -> Vec<OsString> {
         args.remove(1);
     }
     args
+}
+
+fn filter_changed_mutants(
+    root: &Path,
+    mutants: Vec<Mutant>,
+    changed_files: &[PathBuf],
+    diff_base: Option<&str>,
+    functions_only: bool,
+) -> Result<Vec<Mutant>> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    if changed_files.is_empty() && diff_base.is_none() {
+        return Ok(mutants);
+    }
+    let root = root.canonicalize()?;
+    let mut selected = BTreeSet::new();
+    let mut git_top = None;
+
+    if let Some(base) = diff_base {
+        if base.starts_with('-') || base.is_empty() {
+            bail!("invalid Git diff base revision");
+        }
+        let output = Command::new("git")
+            .args([
+                "-C",
+                root.to_str().unwrap_or("."),
+                "rev-parse",
+                "--show-toplevel",
+            ])
+            .output()
+            .context("cannot locate Git repository")?;
+        if !output.status.success() {
+            bail!("Git repository metadata is unavailable for --diff-base");
+        }
+        let top = PathBuf::from(String::from_utf8(output.stdout)?.trim()).canonicalize()?;
+        let diff = Command::new("git")
+            .arg("-C")
+            .arg(&top)
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--find-renames",
+                "--diff-filter=ACMR",
+                "--name-only",
+                "-z",
+            ])
+            .arg(base)
+            .arg("--")
+            .output()
+            .context("cannot execute git diff")?;
+        if !diff.status.success() {
+            bail!(
+                "git diff failed for base {base}: {}",
+                String::from_utf8_lossy(&diff.stderr).trim()
+            );
+        }
+        for file in diff
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|value| !value.is_empty())
+        {
+            let full = top.join(String::from_utf8_lossy(file).as_ref());
+            if let Ok(relative) = full.strip_prefix(&root) {
+                selected.insert(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        git_top = Some(top);
+    } else {
+        for file in changed_files {
+            let absolute = root.join(file);
+            let relative = absolute.strip_prefix(&root).unwrap_or(file);
+            if relative.components().any(|part| {
+                matches!(
+                    part,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            }) {
+                bail!(
+                    "--changed-file must be a project-relative path without ..: {}",
+                    file.display()
+                );
+            }
+            selected.insert(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+
+    let mut matching: Vec<Mutant> = mutants
+        .into_iter()
+        .filter(|mutant| selected.contains(&mutant.file.to_string_lossy().replace('\\', "/")))
+        .collect();
+    if !functions_only || matching.is_empty() {
+        return Ok(matching);
+    }
+
+    let ranges = changed_line_ranges(
+        &root,
+        git_top.as_deref().unwrap_or(&root),
+        diff_base.unwrap(),
+    )?;
+    type FunctionSpan = (String, usize, usize);
+    let mut touched: BTreeMap<String, Option<Vec<FunctionSpan>>> = BTreeMap::new();
+    for mutant in &matching {
+        let path = mutant.file.to_string_lossy().replace('\\', "/");
+        if touched.contains_key(&path) {
+            continue;
+        }
+        let Some(changes) = ranges.get(&path) else {
+            touched.insert(path, None);
+            continue;
+        };
+        let source = fs::read_to_string(root.join(&mutant.file))?;
+        let syntax = match syn::parse_file(&source) {
+            Ok(syntax) => syntax,
+            Err(_) => {
+                touched.insert(path, None);
+                continue;
+            }
+        };
+        let mut collector = ChangedFunctionCollector { spans: Vec::new() };
+        collector.visit_file(&syntax);
+        let matching_functions: Vec<_> = collector
+            .spans
+            .into_iter()
+            .filter(|(_, first, last)| {
+                changes
+                    .iter()
+                    .any(|(from, to)| *first <= *to && *last >= *from)
+            })
+            .collect();
+        touched.insert(
+            path,
+            if matching_functions.is_empty() {
+                None
+            } else {
+                Some(matching_functions)
+            },
+        );
+    }
+    matching.retain(|mutant| {
+        let path = mutant.file.to_string_lossy().replace('\\', "/");
+        match touched.get(&path).and_then(|functions| functions.as_ref()) {
+            // When the diff cannot be mapped to a function, retain file-level selection.
+            None => true,
+            Some(functions) => {
+                let Some(name) = mutant.function.as_deref() else {
+                    return true;
+                };
+                functions.iter().any(|(function, from, to)| {
+                    function == name && *from <= mutant.span.line && mutant.span.line <= *to
+                })
+            }
+        }
+    });
+    Ok(matching)
+}
+
+struct ChangedFunctionCollector {
+    spans: Vec<(String, usize, usize)>,
+}
+
+impl<'ast> Visit<'ast> for ChangedFunctionCollector {
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        let span = node.span();
+        self.spans.push((
+            node.sig.ident.to_string(),
+            span.start().line,
+            span.end().line,
+        ));
+        visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
+        let span = node.span();
+        self.spans.push((
+            node.sig.ident.to_string(),
+            span.start().line,
+            span.end().line,
+        ));
+        visit::visit_impl_item_fn(self, node);
+    }
+}
+
+fn changed_line_ranges(
+    root: &Path,
+    git_top: &Path,
+    base: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<(usize, usize)>>> {
+    use std::collections::BTreeMap;
+    let diff = Command::new("git")
+        .args(["-c", "core.quotePath=false", "-C"])
+        .arg(git_top)
+        .args([
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--no-renames",
+            "--unified=0",
+        ])
+        .arg(base)
+        .arg("--")
+        .output()
+        .context("cannot execute git diff for changed functions")?;
+    if !diff.status.success() {
+        bail!(
+            "git diff failed for base {base}: {}",
+            String::from_utf8_lossy(&diff.stderr).trim()
+        );
+    }
+    let mut ranges: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
+    let mut current = None;
+    for line in String::from_utf8_lossy(&diff.stdout).lines() {
+        if let Some(name) = line.strip_prefix("+++ b/") {
+            current = git_top
+                .join(name)
+                .strip_prefix(root)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"));
+        } else if let Some(hunk) = line.strip_prefix("@@ ") {
+            let Some(path) = current.as_ref() else {
+                continue;
+            };
+            let Some(new_lines) = hunk.split_whitespace().find(|part| part.starts_with('+')) else {
+                continue;
+            };
+            let mut parts = new_lines.trim_start_matches('+').split(',');
+            let Ok(start) = parts.next().unwrap_or("").parse::<usize>() else {
+                continue;
+            };
+            let count = parts
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            let end = start.saturating_add(count.saturating_sub(1));
+            ranges.entry(path.clone()).or_default().push((start, end));
+        }
+    }
+    Ok(ranges)
 }
 
 fn discover_mutants(
