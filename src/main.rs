@@ -42,6 +42,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "replace require_auth() receiver with a different Address parameter",
     ),
     (
+        "AUTH-003",
+        "replace require_auth_for_args(...) argument set with an empty Soroban Vec",
+    ),
+    (
         "EVENT-001",
         "remove a Soroban event publication (env.events().publish(...))",
     ),
@@ -572,6 +576,27 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 "()".to_string(),
                 "remove extend_ttl()".to_string(),
             );
+        }
+
+        if node.method == "require_auth_for_args" && node.args.len() == 1 {
+            if let (Some(receiver), Some(env_name)) =
+                (receiver_ident(&node.receiver), self.env_params.first())
+            {
+                if self.address_params.contains(&receiver) {
+                    let replacement = format!("soroban_sdk::Vec::new(&{})", env_name);
+                    let arguments = node.args.first().expect("one argument checked");
+                    if let Some((start, end, _)) = span_to_offsets(self.source, arguments.span()) {
+                        if self.source[start..end] != replacement {
+                            self.push_mutant(
+                                "AUTH-003",
+                                arguments.span(),
+                                replacement,
+                                format!("authorize an empty argument set for {}", receiver),
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         if node.method == "require_auth"
@@ -2795,6 +2820,48 @@ mod tests {
         );
 
         assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn auth_args_mutation_changes_only_argument_expression() {
+        let source = r#"
+            use soroban_sdk::{Address, Env, IntoVal};
+            fn transfer(env: Env, admin: Address, recipient: Address) {
+                admin.require_auth_for_args((recipient.clone(),).into_val(&env));
+            }
+        "#;
+        let mutants = mutations_for(source);
+        let mutant = mutants
+            .iter()
+            .find(|m| m.operator == "AUTH-003")
+            .expect("AUTH-003 mutant");
+        assert_eq!(mutant.function.as_deref(), Some("transfer"));
+        assert_eq!(mutant.original, "(recipient.clone(),).into_val(&env)");
+        assert_eq!(mutant.replacement, "soroban_sdk::Vec::new(&env)");
+        let transformed = format!(
+            "{}{}{}",
+            &source[..mutant.start_byte],
+            mutant.replacement,
+            &source[mutant.end_byte..]
+        );
+        assert!(transformed.contains("admin.require_auth_for_args(soroban_sdk::Vec::new(&env));"));
+        assert!(transformed.contains("use soroban_sdk::{Address, Env, IntoVal};"));
+    }
+
+    #[test]
+    fn auth_args_ignores_unrelated_methods_and_unsupported_receiver_patterns() {
+        let mutants = mutations_for(
+            r#"
+            fn unrelated(env: Env, session: Session, owner: Address) {
+                session.require_auth_for_args(soroban_sdk::Vec::new(&env));
+                owner.clone().require_auth_for_args(soroban_sdk::Vec::new(&env));
+            }
+            fn no_env(owner: Address, args: Args) {
+                owner.require_auth_for_args(args);
+            }
+        "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "AUTH-003"));
     }
 
     #[test]
