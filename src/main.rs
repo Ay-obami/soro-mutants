@@ -129,8 +129,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Emit a Markdown report suitable for issues and pull requests.
-        #[arg(long, conflicts_with = "json")]
+        #[arg(long, conflicts_with_all = ["json", "html"])]
         markdown: bool,
+        /// Emit a standalone, self-contained HTML report.
+        #[arg(long, conflicts_with = "json")]
+        html: bool,
         /// Append a Markdown report to GITHUB_STEP_SUMMARY when set.
         #[arg(long)]
         github_summary: bool,
@@ -705,6 +708,7 @@ fn run() -> Result<()> {
             test_timeout,
             json,
             markdown,
+            html,
             github_summary,
             min_score,
             output,
@@ -732,6 +736,8 @@ fn run() -> Result<()> {
                     )?;
                 } else if markdown {
                     print_markdown_report(&mut report, &[])?;
+                } else if html {
+                    print_html_report(&mut report, &[])?;
                 } else {
                     writeln!(report, "No matching Soroban semantic mutants found.")?;
                 }
@@ -752,7 +758,7 @@ fn run() -> Result<()> {
                 .as_deref()
                 .map(|dir| root.join(dir))
                 .unwrap_or_else(|| root.clone());
-            if !json && !markdown {
+            if !json && !markdown && !html {
                 writeln!(report, "Baseline: {}", test_command)?;
             }
             match run_process(
@@ -762,7 +768,7 @@ fn run() -> Result<()> {
                 &baseline_target_dir,
             )? {
                 ProcessResult::Passed => {
-                    if !json && !markdown {
+                    if !json && !markdown && !html {
                         writeln!(report, "Baseline PASS\n")?;
                     }
                 }
@@ -788,7 +794,7 @@ fn run() -> Result<()> {
                     &mutant_target_root,
                     shared_target,
                 )?;
-                if !json && !markdown {
+                if !json && !markdown && !html {
                     writeln!(
                         report,
                         "{:<10} {:<8} {}:{} {}",
@@ -810,6 +816,8 @@ fn run() -> Result<()> {
                 )?;
             } else if markdown {
                 print_markdown_report(&mut report, &results)?;
+            } else if html {
+                print_html_report(&mut report, &results)?;
             } else {
                 print_summary(&mut report, &results)?;
             }
@@ -1572,6 +1580,113 @@ fn print_summary(report: &mut dyn Write, results: &[MutantResult]) -> Result<()>
     Ok(())
 }
 
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn print_html_report(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    let mut counts = [0usize; 4];
+    let mut by_operator: BTreeMap<&str, [usize; 4]> = BTreeMap::new();
+    for result in results {
+        let index = match result.outcome {
+            Outcome::Killed => 0,
+            Outcome::Survived => 1,
+            Outcome::Unviable => 2,
+            Outcome::Timeout => 3,
+        };
+        counts[index] += 1;
+        by_operator.entry(&result.mutant.operator).or_default()[index] += 1;
+    }
+    let viable = counts[0] + counts[1];
+    let score = if viable == 0 {
+        0.0
+    } else {
+        counts[0] as f64 * 100.0 / viable as f64
+    };
+    report.write_all(r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soro Mutants Report</title>
+<style>
+:root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; background: #f5f7f9; color: #182b38; }
+body { max-width: 1040px; margin: 2rem auto; padding: 0 1.5rem; }
+h1, h2 { line-height: 1.25; }
+section { padding: 1rem 1.5rem; margin: 1rem 0; background: white; border: 1px solid #dce4e9; border-radius: 10px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: .55rem; border-bottom: 1px solid #dce4e9; text-align: left; }
+th { background: #edf2f5; }
+article { border-top: 1px solid #dce4e9; padding: 1rem 0; }
+pre { overflow-x: auto; padding: .75rem; background: #f1f4f5; border-radius: 6px; }
+small { color: #516577; }
+</style>
+</head>
+<body>
+<h1>Soro Mutants Report</h1>
+<section><h2>Summary</h2>
+<table><thead><tr><th>Metric</th><th>Count</th></tr></thead><tbody>
+"#.as_bytes())?;
+    for (name, count) in [
+        ("Generated", results.len()),
+        ("Killed", counts[0]),
+        ("Survived", counts[1]),
+        ("Unviable", counts[2]),
+        ("Timeout", counts[3]),
+    ] {
+        writeln!(report, "<tr><td>{name}</td><td>{count}</td></tr>")?;
+    }
+    writeln!(
+        report,
+        "</tbody></table><p><strong>Semantic score: {score:.1}%</strong> ({}/{viable} viable mutants killed).</p></section>",
+        counts[0]
+    )?;
+    writeln!(report, "<section><h2>By operator</h2><table><thead><tr><th>Operator</th><th>Killed</th><th>Survived</th><th>Unviable</th><th>Timeout</th></tr></thead><tbody>")?;
+    for (operator, values) in by_operator {
+        writeln!(
+            report,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape_html(operator),
+            values[0],
+            values[1],
+            values[2],
+            values[3]
+        )?;
+    }
+    writeln!(
+        report,
+        "</tbody></table></section><section><h2>Mutant details</h2>"
+    )?;
+    if results.is_empty() {
+        writeln!(report, "<p>No matching mutants.</p>")?;
+    }
+    for result in results {
+        let mutant = &result.mutant;
+        writeln!(
+            report,
+            "<article><h3>{} — {} — {}</h3><small>{}:{} (function: {})</small><p>{}</p><p>Original</p><pre><code>{}</code></pre><p>Replacement</p><pre><code>{}</code></pre></article>",
+            escape_html(&mutant.id),
+            escape_html(&mutant.operator),
+            outcome_label(&result.outcome),
+            escape_html(&mutant.file.to_string_lossy()),
+            mutant.span.line,
+            escape_html(mutant.function.as_deref().unwrap_or("unknown")),
+            escape_html(&mutant.description),
+            escape_html(&mutant.original),
+            escape_html(&mutant.replacement)
+        )?;
+    }
+    writeln!(report, "</section></body></html>")?;
+    Ok(())
+}
+
 fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
     let killed = results
         .iter()
@@ -1734,6 +1849,26 @@ mod tests {
             start_byte: 35,
             end_byte: 54,
         }
+    }
+
+    #[test]
+    fn html_report_escapes_untrusted_mutant_source_and_description() {
+        let mut mutant = report_mutant();
+        mutant.original = "<script>alert('x' & \"y\")</script>".into();
+        mutant.description = "<img src=x onerror=alert(1)>".into();
+        let results = [MutantResult {
+            mutant,
+            outcome: Outcome::Survived,
+        }];
+        let mut output = Vec::new();
+        print_html_report(&mut output, &results).unwrap();
+        let html = String::from_utf8(output).unwrap();
+        assert!(!html.contains("<script>"));
+        assert!(!html.contains("<img"));
+        assert!(
+            html.contains("&lt;script&gt;alert(&#39;x&#39; &amp; &quot;y&quot;)&lt;/script&gt;")
+        );
+        assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
     }
 
     #[test]
