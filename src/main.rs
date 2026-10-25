@@ -55,6 +55,12 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
     ),
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum Runner {
+    CargoTest,
+    Nextest,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Discover semantic mutants without executing them.
@@ -116,6 +122,9 @@ enum Commands {
         /// Command used for the clean baseline and each viable mutant.
         #[arg(long, default_value = "cargo test -q")]
         test_command: String,
+        /// Run tests using cargo test (default) or an installed cargo-nextest.
+        #[arg(long, value_enum, default_value_t = Runner::CargoTest)]
+        runner: Runner,
         /// Legacy timeout in seconds used for both phases unless overridden.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
@@ -714,6 +723,7 @@ fn run() -> Result<()> {
             test_dir,
             target_dir,
             test_command,
+            runner,
             timeout,
             compile_timeout,
             test_timeout,
@@ -727,6 +737,7 @@ fn run() -> Result<()> {
             output,
         } => {
             let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
+            let test_command = resolve_runner_command(runner, &test_command)?;
             let metadata = RunMetadata::capture(&test_command, timeouts);
             let root = path
                 .canonicalize()
@@ -739,6 +750,9 @@ fn run() -> Result<()> {
                 &exclusion_set(exclude_path)?,
             )?;
             let mutants = select_shard(mutants, shard);
+            if !mutants.is_empty() && runner == Runner::Nextest {
+                ensure_nextest_available()?;
+            }
             let mut report = report_writer(output.as_deref())?;
             if mutants.is_empty() {
                 if json {
@@ -1568,7 +1582,36 @@ fn copy_wasm_fixtures(root: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+fn resolve_runner_command(runner: Runner, test_command: &str) -> Result<String> {
+    match runner {
+        Runner::CargoTest => Ok(test_command.to_owned()),
+        Runner::Nextest if test_command == "cargo test -q" => Ok("cargo nextest run".to_owned()),
+        Runner::Nextest => bail!(
+            "cannot combine --runner nextest with --test-command; choose one execution method"
+        ),
+    }
+}
+
+fn ensure_nextest_available() -> Result<()> {
+    let available = Command::new("cargo")
+        .args(["nextest", "--version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !available {
+        bail!(
+            "cargo-nextest is not installed or cannot be executed; install it from https://nexte.st/ and retry --runner nextest"
+        );
+    }
+    Ok(())
+}
+
 fn compile_command_for(test_command: &str) -> Option<String> {
+    if test_command == "cargo nextest run" {
+        return Some("cargo test --no-run".to_string());
+    }
     if test_command.contains("--no-run") {
         return Some(test_command.to_string());
     }
@@ -2091,6 +2134,30 @@ mod tests {
             "a%2Cb%3Ac%25\\n"
         );
         assert_eq!(escape_github_annotation_message("a%\nb"), "a%25%0Ab");
+    }
+
+    #[test]
+    fn nextest_runner_builds_its_command_and_compilation_gate() {
+        let command = resolve_runner_command(Runner::Nextest, "cargo test -q").unwrap();
+        assert_eq!(command, "cargo nextest run");
+        assert_eq!(
+            compile_command_for(&command).as_deref(),
+            Some("cargo test --no-run")
+        );
+        assert_eq!(
+            resolve_runner_command(Runner::CargoTest, "cargo test -q").unwrap(),
+            "cargo test -q"
+        );
+    }
+
+    #[test]
+    fn nextest_runner_rejects_an_ambiguous_custom_command() {
+        assert!(
+            resolve_runner_command(Runner::Nextest, "cargo test --workspace")
+                .unwrap_err()
+                .to_string()
+                .contains("cannot combine")
+        );
     }
 
     #[test]
@@ -2695,6 +2762,9 @@ mod tests {
             compile_command_for("cd contracts && cargo +stable test auth").as_deref(),
             Some("cd contracts && cargo +stable test --no-run auth")
         );
-        assert_eq!(compile_command_for("cargo nextest run"), None);
+        assert_eq!(
+            compile_command_for("cargo nextest run").as_deref(),
+            Some("cargo test --no-run")
+        );
     }
 }
