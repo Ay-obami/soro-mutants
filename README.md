@@ -121,6 +121,28 @@ cargo soro-mutants test /path/to/project --markdown --output mutation-report.md
 
 `--markdown` and `--json` are mutually exclusive. Without `--output`, the Markdown report is written to stdout. Empty successful runs include zero counts and all outcome sections. Relative links assume the report is viewed at the project repository root; adjust their prefix if pasting into a different context.
 
+### Standalone HTML reports
+
+Use `--html` to generate one self-contained HTML file with inline CSS, no scripts, and no external runtime assets:
+
+```bash
+cargo soro-mutants test /path/to/project --html --output mutation-report.html
+```
+
+The report includes outcome counts, semantic score, a per-operator breakdown, and each mutant's status, location, description, original code, and replacement code. Source and descriptions are HTML-escaped. `--html`, `--markdown`, and `--json` are mutually exclusive. With no `--output`, the HTML is written to stdout; empty successful runs still produce a valid HTML page.
+
+To retain reports from GitHub Actions, run `cargo soro-mutants test . --html --output mutation-report.html`, then add an artifact upload step (set `if: always()` if you need reports from failed score thresholds):
+
+```yaml
+- uses: actions/upload-artifact@v4
+  if: always()
+  with:
+    name: soro-mutants-html
+    path: mutation-report.html
+```
+
+Download and open the artifact locally in a browser; no dashboard or web server is necessary.
+
 ### GitHub Actions job summary
 
 Use `--github-summary` with `test` to append a Markdown report to the file named by `GITHUB_STEP_SUMMARY`. GitHub Actions sets this variable automatically. The summary contains all outcome counts, the semantic mutation score, and surviving mutants with source links. Existing stdout or `--output` behavior is unchanged, including when `--json` is selected. Outside Actions, an unset or empty `GITHUB_STEP_SUMMARY` makes this option a no-op; an invalid or unwritable configured path produces an actionable error. The flag is opt-in.
