@@ -340,6 +340,14 @@ const JSON_SCHEMA_VERSION: u32 = 1;
 struct ListReport<'a> {
     schema_version: u32,
     mutants: &'a [Mutant],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suppression: Option<SuppressionSummary<'a>>,
+}
+
+#[derive(Serialize)]
+struct SuppressionSummary<'a> {
+    count: usize,
+    details: &'a [SuppressedMutant],
 }
 
 #[derive(Serialize)]
@@ -348,6 +356,8 @@ struct TestReport<'a> {
     results: &'a [MutantResult],
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<&'a RunMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suppression: Option<SuppressionSummary<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -385,6 +395,7 @@ fn list_report(mutants: &[Mutant]) -> ListReport<'_> {
     ListReport {
         schema_version: JSON_SCHEMA_VERSION,
         mutants,
+        suppression: None,
     }
 }
 
@@ -393,6 +404,7 @@ fn test_report(results: &[MutantResult]) -> TestReport<'_> {
         schema_version: JSON_SCHEMA_VERSION,
         results,
         metadata: None,
+        suppression: None,
     }
 }
 
@@ -738,7 +750,7 @@ fn run() -> Result<()> {
             count_only,
             output,
         } => {
-            let mutants = discover_mutants(
+            let (mutants, suppressed) = discover_mutants_with_suppressions(
                 &path,
                 operator.as_deref(),
                 file.as_deref(),
@@ -760,10 +772,17 @@ fn run() -> Result<()> {
                 writeln!(
                     report,
                     "{}",
-                    serde_json::to_string_pretty(&list_report(&mutants))?
+                    serde_json::to_string_pretty(&ListReport {
+                        suppression: (!suppressed.is_empty()).then_some(SuppressionSummary {
+                            count: suppressed.len(),
+                            details: &suppressed,
+                        }),
+                        ..list_report(&mutants)
+                    })?
                 )?;
             } else {
                 print_mutants(&mut report, &mutants)?;
+                print_suppression_summary(&mut report, &suppressed)?;
             }
         }
         Commands::Test {
@@ -798,7 +817,7 @@ fn run() -> Result<()> {
             let root = path
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
-            let mutants = discover_mutants(
+            let (mutants, suppressed) = discover_mutants_with_suppressions(
                 &root,
                 operator.as_deref(),
                 file.as_deref(),
@@ -822,7 +841,13 @@ fn run() -> Result<()> {
                     writeln!(
                         report,
                         "{}",
-                        serde_json::to_string_pretty(&test_report_with_metadata(&[], &metadata))?
+                        serde_json::to_string_pretty(&TestReport {
+                            suppression: (!suppressed.is_empty()).then_some(SuppressionSummary {
+                                count: suppressed.len(),
+                                details: &suppressed,
+                            }),
+                            ..test_report_with_metadata(&[], &metadata)
+                        })?
                     )?;
                 } else if markdown {
                     print_markdown_report(&mut report, &[])?;
@@ -832,6 +857,9 @@ fn run() -> Result<()> {
                     print_sarif_report(&mut report, &[])?;
                 } else {
                     writeln!(report, "No matching Soroban semantic mutants found.")?;
+                }
+                if !suppressed.is_empty() && !json {
+                    print_suppression_summary(&mut std::io::stderr(), &suppressed)?;
                 }
                 if github_annotations {
                     print_github_annotations(&mut std::io::stderr(), &[])?;
@@ -907,7 +935,13 @@ fn run() -> Result<()> {
                 writeln!(
                     report,
                     "{}",
-                    serde_json::to_string_pretty(&test_report_with_metadata(&results, &metadata))?
+                    serde_json::to_string_pretty(&TestReport {
+                        suppression: (!suppressed.is_empty()).then_some(SuppressionSummary {
+                            count: suppressed.len(),
+                            details: &suppressed,
+                        }),
+                        ..test_report_with_metadata(&results, &metadata)
+                    })?
                 )?;
             } else if markdown {
                 print_markdown_report(&mut report, &results)?;
@@ -917,6 +951,10 @@ fn run() -> Result<()> {
                 print_sarif_report(&mut report, &results)?;
             } else {
                 print_summary(&mut report, &results)?;
+                print_suppression_summary(&mut report, &suppressed)?;
+            }
+            if !suppressed.is_empty() && (markdown || html || sarif) {
+                print_suppression_summary(&mut std::io::stderr(), &suppressed)?;
             }
             if github_annotations {
                 print_github_annotations(&mut std::io::stderr(), &results)?;
@@ -1352,6 +1390,45 @@ fn changed_line_ranges(
     Ok(ranges)
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct SuppressedMutant {
+    operator: String,
+    reason: &'static str,
+}
+
+fn suppress_equivalent_mutants(mutants: Vec<Mutant>) -> (Vec<Mutant>, Vec<SuppressedMutant>) {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut retained = Vec::with_capacity(mutants.len());
+    let mut suppressed = Vec::new();
+    for mutant in mutants {
+        let reason = if mutant.original == mutant.replacement {
+            Some("unchanged replacement")
+        } else if !seen.insert((
+            mutant.file.clone(),
+            mutant.start_byte,
+            mutant.end_byte,
+            mutant.original.clone(),
+            mutant.replacement.clone(),
+        )) {
+            Some("duplicate source edit")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            suppressed.push(SuppressedMutant {
+                operator: mutant.operator,
+                reason,
+            });
+        } else {
+            retained.push(mutant);
+        }
+    }
+    (retained, suppressed)
+}
+
+#[cfg(test)]
 fn discover_mutants(
     root: &Path,
     operator: Option<&str>,
@@ -1359,6 +1436,23 @@ fn discover_mutants(
     function_filter: Option<&str>,
     exclusions: &GlobSet,
 ) -> Result<Vec<Mutant>> {
+    Ok(discover_mutants_with_suppressions(
+        root,
+        operator,
+        file_filter,
+        function_filter,
+        exclusions,
+    )?
+    .0)
+}
+
+fn discover_mutants_with_suppressions(
+    root: &Path,
+    operator: Option<&str>,
+    file_filter: Option<&str>,
+    function_filter: Option<&str>,
+    exclusions: &GlobSet,
+) -> Result<(Vec<Mutant>, Vec<SuppressedMutant>)> {
     let root = root
         .canonicalize()
         .with_context(|| format!("cannot resolve {}", root.display()))?;
@@ -1409,6 +1503,8 @@ fn discover_mutants(
         mutants.retain(|m| m.function.as_deref() == Some(function_filter));
     }
 
+    let (mut mutants, suppressed) = suppress_equivalent_mutants(mutants);
+
     // Total ordering must never inherit WalkDir's filesystem-dependent traversal order.
     // Keep the first four keys stable: IDs and shard assignments depend on them.
     mutants.sort_by(|a, b| {
@@ -1427,7 +1523,7 @@ fn discover_mutants(
         mutant.id = format!("M{:04}", index + 1);
     }
 
-    Ok(mutants)
+    Ok((mutants, suppressed))
 }
 
 fn address_params(sig: &Signature) -> Vec<String> {
@@ -2025,6 +2121,22 @@ fn print_operators(report: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
+fn print_suppression_summary(
+    report: &mut dyn Write,
+    suppressed: &[SuppressedMutant],
+) -> Result<()> {
+    use std::collections::BTreeMap;
+    let mut reasons: BTreeMap<&str, usize> = BTreeMap::new();
+    for item in suppressed {
+        *reasons.entry(item.reason).or_default() += 1;
+    }
+    writeln!(report, "Suppressed: {}", suppressed.len())?;
+    for (reason, count) in reasons {
+        writeln!(report, "  {reason}: {count}")?;
+    }
+    Ok(())
+}
+
 fn print_summary(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
     let killed = results
         .iter()
@@ -2400,6 +2512,92 @@ fn outcome_label(outcome: &Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equivalent_suppression_recognizes_no_change_and_repeated_edit() {
+        let mut candidates = discover_mutants(
+            Path::new("fixtures/weak-auth"),
+            None,
+            None,
+            None,
+            &exclusion_set(Vec::new()).unwrap(),
+        )
+        .unwrap();
+        let meaningful = candidates[0].clone();
+        let mut unchanged = meaningful.clone();
+        unchanged.replacement = unchanged.original.clone();
+        let duplicate = meaningful.clone();
+        let mut distinct = meaningful.clone();
+        distinct.replacement = "some_other_edit()".to_owned();
+        candidates = vec![meaningful.clone(), unchanged, duplicate, distinct];
+
+        let (retained, reasons) = suppress_equivalent_mutants(candidates);
+        assert_eq!(retained.len(), 2);
+        assert!(retained
+            .iter()
+            .any(|m| m.replacement == "some_other_edit()"));
+        assert!(retained
+            .iter()
+            .any(|m| m.replacement == meaningful.replacement));
+        assert_eq!(
+            reasons
+                .iter()
+                .filter(|r| r.reason == "unchanged replacement")
+                .count(),
+            1
+        );
+        assert_eq!(
+            reasons
+                .iter()
+                .filter(|r| r.reason == "duplicate source edit")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn suppression_summary_reports_total_and_reason_counts() {
+        let suppressed = vec![
+            SuppressedMutant {
+                operator: "AUTH-001".to_owned(),
+                reason: "unchanged replacement",
+            },
+            SuppressedMutant {
+                operator: "AUTH-002".to_owned(),
+                reason: "duplicate source edit",
+            },
+            SuppressedMutant {
+                operator: "AUTH-003".to_owned(),
+                reason: "duplicate source edit",
+            },
+        ];
+        let mut output = Vec::new();
+        print_suppression_summary(&mut output, &suppressed).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Suppressed: 3"));
+        assert!(output.contains("duplicate source edit: 2"));
+        assert!(output.contains("unchanged replacement: 1"));
+    }
+
+    #[test]
+    fn equivalent_suppression_does_not_merge_edits_in_different_files_or_spans() {
+        let mut candidates = discover_mutants(
+            Path::new("fixtures/weak-auth"),
+            None,
+            None,
+            None,
+            &exclusion_set(Vec::new()).unwrap(),
+        )
+        .unwrap();
+        let first = candidates.remove(0);
+        let mut second = first.clone();
+        second.file = PathBuf::from("other/src/lib.rs");
+        let mut third = first.clone();
+        third.start_byte += 1;
+        let (retained, reasons) = suppress_equivalent_mutants(vec![first, second, third]);
+        assert_eq!(retained.len(), 3);
+        assert!(reasons.is_empty());
+    }
 
     #[test]
     fn github_annotations_deduplicate_and_handle_files_outside_pr_diff() {
