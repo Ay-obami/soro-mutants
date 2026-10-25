@@ -106,3 +106,16 @@ The recognizer is deliberately conservative: arbitrary three-argument `.transfer
 - `TIMEOUT`: compile or test execution exceeded the configured timeout.
 
 A survivor is evidence about the configured tests, not by itself a vulnerability finding.
+
+## Conservative equivalent-mutant suppression
+
+Before numbering and executing mutants, Soro Mutants suppresses two **provably identical source-edit patterns**:
+
+1. **Unchanged replacement:** the replacement string exactly matches the original source span. Applying the mutant would leave the source unchanged.
+2. **Duplicate source edit:** another candidate already replaces the same byte span of the same file, with the same original and replacement strings. Executing both would produce identical source files.
+
+This deliberately does **not** simplify algebra, compare runtime results, or treat edits in different source spans/files as equivalent. Even whitespace differences remain separate: comparing expressions through formatting normalization could hide meaningful changes to literals, macros, or generated code.
+
+The normal `list` and `test` text output gives the total suppressed count and the count for each reason. JSON reports include a `suppression` object with `count` and per-candidate `details` when something was suppressed; the existing JSON shape remains unchanged when no candidates are suppressed. `--count-only` continues to print only the retained-mutant count.
+
+**These conservative heuristics are not a proof of general program equivalence.** Many context-dependent equivalent mutants remain intentionally unsuppressed rather than risk hiding a meaningful test gap.
