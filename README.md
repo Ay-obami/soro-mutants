@@ -101,6 +101,18 @@ cargo soro-mutants test /path/to/project \
   --test-command 'cargo test -q -p phoenix-pool admin_change'
 ```
 
+### Exit codes for CI
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Command completed successfully; individual `KILLED` or `SURVIVED` mutant outcomes do not change this status. |
+| `1` | Operational error (such as an unreadable project or failed report write). |
+| `2` | Invalid CLI arguments (Clap validation). |
+| `3` | Clean baseline test command failed or timed out; mutation outcomes cannot be trusted. |
+| `4` | Reserved for a future mutation-score threshold failure. The current CLI does not expose a threshold option. |
+
+Treat these as command-level statuses, not codes for individual mutant outcomes. Existing scripts checking only zero versus nonzero continue to work.
+
 ### Discovery filters and CI shards
 
 Both `list` and `test` validate `--operator` before accessing the project. IDs are
