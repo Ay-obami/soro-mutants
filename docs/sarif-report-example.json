@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "results": [
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/lib.rs"
+                },
+                "region": {
+                  "startColumn": 9,
+                  "startLine": 11
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Surviving mutant M0001 (AUTH-001): tests did not detect remove current_admin.require_auth(). This is a test-quality signal; it does not establish a security flaw."
+          },
+          "properties": {
+            "description": "remove current_admin.require_auth()",
+            "function": "change_admin",
+            "mutantId": "M0001",
+            "operator": "AUTH-001",
+            "original": "current_admin.require_auth()",
+            "outcome": "SURVIVED",
+            "replacement": "()"
+          },
+          "ruleId": "AUTH-001"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/Ay-obami/soro-mutants",
+          "name": "Soro Mutants",
+          "rules": [
+            {
+              "id": "AUTH-001",
+              "name": "AUTH-001",
+              "properties": {
+                "tags": [
+                  "mutation-testing",
+                  "test-quality"
+                ]
+              },
+              "shortDescription": {
+                "text": "remove a require_auth() call"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

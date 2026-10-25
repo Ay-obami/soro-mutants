@@ -134,6 +134,9 @@ enum Commands {
         /// Emit a standalone, self-contained HTML report.
         #[arg(long, conflicts_with = "json")]
         html: bool,
+        /// Emit SARIF 2.1.0 code-scanning results for surviving mutants.
+        #[arg(long, conflicts_with_all = ["json", "markdown", "html"])]
+        sarif: bool,
         /// Append a Markdown report to GITHUB_STEP_SUMMARY when set.
         #[arg(long)]
         github_summary: bool,
@@ -714,6 +717,7 @@ fn run() -> Result<()> {
             json,
             markdown,
             html,
+            sarif,
             github_summary,
             min_score,
             output,
@@ -743,6 +747,8 @@ fn run() -> Result<()> {
                     print_markdown_report(&mut report, &[])?;
                 } else if html {
                     print_html_report(&mut report, &[])?;
+                } else if sarif {
+                    print_sarif_report(&mut report, &[])?;
                 } else {
                     writeln!(report, "No matching Soroban semantic mutants found.")?;
                 }
@@ -763,7 +769,7 @@ fn run() -> Result<()> {
                 .as_deref()
                 .map(|dir| root.join(dir))
                 .unwrap_or_else(|| root.clone());
-            if !json && !markdown && !html {
+            if !json && !markdown && !html && !sarif {
                 writeln!(report, "Baseline: {}", test_command)?;
             }
             match run_process(
@@ -773,7 +779,7 @@ fn run() -> Result<()> {
                 &baseline_target_dir,
             )? {
                 ProcessResult::Passed => {
-                    if !json && !markdown && !html {
+                    if !json && !markdown && !html && !sarif {
                         writeln!(report, "Baseline PASS\n")?;
                     }
                 }
@@ -799,7 +805,7 @@ fn run() -> Result<()> {
                     &mutant_target_root,
                     shared_target,
                 )?;
-                if !json && !markdown && !html {
+                if !json && !markdown && !html && !sarif {
                     writeln!(
                         report,
                         "{:<10} {:<8} {}:{} {}",
@@ -823,6 +829,8 @@ fn run() -> Result<()> {
                 print_markdown_report(&mut report, &results)?;
             } else if html {
                 print_html_report(&mut report, &results)?;
+            } else if sarif {
+                print_sarif_report(&mut report, &results)?;
             } else {
                 print_summary(&mut report, &results)?;
             }
@@ -1886,6 +1894,87 @@ fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Re
         }
         writeln!(report)?;
     }
+    Ok(())
+}
+
+fn print_sarif_report(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    // Surviving mutants expose test gaps, not confirmed security vulnerabilities.
+    let survivors: Vec<&MutantResult> = results
+        .iter()
+        .filter(|result| matches!(result.outcome, Outcome::Survived))
+        .collect();
+    let mut rules = BTreeMap::new();
+    for result in &survivors {
+        let operator = result.mutant.operator.as_str();
+        let description = BUILTIN_OPERATORS
+            .iter()
+            .find(|(id, _)| *id == operator)
+            .map(|(_, description)| *description)
+            .unwrap_or(result.mutant.description.as_str());
+        rules.insert(
+            operator,
+            serde_json::json!({
+                "id": operator,
+                "name": operator,
+                "shortDescription": {"text": description},
+                "properties": {"tags": ["mutation-testing", "test-quality"]}
+            }),
+        );
+    }
+
+    let findings: Vec<serde_json::Value> = survivors
+        .iter()
+        .map(|result| {
+            let mutant = &result.mutant;
+            let path = mutant.file.to_string_lossy().replace('\\', "/");
+            serde_json::json!({
+                "ruleId": mutant.operator,
+                "level": "warning",
+                "message": {
+                    "text": format!(
+                        "Surviving mutant {} ({}): tests did not detect {}. This is a test-quality signal; it does not establish a security flaw.",
+                        mutant.id, mutant.operator, mutant.description
+                    )
+                },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": path},
+                        "region": {
+                            "startLine": mutant.span.line,
+                            "startColumn": mutant.span.column
+                        }
+                    }
+                }],
+                "properties": {
+                    "mutantId": mutant.id,
+                    "function": mutant.function,
+                    "operator": mutant.operator,
+                    "outcome": outcome_label(&result.outcome),
+                    "description": mutant.description,
+                    "original": mutant.original,
+                    "replacement": mutant.replacement
+                }
+            })
+        })
+        .collect();
+
+    let sarif = serde_json::json!({
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "Soro Mutants",
+                    "informationUri": "https://github.com/Ay-obami/soro-mutants",
+                    "rules": rules.into_values().collect::<Vec<_>>()
+                }
+            },
+            "results": findings
+        }]
+    });
+    writeln!(report, "{}", serde_json::to_string_pretty(&sarif)?)?;
     Ok(())
 }
 
