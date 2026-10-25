@@ -152,6 +152,16 @@ Discovery sorts mutants by project-relative file path, source start byte, operat
 
 Both text and JSON listings preserve the same sequence; repeated runs on unchanged source produce the same ordering. Shards select from this ordered list, so changing source or discovery filters may change shard membership.
 
+### CI mutation-score thresholds
+
+Pass `--min-score PERCENT` to `test` to make CI fail when the semantic mutation score drops below a required percentage:
+
+```bash
+cargo soro-mutants test . --min-score 80 --github-summary
+```
+
+`PERCENT` is a finite number from 0 through 100, inclusive (fractional thresholds are accepted). The score is `100 × KILLED / (KILLED + SURVIVED)`; `UNVIABLE` and `TIMEOUT` results are counted in the report but **excluded** from that denominator. With no viable mutants, the score is defined as **0%**: threshold 0 passes, while any positive threshold fails. Equality to the threshold passes. The full report is written before the threshold is evaluated, including JSON, Markdown, output files, and an optional GitHub Actions job summary. Omitting `--min-score` preserves existing exit behavior.
+
 ### Exit codes for CI
 
 | Code | Meaning |
@@ -160,7 +170,7 @@ Both text and JSON listings preserve the same sequence; repeated runs on unchang
 | `1` | Operational error (such as an unreadable project or failed report write). |
 | `2` | Invalid CLI arguments (Clap validation). |
 | `3` | Clean baseline test command failed or timed out; mutation outcomes cannot be trusted. |
-| `4` | Reserved for a future mutation-score threshold failure. The current CLI does not expose a threshold option. |
+| `4` | Opt-in `--min-score` threshold failed; actual semantic score is below the requested minimum. |
 
 Treat these as command-level statuses, not codes for individual mutant outcomes. Existing scripts checking only zero versus nonzero continue to work.
 
