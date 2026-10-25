@@ -101,6 +101,12 @@ cargo soro-mutants test /path/to/project \
   --test-command 'cargo test -q -p phoenix-pool admin_change'
 ```
 
+### Deterministic mutant ordering
+
+Discovery sorts mutants by project-relative file path, source start byte, operator ID, and replacement text. Remaining ties are resolved using the source end byte, original text, function name, and description. IDs (`M0001`, `M0002`, …) are assigned only after this sort. Filesystem traversal order does not determine report or shard order.
+
+Both text and JSON listings preserve the same sequence; repeated runs on unchanged source produce the same ordering. Shards select from this ordered list, so changing source or discovery filters may change shard membership.
+
 ### Exit codes for CI
 
 | Code | Meaning |

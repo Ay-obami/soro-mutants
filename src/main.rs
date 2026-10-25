@@ -785,12 +785,18 @@ fn discover_mutants(
         mutants.retain(|m| m.function.as_deref() == Some(function_filter));
     }
 
+    // Total ordering must never inherit WalkDir's filesystem-dependent traversal order.
+    // Keep the first four keys stable: IDs and shard assignments depend on them.
     mutants.sort_by(|a, b| {
         a.file
             .cmp(&b.file)
             .then(a.start_byte.cmp(&b.start_byte))
             .then(a.operator.cmp(&b.operator))
             .then(a.replacement.cmp(&b.replacement))
+            .then(a.end_byte.cmp(&b.end_byte))
+            .then(a.original.cmp(&b.original))
+            .then(a.function.cmp(&b.function))
+            .then(a.description.cmp(&b.description))
     });
 
     for (index, mutant) in mutants.iter_mut().enumerate() {
