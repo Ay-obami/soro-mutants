@@ -121,6 +121,31 @@ cargo soro-mutants test /path/to/project --markdown --output mutation-report.md
 
 `--markdown` and `--json` are mutually exclusive. Without `--output`, the Markdown report is written to stdout. Empty successful runs include zero counts and all outcome sections. Relative links assume the report is viewed at the project repository root; adjust their prefix if pasting into a different context.
 
+### GitHub Actions job summary
+
+Use `--github-summary` with `test` to append a Markdown report to the file named by `GITHUB_STEP_SUMMARY`. GitHub Actions sets this variable automatically. The summary contains all outcome counts, the semantic mutation score, and surviving mutants with source links. Existing stdout or `--output` behavior is unchanged, including when `--json` is selected. Outside Actions, an unset or empty `GITHUB_STEP_SUMMARY` makes this option a no-op; an invalid or unwritable configured path produces an actionable error. The flag is opt-in.
+
+For a Soroban project, add `.github/workflows/mutation-summary.yml`:
+
+```yaml
+name: Semantic mutation summary
+on:
+  workflow_dispatch:
+  pull_request:
+jobs:
+  mutation-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Soro Mutants
+        run: cargo install --git https://github.com/Ay-obami/soro-mutants --branch main --locked
+      - name: Run Soroban mutation tests
+        run: cargo soro-mutants test . --github-summary
+```
+
+This workflow uses the current `main` branch for illustration; pin the tool to a reviewed commit or a release that includes `--github-summary` for reproducible CI. The command still runs the normal baseline and mutant tests, so its exit status is preserved. The GitHub summary file is appended to, not replaced.
+
 ### Deterministic mutant ordering
 
 Discovery sorts mutants by project-relative file path, source start byte, operator ID, and replacement text. Remaining ties are resolved using the source end byte, original text, function name, and description. IDs (`M0001`, `M0002`, …) are assigned only after this sort. Filesystem traversal order does not determine report or shard order.
