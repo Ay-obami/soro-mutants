@@ -59,3 +59,27 @@ jobs:
           grep -Eq '^KILLED[[:space:]]+AUTH-001' <<<"$output"
           grep -Eq '^KILLED[[:space:]]+AUTH-002' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Weak authorized-arguments test must miss AUTH-003
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-auth-args \
+            --operator AUTH-003 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
+            --timeout 240 \
+            --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^SURVIVED[[:space:]]+AUTH-003' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Strong authorized-arguments assertion must kill AUTH-003
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-auth-args \
+            --operator AUTH-003 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
+            --timeout 240 \
+            --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^KILLED[[:space:]]+AUTH-003' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"

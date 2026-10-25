@@ -44,6 +44,30 @@ fn transfer(env: Env, from: Address, to: Address) {
 
 This operator deliberately avoids broad type inference. Candidate replacement receivers must be explicit `Address` parameters.
 
+## AUTH-003 — change an explicit authorized argument set
+
+Recognizes a direct `address.require_auth_for_args(args)` call only when `address` is a simple identifier explicitly typed `Address` (or `&Address`) in the enclosing function signature, and the function also has an explicit `Env` (or `&Env`) parameter. It replaces only the `args` expression with an empty Soroban argument vector; **the authorization call itself remains**.
+
+For example:
+
+```rust
+fn authorize(env: Env, admin: Address, recipient: Address) {
+    admin.require_auth_for_args((recipient.clone(),).into_val(&env));
+}
+```
+
+becomes:
+
+```rust
+fn authorize(env: Env, admin: Address, recipient: Address) {
+    admin.require_auth_for_args(soroban_sdk::Vec::new(&env));
+}
+```
+
+The mutation asks whether the tests enforce the exact signed argument set. A functional-only test with mocked authorization may let it survive, whereas a test checking `env.auths()` for the expected `AuthorizedInvocation` should kill it.
+
+This intentionally does **not** recognize unrelated same-named methods on arbitrary receivers, chained receiver expressions, calls outside a function with an explicit `Env` and `Address` parameter, or helper-mediated authorization. It does not attempt to prove the semantic type of arbitrary locals.
+
 ## TTL-001 — remove TTL extension
 
 Recognizes `extend_ttl(...)` only when it is called on a Soroban `instance`, `persistent`, or `temporary` storage accessor, including simple locals initialized from those accessors, and replaces the call expression with `()`.
