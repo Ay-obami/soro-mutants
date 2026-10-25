@@ -80,6 +80,24 @@ Recognizes direct Soroban event publication through `.events().publish(...)` whe
 
 Generic objects that happen to expose `.events().publish(...)` are ignored. It does not yet cover every typed event abstraction or event accessors stored in locals/fields.
 
+## EVENT-002 — suppress direct typed event publication
+
+Matches a standalone statement in a function taking an explicitly typed Soroban `Env` (or `&Env`):
+
+```rust
+#[contractevent]
+pub struct TransferNotice { /* typed fields */ }
+
+// Inside a function with env: Env:
+TransferNotice { recipient, amount }.publish(&env);
+```
+
+The struct must carry `#[contractevent]` in the same source file. The AST recognizer replaces the **publish expression only** with `()`, preserving the terminating semicolon and surrounding formatting. The mutation compiles while omitting the event, allowing tests that assert `env.events().all()` to kill it. A test observing only the function's return value may let it survive.
+
+The initial supported shape is a direct `EventStruct { ... }.publish(&env);` statement. It intentionally excludes variables holding events, chained event constructors, event types declared elsewhere, publish calls embedded in other expressions, dynamic environment references, non-`Env` arguments, and arbitrary same-named methods. It does not inspect macro expansion, event schemas, or event listeners. Event helpers such as `events().transfer(...)` are never interpreted as token-client transfers.
+
+The typed syntax above is supported by Soroban SDK 25.3.0's `#[contractevent]` macro.
+
 ## TOKEN-001 — reverse direct transfer direction
 
 Recognizes a direct three-argument method call named `transfer` only when the receiver is a known Soroban token client. v0.1 recognizes explicit `TokenClient` / `token::Client` parameters, local variables initialized from token-client constructors, and direct token-client constructor chains. It then swaps the first two arguments while preserving the third.
