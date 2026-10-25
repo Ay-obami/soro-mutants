@@ -128,7 +128,10 @@ enum Commands {
         /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
-        /// Write the selected text or JSON report to a file instead of stdout.
+        /// Emit a Markdown report suitable for issues and pull requests.
+        #[arg(long, conflicts_with = "json")]
+        markdown: bool,
+        /// Write the selected text, JSON, or Markdown report to a file.
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -642,6 +645,7 @@ fn run() -> Result<()> {
             compile_timeout,
             test_timeout,
             json,
+            markdown,
             output,
         } => {
             let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
@@ -665,6 +669,8 @@ fn run() -> Result<()> {
                         "{}",
                         serde_json::to_string_pretty(&test_report_with_metadata(&[], &metadata))?
                     )?;
+                } else if markdown {
+                    print_markdown_report(&mut report, &[])?;
                 } else {
                     writeln!(report, "No matching Soroban semantic mutants found.")?;
                 }
@@ -681,7 +687,7 @@ fn run() -> Result<()> {
                 .as_deref()
                 .map(|dir| root.join(dir))
                 .unwrap_or_else(|| root.clone());
-            if !json {
+            if !json && !markdown {
                 writeln!(report, "Baseline: {}", test_command)?;
             }
             match run_process(
@@ -691,7 +697,7 @@ fn run() -> Result<()> {
                 &baseline_target_dir,
             )? {
                 ProcessResult::Passed => {
-                    if !json {
+                    if !json && !markdown {
                         writeln!(report, "Baseline PASS\n")?;
                     }
                 }
@@ -717,7 +723,7 @@ fn run() -> Result<()> {
                     &mutant_target_root,
                     shared_target,
                 )?;
-                if !json {
+                if !json && !markdown {
                     writeln!(
                         report,
                         "{:<10} {:<8} {}:{} {}",
@@ -737,6 +743,8 @@ fn run() -> Result<()> {
                     "{}",
                     serde_json::to_string_pretty(&test_report_with_metadata(&results, &metadata))?
                 )?;
+            } else if markdown {
+                print_markdown_report(&mut report, &results)?;
             } else {
                 print_summary(&mut report, &results)?;
             }
@@ -1477,6 +1485,92 @@ fn print_summary(report: &mut dyn Write, results: &[MutantResult]) -> Result<()>
     writeln!(report, "  Unviable  : {}", unviable)?;
     writeln!(report, "  Timeout   : {}", timeout)?;
     writeln!(report, "  Score     : {:.1}%", score)?;
+    Ok(())
+}
+
+fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
+    let killed = results
+        .iter()
+        .filter(|r| matches!(r.outcome, Outcome::Killed))
+        .count();
+    let survived = results
+        .iter()
+        .filter(|r| matches!(r.outcome, Outcome::Survived))
+        .count();
+    let unviable = results
+        .iter()
+        .filter(|r| matches!(r.outcome, Outcome::Unviable))
+        .count();
+    let timeout = results
+        .iter()
+        .filter(|r| matches!(r.outcome, Outcome::Timeout))
+        .count();
+    let viable = killed + survived;
+    let score = if viable == 0 {
+        0.0
+    } else {
+        100.0 * killed as f64 / viable as f64
+    };
+
+    writeln!(report, "# Soro Mutants Report\n")?;
+    writeln!(report, "| Metric | Count |")?;
+    writeln!(report, "| --- | ---: |")?;
+    for (name, count) in [
+        ("Generated", results.len()),
+        ("Killed", killed),
+        ("Survived", survived),
+        ("Unviable", unviable),
+        ("Timeout", timeout),
+    ] {
+        writeln!(report, "| {name} | {count} |")?;
+    }
+    writeln!(
+        report,
+        "\n**Semantic score: {score:.1}%** ({killed}/{viable} viable mutants killed).\n"
+    )?;
+
+    for (heading, label, count) in [
+        ("Survived", "SURVIVED", survived),
+        ("Killed", "KILLED", killed),
+        ("Unviable", "UNVIABLE", unviable),
+        ("Timeout", "TIMEOUT", timeout),
+    ] {
+        writeln!(report, "## {heading} ({count})\n")?;
+        if count == 0 {
+            writeln!(report, "_None._\n")?;
+            continue;
+        }
+        for result in results
+            .iter()
+            .filter(|r| outcome_label(&r.outcome) == label)
+        {
+            let mutant = &result.mutant;
+            let path = mutant.file.to_string_lossy().replace('\\', "/");
+            let target = path
+                .replace('%', "%25")
+                .replace(' ', "%20")
+                .replace('(', "%28")
+                .replace(')', "%29")
+                .replace('#', "%23");
+            let link_label = path.replace('[', "\\[").replace(']', "\\]");
+            let description = mutant
+                .description
+                .replace(['\n', '\r'], " ")
+                .replace('`', "\\`");
+            writeln!(
+                report,
+                "- `{}` **{}** [{}:{}]({}#L{}) — {}",
+                mutant.id,
+                mutant.operator,
+                link_label,
+                mutant.span.line,
+                target,
+                mutant.span.line,
+                description
+            )?;
+        }
+        writeln!(report)?;
+    }
     Ok(())
 }
 

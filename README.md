@@ -111,6 +111,16 @@ cargo soro-mutants test /path/to/project \
 
 The existing `--timeout` option defaults to 120 seconds and remains the fallback for both phases. A phase-specific option overrides it only for that phase. The baseline uses the test timeout; a mutant's separate Cargo `--no-run` compile gate uses the compile timeout; mutant test execution uses the test timeout. Custom commands without a recognizable Cargo compile gate run entirely within the test timeout (including any compilation they perform). A timeout during either mutant phase still produces `TIMEOUT`.
 
+### Markdown reports
+
+Use `--markdown` with `test` to produce a deterministic Markdown summary suitable for pasting into an issue or PR. It includes generated/killed/survived/unviable/timeout counts, the semantic score (`killed / (killed + survived)`), and outcome sections with project-relative source-line links:
+
+```bash
+cargo soro-mutants test /path/to/project --markdown --output mutation-report.md
+```
+
+`--markdown` and `--json` are mutually exclusive. Without `--output`, the Markdown report is written to stdout. Empty successful runs include zero counts and all outcome sections. Relative links assume the report is viewed at the project repository root; adjust their prefix if pasting into a different context.
+
 ### Deterministic mutant ordering
 
 Discovery sorts mutants by project-relative file path, source start byte, operator ID, and replacement text. Remaining ties are resolved using the source end byte, original text, function name, and description. IDs (`M0001`, `M0002`, …) are assigned only after this sort. Filesystem traversal order does not determine report or shard order.
