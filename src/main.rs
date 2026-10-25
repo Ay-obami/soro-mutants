@@ -1555,8 +1555,7 @@ fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Re
             let link_label = path.replace('[', "\\[").replace(']', "\\]");
             let description = mutant
                 .description
-                .replace('\n', " ")
-                .replace('\r', " ")
+                .replace(['\n', '\r'], " ")
                 .replace('`', "\\`");
             writeln!(
                 report,
