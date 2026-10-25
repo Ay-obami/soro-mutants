@@ -16,7 +16,7 @@ use std::{
 use syn::{
     spanned::Spanned,
     visit::{self, Visit},
-    Expr, ExprMethodCall, FnArg, ImplItemFn, ItemFn, Local, Pat, Signature, Type,
+    Expr, ExprMethodCall, FnArg, ImplItemFn, Item, ItemFn, Local, Pat, Signature, Stmt, Type,
 };
 use wait_timeout::ChildExt;
 use walkdir::{DirEntry, WalkDir};
@@ -48,6 +48,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
     (
         "EVENT-001",
         "remove a Soroban event publication (env.events().publish(...))",
+    ),
+    (
+        "EVENT-002",
+        "remove a standalone #[contractevent] typed event publication",
     ),
     (
         "TOKEN-001",
@@ -456,6 +460,7 @@ struct SemanticVisitor<'a> {
     token_client_vars: Vec<String>,
     storage_accessor_vars: Vec<String>,
     env_params: Vec<String>,
+    typed_event_structs: std::collections::HashSet<String>,
     mutants: Vec<Mutant>,
 }
 
@@ -469,6 +474,7 @@ impl<'a> SemanticVisitor<'a> {
             token_client_vars: Vec::new(),
             storage_accessor_vars: Vec::new(),
             env_params: Vec::new(),
+            typed_event_structs: std::collections::HashSet::new(),
             mutants: Vec::new(),
         }
     }
@@ -524,6 +530,56 @@ impl<'a> SemanticVisitor<'a> {
 }
 
 impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
+    fn visit_file(&mut self, node: &'ast syn::File) {
+        self.typed_event_structs = node
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Struct(item)
+                    if item.attrs.iter().any(|attribute| {
+                        attribute
+                            .path()
+                            .segments
+                            .last()
+                            .is_some_and(|segment| segment.ident == "contractevent")
+                    }) =>
+                {
+                    Some(item.ident.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        visit::visit_file(self, node);
+    }
+
+    fn visit_stmt(&mut self, node: &'ast Stmt) {
+        if let Stmt::Expr(Expr::MethodCall(call), Some(_)) = node {
+            if call.method == "publish" && call.args.len() == 1 {
+                let is_typed_event = match call.receiver.as_ref() {
+                    Expr::Struct(event) => event
+                        .path
+                        .get_ident()
+                        .is_some_and(|name| self.typed_event_structs.contains(&name.to_string())),
+                    _ => false,
+                };
+                let targets_env = match call.args.first() {
+                    Some(Expr::Reference(reference)) => receiver_ident(&reference.expr)
+                        .is_some_and(|name| self.env_params.contains(&name)),
+                    _ => false,
+                };
+                if is_typed_event && targets_env {
+                    self.push_mutant(
+                        "EVENT-002",
+                        call.span(),
+                        "()".to_owned(),
+                        "remove direct typed Soroban contract event publication".to_owned(),
+                    );
+                }
+            }
+        }
+        visit::visit_stmt(self, node);
+    }
+
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         let previous = self.enter_signature(&node.sig);
         visit::visit_item_fn(self, node);
@@ -3005,6 +3061,54 @@ mod tests {
         );
 
         assert!(mutants.iter().any(|m| m.operator == "TTL-001"));
+    }
+
+    #[test]
+    fn typed_event_publish_statement_yields_only_event_deletion() {
+        let source = r#"
+            #[contractevent]
+            struct TransferNotice { from: Address, amount: i128 }
+            fn record(env: Env, from: Address, amount: i128) {
+                TransferNotice { from, amount }.publish(&env);
+            }
+        "#;
+        let mutants = mutations_for(source);
+        let typed: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "EVENT-002")
+            .collect();
+        assert_eq!(typed.len(), 1);
+        assert_eq!(typed[0].replacement, "()");
+        assert!(typed[0]
+            .original
+            .contains("TransferNotice { from, amount }.publish(&env)"));
+        let mutant = typed[0];
+        let transformed = format!(
+            "{}{}{}",
+            &source[..mutant.start_byte],
+            mutant.replacement,
+            &source[mutant.end_byte..]
+        );
+        assert!(transformed.contains("();"));
+        assert!(syn::parse_file(&transformed).is_ok());
+    }
+
+    #[test]
+    fn typed_event_matcher_rejects_non_event_publish_and_non_statement() {
+        let source = r#"
+            struct FakeEvent { value: u32 }
+            #[contractevent]
+            struct ValidEvent { value: u32 }
+            fn dispatch(env: Env, other: Logger) {
+                FakeEvent { value: 1 }.publish(&env);
+                ValidEvent { value: 2 }.publish(&other);
+                let ignored = ValidEvent { value: 3 }.publish(&env);
+                TokenHelper::new(&env).events().transfer(1, 2, 3);
+            }
+        "#;
+        let mutants = mutations_for(source);
+        assert!(!mutants.iter().any(|m| m.operator == "EVENT-002"));
+        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
     }
 
     #[test]

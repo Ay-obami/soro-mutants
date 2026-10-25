@@ -83,3 +83,27 @@ jobs:
           printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+AUTH-003' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Weak typed-event test must miss EVENT-002
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-typed-events \
+            --operator EVENT-002 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
+            --timeout 240 \
+            --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^SURVIVED[[:space:]]+EVENT-002' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Strong event assertion must kill EVENT-002
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-typed-events \
+            --operator EVENT-002 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
+            --timeout 240 \
+            --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^KILLED[[:space:]]+EVENT-002' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
