@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
-use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap_complete::{generate, Shell};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use proc_macro2::Span;
 use serde::Serialize;
@@ -139,6 +140,29 @@ enum Commands {
     },
     /// Print all built-in operator IDs and their descriptions.
     Operators,
+    /// Generate shell completion scripts on stdout.
+    Completions {
+        /// Target shell (bash, zsh, or fish).
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl From<CompletionShell> for Shell {
+    fn from(shell: CompletionShell) -> Self {
+        match shell {
+            CompletionShell::Bash => Shell::Bash,
+            CompletionShell::Zsh => Shell::Zsh,
+            CompletionShell::Fish => Shell::Fish,
+        }
+    }
 }
 
 fn parse_operator(value: &str) -> std::result::Result<String, String> {
@@ -472,7 +496,32 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 }
 
-fn main() -> Result<()> {
+#[derive(Debug)]
+struct BaselineFailure(&'static str);
+
+impl std::fmt::Display for BaselineFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for BaselineFailure {}
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            if error.downcast_ref::<BaselineFailure>().is_some() {
+                std::process::ExitCode::from(3)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let mut command = Cli::command();
     if env::var_os("NO_COLOR").is_some() {
         // Apply before parsing so help and argument errors also honor NO_COLOR.
@@ -573,9 +622,14 @@ fn main() -> Result<()> {
                     }
                 }
                 ProcessResult::Failed => {
-                    bail!("baseline tests failed; mutation results would be invalid")
+                    return Err(BaselineFailure(
+                        "baseline tests failed; mutation results would be invalid",
+                    )
+                    .into());
                 }
-                ProcessResult::Timeout => bail!("baseline tests timed out"),
+                ProcessResult::Timeout => {
+                    return Err(BaselineFailure("baseline tests timed out").into())
+                }
             }
 
             let mut results = Vec::new();
@@ -636,6 +690,15 @@ fn main() -> Result<()> {
         }
         Commands::Operators => {
             print_operators(&mut io::stdout())?;
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            generate(
+                Shell::from(shell),
+                &mut cmd,
+                "cargo-soro-mutants",
+                &mut io::stdout(),
+            );
         }
     }
 

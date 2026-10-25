@@ -47,6 +47,25 @@ cargo install --path . --locked
 
 The installed binary follows Cargo's subcommand convention, so it can be invoked as `cargo soro-mutants`.
 
+### Shell completions
+
+Generate completions directly from the CLI's Clap command definition (Bash, Zsh, and Fish):
+
+```bash
+# Bash: load for the current session
+source <(cargo soro-mutants completions bash)
+
+# Zsh: install to a directory in your fpath (before compinit)
+mkdir -p ~/.zfunc
+cargo soro-mutants completions zsh > ~/.zfunc/_cargo-soro-mutants
+# Add `fpath=(~/.zfunc $fpath)` before `autoload -Uz compinit && compinit` in ~/.zshrc
+
+# Fish: install for your user
+cargo soro-mutants completions fish > ~/.config/fish/completions/cargo-soro-mutants.fish
+```
+
+Create the Fish completions directory first if it does not exist. The generated scripts complete the executable `cargo-soro-mutants` (which Cargo invokes through `cargo soro-mutants`). They are not checked into the repository.
+
 Set `NO_COLOR` (for example, `NO_COLOR=1 cargo soro-mutants --help`) to disable
 ANSI color in Soro Mutants output, including help and argument errors. Any value,
 including an empty value, disables color. Mutation reports are already plain text;
@@ -87,6 +106,18 @@ cargo soro-mutants test /path/to/project \
 Discovery sorts mutants by project-relative file path, source start byte, operator ID, and replacement text. Remaining ties are resolved using the source end byte, original text, function name, and description. IDs (`M0001`, `M0002`, …) are assigned only after this sort. Filesystem traversal order does not determine report or shard order.
 
 Both text and JSON listings preserve the same sequence; repeated runs on unchanged source produce the same ordering. Shards select from this ordered list, so changing source or discovery filters may change shard membership.
+
+### Exit codes for CI
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Command completed successfully; individual `KILLED` or `SURVIVED` mutant outcomes do not change this status. |
+| `1` | Operational error (such as an unreadable project or failed report write). |
+| `2` | Invalid CLI arguments (Clap validation). |
+| `3` | Clean baseline test command failed or timed out; mutation outcomes cannot be trusted. |
+| `4` | Reserved for a future mutation-score threshold failure. The current CLI does not expose a threshold option. |
+
+Treat these as command-level statuses, not codes for individual mutant outcomes. Existing scripts checking only zero versus nonzero continue to work.
 
 ### Discovery filters and CI shards
 
