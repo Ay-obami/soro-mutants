@@ -472,7 +472,32 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 }
 
-fn main() -> Result<()> {
+#[derive(Debug)]
+struct BaselineFailure(&'static str);
+
+impl std::fmt::Display for BaselineFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for BaselineFailure {}
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:#}");
+            if error.downcast_ref::<BaselineFailure>().is_some() {
+                std::process::ExitCode::from(3)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let mut command = Cli::command();
     if env::var_os("NO_COLOR").is_some() {
         // Apply before parsing so help and argument errors also honor NO_COLOR.
@@ -573,9 +598,14 @@ fn main() -> Result<()> {
                     }
                 }
                 ProcessResult::Failed => {
-                    bail!("baseline tests failed; mutation results would be invalid")
+                    return Err(BaselineFailure(
+                        "baseline tests failed; mutation results would be invalid",
+                    )
+                    .into());
                 }
-                ProcessResult::Timeout => bail!("baseline tests timed out"),
+                ProcessResult::Timeout => {
+                    return Err(BaselineFailure("baseline tests timed out").into())
+                }
             }
 
             let mut results = Vec::new();
