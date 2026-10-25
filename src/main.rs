@@ -134,6 +134,9 @@ enum Commands {
         /// Append a Markdown report to GITHUB_STEP_SUMMARY when set.
         #[arg(long)]
         github_summary: bool,
+        /// Fail with exit code 4 when the semantic score is below PERCENT (0–100).
+        #[arg(long, value_name = "PERCENT", value_parser = parse_min_score)]
+        min_score: Option<f64>,
         /// Write the selected text, JSON, or Markdown report to a file.
         #[arg(long)]
         output: Option<PathBuf>,
@@ -578,6 +581,57 @@ impl std::fmt::Display for BaselineFailure {
 
 impl std::error::Error for BaselineFailure {}
 
+#[derive(Debug)]
+struct ScoreThresholdFailure {
+    actual: f64,
+    minimum: f64,
+}
+
+impl std::fmt::Display for ScoreThresholdFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "semantic score {:.1}% below minimum {:.1}%",
+            self.actual, self.minimum
+        )
+    }
+}
+
+impl std::error::Error for ScoreThresholdFailure {}
+
+fn parse_min_score(value: &str) -> std::result::Result<f64, String> {
+    let score = value
+        .parse::<f64>()
+        .map_err(|_| "score must be a number from 0 to 100".to_owned())?;
+    if !score.is_finite() || !(0.0..=100.0).contains(&score) {
+        return Err("score must be a finite number from 0 to 100".to_owned());
+    }
+    Ok(score)
+}
+
+fn ensure_min_score(results: &[MutantResult], minimum: Option<f64>) -> Result<()> {
+    if let Some(minimum) = minimum {
+        let killed = results
+            .iter()
+            .filter(|r| matches!(r.outcome, Outcome::Killed))
+            .count();
+        let survived = results
+            .iter()
+            .filter(|r| matches!(r.outcome, Outcome::Survived))
+            .count();
+        let viable = killed + survived;
+        let actual = if viable == 0 {
+            0.0
+        } else {
+            killed as f64 * 100.0 / viable as f64
+        };
+        if actual < minimum {
+            return Err(ScoreThresholdFailure { actual, minimum }.into());
+        }
+    }
+    Ok(())
+}
+
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -585,6 +639,8 @@ fn main() -> std::process::ExitCode {
             eprintln!("Error: {error:#}");
             if error.downcast_ref::<BaselineFailure>().is_some() {
                 std::process::ExitCode::from(3)
+            } else if error.downcast_ref::<ScoreThresholdFailure>().is_some() {
+                std::process::ExitCode::from(4)
             } else {
                 std::process::ExitCode::FAILURE
             }
@@ -650,6 +706,7 @@ fn run() -> Result<()> {
             json,
             markdown,
             github_summary,
+            min_score,
             output,
         } => {
             let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
@@ -681,6 +738,7 @@ fn run() -> Result<()> {
                 if github_summary {
                     append_github_summary(&[])?;
                 }
+                ensure_min_score(&[], min_score)?;
                 return Ok(());
             }
 
@@ -758,6 +816,7 @@ fn run() -> Result<()> {
             if github_summary {
                 append_github_summary(&results)?;
             }
+            ensure_min_score(&results, min_score)?;
         }
         Commands::Clean {
             path,
@@ -1698,6 +1757,26 @@ mod tests {
         mutant.function = None;
         let report = serde_json::to_value(list_report(&[mutant])).unwrap();
         assert!(report["mutants"][0]["function"].is_null());
+    }
+
+    #[test]
+    fn semantic_threshold_excludes_unviable_and_timeout_and_passes_exact_boundary() {
+        let results = [
+            Outcome::Killed,
+            Outcome::Survived,
+            Outcome::Unviable,
+            Outcome::Timeout,
+        ]
+        .into_iter()
+        .map(|outcome| MutantResult {
+            mutant: report_mutant(),
+            outcome,
+        })
+        .collect::<Vec<_>>();
+        assert!(ensure_min_score(&results, Some(50.0)).is_ok());
+        let failure = ensure_min_score(&results, Some(50.01)).unwrap_err();
+        assert!(failure.downcast_ref::<ScoreThresholdFailure>().is_some());
+        assert!(ensure_min_score(&results, None).is_ok());
     }
 
     #[test]
