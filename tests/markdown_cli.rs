@@ -1,4 +1,7 @@
-use std::{fs, process::Command};
+use std::{fs, process::Command, sync::Mutex};
+
+// Mutation tests rewrite shared fixture scratch paths; serialize the affected cases.
+static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 fn run(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
@@ -9,6 +12,7 @@ fn run(args: &[&str]) -> std::process::Output {
 
 #[test]
 fn markdown_report_is_deterministic_and_includes_links_and_score() {
+    let _fixture_guard = FIXTURE_LOCK.lock().unwrap();
     let args = [
         "test",
         "fixtures/weak-auth",
@@ -43,6 +47,7 @@ fn markdown_report_is_deterministic_and_includes_links_and_score() {
 
 #[test]
 fn github_summary_appends_survivors_without_replacing_stdout() {
+    let _fixture_guard = FIXTURE_LOCK.lock().unwrap();
     let summary_path = std::env::temp_dir().join(format!(
         "soro-mutants-summary-{}-{}.md",
         std::process::id(),
