@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
-use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap_complete::{generate, Shell};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use proc_macro2::Span;
 use serde::Serialize;
@@ -139,6 +140,29 @@ enum Commands {
     },
     /// Print all built-in operator IDs and their descriptions.
     Operators,
+    /// Generate shell completion scripts on stdout.
+    Completions {
+        /// Target shell (bash, zsh, or fish).
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl From<CompletionShell> for Shell {
+    fn from(shell: CompletionShell) -> Self {
+        match shell {
+            CompletionShell::Bash => Shell::Bash,
+            CompletionShell::Zsh => Shell::Zsh,
+            CompletionShell::Fish => Shell::Fish,
+        }
+    }
 }
 
 fn parse_operator(value: &str) -> std::result::Result<String, String> {
@@ -636,6 +660,15 @@ fn main() -> Result<()> {
         }
         Commands::Operators => {
             print_operators(&mut io::stdout())?;
+        }
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            generate(
+                Shell::from(shell),
+                &mut cmd,
+                "cargo-soro-mutants",
+                &mut io::stdout(),
+            );
         }
     }
 
