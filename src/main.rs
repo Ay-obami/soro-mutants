@@ -137,6 +137,9 @@ enum Commands {
         /// Emit SARIF 2.1.0 code-scanning results for surviving mutants.
         #[arg(long, conflicts_with_all = ["json", "markdown", "html"])]
         sarif: bool,
+        /// Emit GitHub Actions warning annotations for surviving mutants on stderr.
+        #[arg(long)]
+        github_annotations: bool,
         /// Append a Markdown report to GITHUB_STEP_SUMMARY when set.
         #[arg(long)]
         github_summary: bool,
@@ -718,6 +721,7 @@ fn run() -> Result<()> {
             markdown,
             html,
             sarif,
+            github_annotations,
             github_summary,
             min_score,
             output,
@@ -751,6 +755,9 @@ fn run() -> Result<()> {
                     print_sarif_report(&mut report, &[])?;
                 } else {
                     writeln!(report, "No matching Soroban semantic mutants found.")?;
+                }
+                if github_annotations {
+                    print_github_annotations(&mut std::io::stderr(), &[])?;
                 }
                 if github_summary {
                     append_github_summary(&[])?;
@@ -833,6 +840,9 @@ fn run() -> Result<()> {
                 print_sarif_report(&mut report, &results)?;
             } else {
                 print_summary(&mut report, &results)?;
+            }
+            if github_annotations {
+                print_github_annotations(&mut std::io::stderr(), &results)?;
             }
             if github_summary {
                 append_github_summary(&results)?;
@@ -1897,6 +1907,61 @@ fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Re
     Ok(())
 }
 
+fn escape_github_annotation_property(value: &str) -> String {
+    value
+        .replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+        .replace(':', "%3A")
+        .replace(',', "%2C")
+}
+
+fn escape_github_annotation_message(value: &str) -> String {
+    value
+        .replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+fn print_github_annotations(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
+    use std::collections::BTreeSet;
+
+    let mut seen = BTreeSet::new();
+    for result in results {
+        if !matches!(result.outcome, Outcome::Survived) {
+            continue;
+        }
+        let mutant = &result.mutant;
+        let path = mutant.file.to_string_lossy().replace('\\', "/");
+        let key = (
+            mutant.id.clone(),
+            path.clone(),
+            mutant.span.line,
+            mutant.span.column,
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        let message = format!(
+            "{} ({}) in {}: tests did not detect {} (test-quality signal, not a confirmed security issue)",
+            mutant.id,
+            mutant.operator,
+            mutant.function.as_deref().unwrap_or("<unknown function>"),
+            mutant.description
+        );
+        writeln!(
+            report,
+            "::warning file={},line={},col={},title={}::{}",
+            escape_github_annotation_property(&path),
+            mutant.span.line,
+            mutant.span.column,
+            escape_github_annotation_property(&format!("Surviving mutant {}", mutant.operator)),
+            escape_github_annotation_message(&message)
+        )?;
+    }
+    Ok(())
+}
+
 fn print_sarif_report(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
     use std::collections::BTreeMap;
 
@@ -1990,6 +2055,43 @@ fn outcome_label(outcome: &Outcome) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_annotations_deduplicate_and_handle_files_outside_pr_diff() {
+        let mutants = discover_mutants(
+            Path::new("fixtures/weak-auth"),
+            Some("AUTH-001"),
+            None,
+            None,
+            &exclusion_set(Vec::new()).unwrap(),
+        )
+        .unwrap();
+        let mut mutant = mutants.into_iter().next().unwrap();
+        mutant.file = PathBuf::from("outside-pr-diff/src/lib.rs");
+        let survived = MutantResult {
+            mutant: mutant.clone(),
+            outcome: Outcome::Survived,
+        };
+        let killed = MutantResult {
+            mutant,
+            outcome: Outcome::Killed,
+        };
+        let mut output = Vec::new();
+        print_github_annotations(&mut output, &[survived.clone(), survived, killed]).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("file=outside-pr-diff/src/lib.rs,line=11,col=9"));
+        assert!(text.contains("AUTH-001"));
+    }
+
+    #[test]
+    fn github_annotation_escaping_prevents_workflow_command_injection() {
+        assert_eq!(
+            escape_github_annotation_property("a,b:c%\\n"),
+            "a%2Cb%3Ac%25\\n"
+        );
+        assert_eq!(escape_github_annotation_message("a%\nb"), "a%25%0Ab");
+    }
 
     #[test]
     fn builtin_operators_are_sorted_by_id() {
