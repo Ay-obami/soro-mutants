@@ -116,9 +116,15 @@ enum Commands {
         /// Command used for the clean baseline and each viable mutant.
         #[arg(long, default_value = "cargo test -q")]
         test_command: String,
-        /// Per-command timeout in seconds.
+        /// Legacy timeout in seconds used for both phases unless overridden.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
+        /// Timeout in seconds for each mutant's separate compile gate.
+        #[arg(long)]
+        compile_timeout: Option<u64>,
+        /// Timeout in seconds for baseline and mutant test commands.
+        #[arg(long)]
+        test_timeout: Option<u64>,
         /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
@@ -307,6 +313,21 @@ enum ProcessResult {
     Passed,
     Failed,
     Timeout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Timeouts {
+    compile: u64,
+    test: u64,
+}
+
+impl Timeouts {
+    fn resolve(legacy: u64, compile: Option<u64>, test: Option<u64>) -> Self {
+        Self {
+            compile: compile.unwrap_or(legacy),
+            test: test.unwrap_or(legacy),
+        }
+    }
 }
 
 struct FunctionState {
@@ -574,9 +595,12 @@ fn run() -> Result<()> {
             target_dir,
             test_command,
             timeout,
+            compile_timeout,
+            test_timeout,
             json,
             output,
         } => {
+            let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
             let root = path
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
@@ -615,7 +639,12 @@ fn run() -> Result<()> {
             if !json {
                 writeln!(report, "Baseline: {}", test_command)?;
             }
-            match run_process(&test_cwd, &test_command, timeout, &baseline_target_dir)? {
+            match run_process(
+                &test_cwd,
+                &test_command,
+                timeouts.test,
+                &baseline_target_dir,
+            )? {
                 ProcessResult::Passed => {
                     if !json {
                         writeln!(report, "Baseline PASS\n")?;
@@ -639,7 +668,7 @@ fn run() -> Result<()> {
                     &mutant,
                     test_dir.as_deref(),
                     &test_command,
-                    timeout,
+                    timeouts,
                     &mutant_target_root,
                     shared_target,
                 )?;
@@ -1142,7 +1171,7 @@ fn execute_mutant(
     mutant: &Mutant,
     test_dir: Option<&Path>,
     test_command: &str,
-    timeout: u64,
+    timeouts: Timeouts,
     target_root: &Path,
     shared_target: bool,
 ) -> Result<Outcome> {
@@ -1164,7 +1193,12 @@ fn execute_mutant(
             .unwrap_or_else(|| scratch.clone());
 
         if let Some(compile_command) = compile_command_for(test_command) {
-            match run_process(&scratch_cwd, &compile_command, timeout, &target_dir)? {
+            match run_process(
+                &scratch_cwd,
+                &compile_command,
+                timeouts.compile,
+                &target_dir,
+            )? {
                 ProcessResult::Failed => return Ok(Outcome::Unviable),
                 ProcessResult::Timeout => return Ok(Outcome::Timeout),
                 ProcessResult::Passed => {}
@@ -1172,7 +1206,7 @@ fn execute_mutant(
         }
 
         Ok(
-            match run_process(&scratch_cwd, test_command, timeout, &target_dir)? {
+            match run_process(&scratch_cwd, test_command, timeouts.test, &target_dir)? {
                 ProcessResult::Passed => Outcome::Survived,
                 ProcessResult::Failed => Outcome::Killed,
                 ProcessResult::Timeout => Outcome::Timeout,
@@ -1859,6 +1893,38 @@ mod tests {
     }
 
     #[test]
+    fn separate_timeout_overrides_do_not_change_other_phase() {
+        assert_eq!(
+            Timeouts::resolve(120, None, None),
+            Timeouts {
+                compile: 120,
+                test: 120
+            }
+        );
+        assert_eq!(
+            Timeouts::resolve(120, Some(10), None),
+            Timeouts {
+                compile: 10,
+                test: 120
+            }
+        );
+        assert_eq!(
+            Timeouts::resolve(120, None, Some(20)),
+            Timeouts {
+                compile: 120,
+                test: 20
+            }
+        );
+        assert_eq!(
+            Timeouts::resolve(120, Some(10), Some(20)),
+            Timeouts {
+                compile: 10,
+                test: 20
+            }
+        );
+    }
+
+    #[test]
     fn execute_mutant_cleans_scratch_worktree() {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1908,8 +1974,16 @@ mod tests {
             .expect("fixture mutation discovery should work");
         let mutant = mutants.first().expect("AUTH-001 should be discovered");
 
-        let outcome = execute_mutant(&root, mutant, None, "cargo test -q", 30, &target, true)
-            .expect("mutant execution should succeed");
+        let outcome = execute_mutant(
+            &root,
+            mutant,
+            None,
+            "cargo test -q",
+            Timeouts::resolve(30, None, None),
+            &target,
+            true,
+        )
+        .expect("mutant execution should succeed");
 
         assert!(matches!(outcome, Outcome::Survived));
         assert!(!root.join(".soro-mutants-worktree").exists());
