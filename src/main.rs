@@ -292,6 +292,39 @@ struct ListReport<'a> {
 struct TestReport<'a> {
     schema_version: u32,
     results: &'a [MutantResult],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<&'a RunMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunMetadata {
+    rustc_version: Option<String>,
+    cargo_version: Option<String>,
+    test_command: String,
+    compile_timeout_seconds: u64,
+    test_timeout_seconds: u64,
+}
+
+impl RunMetadata {
+    fn capture(test_command: &str, timeouts: Timeouts) -> Self {
+        Self {
+            rustc_version: tool_version("rustc"),
+            cargo_version: tool_version("cargo"),
+            test_command: test_command.to_owned(),
+            compile_timeout_seconds: timeouts.compile,
+            test_timeout_seconds: timeouts.test,
+        }
+    }
+}
+
+fn tool_version(binary: &str) -> Option<String> {
+    let output = Command::new(binary).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    let version = version.trim();
+    (!version.is_empty()).then(|| version.to_owned())
 }
 
 fn list_report(mutants: &[Mutant]) -> ListReport<'_> {
@@ -305,6 +338,17 @@ fn test_report(results: &[MutantResult]) -> TestReport<'_> {
     TestReport {
         schema_version: JSON_SCHEMA_VERSION,
         results,
+        metadata: None,
+    }
+}
+
+fn test_report_with_metadata<'a>(
+    results: &'a [MutantResult],
+    metadata: &'a RunMetadata,
+) -> TestReport<'a> {
+    TestReport {
+        metadata: Some(metadata),
+        ..test_report(results)
     }
 }
 
@@ -601,6 +645,7 @@ fn run() -> Result<()> {
             output,
         } => {
             let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
+            let metadata = RunMetadata::capture(&test_command, timeouts);
             let root = path
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
@@ -618,7 +663,7 @@ fn run() -> Result<()> {
                     writeln!(
                         report,
                         "{}",
-                        serde_json::to_string_pretty(&test_report(&[]))?
+                        serde_json::to_string_pretty(&test_report_with_metadata(&[], &metadata))?
                     )?;
                 } else {
                     writeln!(report, "No matching Soroban semantic mutants found.")?;
@@ -690,7 +735,7 @@ fn run() -> Result<()> {
                 writeln!(
                     report,
                     "{}",
-                    serde_json::to_string_pretty(&test_report(&results))?
+                    serde_json::to_string_pretty(&test_report_with_metadata(&results, &metadata))?
                 )?;
             } else {
                 print_summary(&mut report, &results)?;

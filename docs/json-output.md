@@ -9,11 +9,22 @@ independent of the package version. Text output is unchanged.
 `end_line`, `end_column`), `original`, `replacement`, and `description`.
 Internal byte offsets are not serialized.
 
-`test` returns `{"schema_version": 1, "results": [...]}`. Each result contains
+`test` returns `{"schema_version": 1, "results": [...], "metadata": {...}}`. Each result contains
 `mutant` with those same fields and `outcome`, one of `KILLED`, `SURVIVED`,
-`UNVIABLE`, or `TIMEOUT`. See the [illustrative report](json-report-example.json).
-Empty successful reports retain the envelope and an empty array. Baseline failures
-still fail the command instead of emitting a successful report.
+`UNVIABLE`, or `TIMEOUT`. See the [illustrative legacy report](json-report-example.json).
+The additional `metadata` object records `rustc_version` and `cargo_version` (strings,
+or null when unavailable), `test_command` (the exact configured command),
+`compile_timeout_seconds`, and `test_timeout_seconds` (the effective budgets after
+legacy `--timeout` fallback). The metadata is also present for successful runs
+with no matching mutants. Empty successful reports retain an empty results array.
+Baseline failures still fail the command instead of emitting a successful report.
+
+Privacy: reports intentionally exclude environment-variable dumps, host names,
+user names, absolute working directories, and Cargo target-cache paths. The
+configured `test_command` is included verbatim for reproducibility, so avoid
+embedding passwords or tokens in that command and review reports before sharing
+them publicly. Toolchain versions are queried via `rustc --version` and
+`cargo --version`; failures to query either tool do not fail a mutation run.
 
 ## Compatibility policy
 
