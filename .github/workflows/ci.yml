@@ -107,3 +107,26 @@ jobs:
           printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+EVENT-002' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+
+      - name: Weak TTL lifecycle test must miss TTL mutants
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-ttl-lifecycle \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^SURVIVED[[:space:]]+TTL-002' <<<"$output"
+          grep -Eq '^SURVIVED[[:space:]]+TTL-003' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Strong TTL lifecycle test must kill TTL mutants
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-ttl-lifecycle \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^KILLED[[:space:]]+TTL-002' <<<"$output"
+          grep -Eq '^KILLED[[:space:]]+TTL-003' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"

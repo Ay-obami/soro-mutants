@@ -61,6 +61,14 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "TTL-001",
         "remove an extend_ttl() call on a Soroban storage accessor",
     ),
+    (
+        "TTL-002",
+        "renew storage TTL even when remaining lifetime exceeds threshold",
+    ),
+    (
+        "TTL-003",
+        "shorten storage TTL extension target to its threshold",
+    ),
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -644,6 +652,36 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 "()".to_string(),
                 "remove extend_ttl()".to_string(),
             );
+            // Instance has two arguments; persistent/temporary keyed storage has three.
+            // Change only the lifecycle parameters, not the key or receiver.
+            if matches!(node.args.len(), 2 | 3) {
+                let args: Vec<_> = node.args.iter().collect();
+                let threshold = args[args.len() - 2];
+                let target = args[args.len() - 1];
+                if source_for_span(self.source, threshold.span())
+                    .is_some_and(|value| value.trim() != "0")
+                {
+                    self.push_mutant(
+                        "TTL-002",
+                        threshold.span(),
+                        "0".to_owned(),
+                        "set TTL renewal threshold to zero".to_owned(),
+                    );
+                }
+                if let (Some(threshold_text), Some(target_text)) = (
+                    source_for_span(self.source, threshold.span()),
+                    source_for_span(self.source, target.span()),
+                ) {
+                    if threshold_text.trim() != target_text.trim() {
+                        self.push_mutant(
+                            "TTL-003",
+                            target.span(),
+                            threshold_text.to_owned(),
+                            "shorten TTL extension target to renewal threshold".to_owned(),
+                        );
+                    }
+                }
+            }
         }
 
         if node.method == "require_auth_for_args" && node.args.len() == 1 {
@@ -3034,6 +3072,49 @@ mod tests {
         );
 
         assert!(mutants.iter().any(|m| m.operator == "TTL-001"));
+    }
+
+    #[test]
+    fn ttl_lifecycle_mutants_keep_call_and_key() {
+        let mutants = mutations_for(
+            r#"
+            fn keep_alive(env: Env, key: DataKey) {
+                env.storage().instance().extend_ttl(100, 1000);
+                env.storage().persistent().extend_ttl(&key, 100, 1000);
+            }
+        "#,
+        );
+        assert_eq!(
+            mutants.iter().filter(|m| m.operator == "TTL-002").count(),
+            2
+        );
+        assert_eq!(
+            mutants.iter().filter(|m| m.operator == "TTL-003").count(),
+            2
+        );
+        assert!(mutants
+            .iter()
+            .filter(|m| m.operator == "TTL-002")
+            .all(|m| m.original == "100" && m.replacement == "0"));
+        assert!(mutants
+            .iter()
+            .filter(|m| m.operator == "TTL-003")
+            .all(|m| m.original == "1000" && m.replacement == "100"));
+    }
+
+    #[test]
+    fn ttl_lifecycle_skips_noop_and_non_storage_calls() {
+        let mutants = mutations_for(
+            r#"
+            fn work(env: Env, cache: Cache) {
+                env.storage().instance().extend_ttl(0, 0);
+                cache.extend_ttl(100, 1000);
+            }
+        "#,
+        );
+        assert!(!mutants
+            .iter()
+            .any(|m| matches!(m.operator.as_str(), "TTL-002" | "TTL-003")));
     }
 
     #[test]

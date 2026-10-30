@@ -137,3 +137,12 @@ This deliberately does **not** simplify algebra, compare runtime results, or tre
 The normal `list` and `test` text output gives the total suppressed count and the count for each reason. JSON reports include a `suppression` object with `count` and per-candidate `details` when something was suppressed; the existing JSON shape remains unchanged when no candidates are suppressed. `--count-only` continues to print only the retained-mutant count.
 
 **These conservative heuristics are not a proof of general program equivalence.** Many context-dependent equivalent mutants remain intentionally unsuppressed rather than risk hiding a meaningful test gap.
+
+## TTL-002 / TTL-003 — lifecycle renewal policies
+
+For recognized Soroban `instance().extend_ttl(threshold, target)` and keyed `persistent()/temporary().extend_ttl(&key, threshold, target)` calls, the following operators leave the call itself intact:
+
+- **TTL-002:** change only the renewal threshold to `0` (renewal ordinarily won't occur while the entry is still live).
+- **TTL-003:** change only the extension target to the original threshold (shortens the requested post-renewal lifetime).
+
+Both substitutions are `u32`-compatible and preserve keys, source spans and deterministic IDs. Identical replacements are skipped. These are lifecycle-policy checks, not generic arithmetic mutations. Tests should control ledger minimum TTL and sequence and assert remaining TTL, not just a function's return value. Depending on the host's initial TTL and the chosen parameters, either candidate may be observationally equivalent; Soro Mutants does not claim to prove equivalence. Compile-invalid mutations are classified `UNVIABLE` by the standard separate compile gate.
