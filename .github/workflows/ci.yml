@@ -130,3 +130,25 @@ jobs:
           grep -Eq '^KILLED[[:space:]]+TTL-002' <<<"$output"
           grep -Eq '^KILLED[[:space:]]+TTL-003' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Weak cross-contract routing test must miss CALL-001
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-call-target \
+            --operator CALL-001 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^SURVIVED[[:space:]]+CALL-001' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Strong cross-contract routing assertion must kill CALL-001
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-call-target \
+            --operator CALL-001 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^KILLED[[:space:]]+CALL-001' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
