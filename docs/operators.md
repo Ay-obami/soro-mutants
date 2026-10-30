@@ -146,3 +146,9 @@ For recognized Soroban `instance().extend_ttl(threshold, target)` and keyed `per
 - **TTL-003:** change only the extension target to the original threshold (shortens the requested post-renewal lifetime).
 
 Both substitutions are `u32`-compatible and preserve keys, source spans and deterministic IDs. Identical replacements are skipped. These are lifecycle-policy checks, not generic arithmetic mutations. Tests should control ledger minimum TTL and sequence and assert remaining TTL, not just a function's return value. Depending on the host's initial TTL and the chosen parameters, either candidate may be observationally equivalent; Soro Mutants does not claim to prove equivalence. Compile-invalid mutations are classified `UNVIABLE` by the standard separate compile gate.
+
+## CALL-001 — direct cross-contract dependency address substitution
+
+For a direct Soroban env.invoke_contract call where env is an explicit Env parameter and the first argument is a reference to an explicit Address parameter, substitute another explicitly typed Address parameter in the same function. Only the first argument changes; method, return type, function name and other arguments remain intact. Output identifies both original and substituted target names.
+
+This scope intentionally excludes dynamic expressions, address locals, struct fields, contract-client helpers, non-Env receivers and arbitrary same-named methods. Dependencies that return identical values can let the mutant survive despite incorrect routing. Strong tests should assert which dependency's state changed rather than checking the return value alone.

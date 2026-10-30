@@ -45,6 +45,7 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "AUTH-003",
         "replace require_auth_for_args(...) argument set with an empty Soroban Vec",
     ),
+    ("CALL-001", "replace direct Env::invoke_contract dependency address with another typed Address parameter"),
     (
         "EVENT-001",
         "remove a Soroban event publication (env.events().publish(...))",
@@ -619,6 +620,36 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        // Only mutate a direct env.invoke_contract call with a simple typed
+        // Address parameter as its first argument. Avoid arbitrary typed inference.
+        if node.method == "invoke_contract"
+            && node.args.len() == 3
+            && receiver_ident(&node.receiver).is_some_and(|name| self.env_params.contains(&name))
+        {
+            if let Some(Expr::Reference(target_ref)) = node.args.first() {
+                if let Some(original_target) = receiver_ident(&target_ref.expr) {
+                    if self.address_params.contains(&original_target) {
+                        for alternate in self
+                            .address_params
+                            .iter()
+                            .filter(|name| *name != &original_target)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                        {
+                            self.push_mutant(
+                                "CALL-001",
+                                target_ref.span(),
+                                format!("&{alternate}"),
+                                format!(
+                                    "invoke contract at {alternate} instead of {original_target}"
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         if node.method == "publish" && is_soroban_events_receiver(&node.receiver, &self.env_params)
         {
             self.push_mutant(
@@ -3059,6 +3090,40 @@ mod tests {
             .expect("TOKEN-001 should be generated");
 
         assert!(mutant.replacement.contains("transfer(&to, &from, &amount)"));
+    }
+
+    #[test]
+    fn call_target_mutates_only_typed_dependency_address() {
+        let source = r#"
+            fn route(env: Env, primary: Address, alternate: Address) -> u32 {
+                env.invoke_contract::<u32>(&primary, &Symbol::new(&env, "ping"), Vec::new(&env))
+            }
+        "#;
+        let mutants = mutations_for(source);
+        let found: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "CALL-001")
+            .collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].original, "&primary");
+        assert_eq!(found[0].replacement, "&alternate");
+        assert!(found[0]
+            .description
+            .contains("alternate instead of primary"));
+    }
+
+    #[test]
+    fn call_target_ignores_untyped_or_dynamic_receivers() {
+        let mutants = mutations_for(
+            r#"
+            fn route(env: Env, primary: Address, alternate: Address, helper: Helper) {
+                helper.invoke_contract(&primary, &alternate, ());
+                env.invoke_contract::<u32>(&get_target(), &Symbol::new(&env, "ping"), Vec::new(&env));
+                env.invoke_contract::<u32>(&some_addr, &Symbol::new(&env, "ping"), Vec::new(&env));
+            }
+        "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "CALL-001"));
     }
 
     #[test]
