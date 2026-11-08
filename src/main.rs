@@ -3560,6 +3560,19 @@ mod tests {
     }
 
     #[test]
+    fn event_topic_substitution_ignores_tuple_and_symbol_event_shapes() {
+        let mutants = mutations_for(
+            r#"
+            fn record(env: Env, actor: Address, alternate: Address) {
+                env.events().publish((symbol_short!("actor"), actor), alternate);
+                env.events().publish(("actor", actor), alternate);
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "EVENT-005"));
+    }
+
+    #[test]
     fn typed_event_matcher_rejects_non_event_publish_and_non_statement() {
         let source = r#"
             struct FakeEvent { value: u32 }
