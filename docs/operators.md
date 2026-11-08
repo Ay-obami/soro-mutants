@@ -157,6 +157,12 @@ The normal `list` and `test` text output gives the total suppressed count and th
 
 **These conservative heuristics are not a proof of general program equivalence.** Many context-dependent equivalent mutants remain intentionally unsuppressed rather than risk hiding a meaningful test gap.
 
+## TOKEN-003 — substitute the token transfer amount
+
+For a recognized Soroban token-client `transfer(&from, &to, &amount)` call, this operator is emitted only when the third argument is a reference to a simple function parameter with a primitive integer type. It generates two deterministic replacements: `&0` and `&1`.
+
+The narrow shape keeps mutations type-inferred by the token API and avoids arithmetic that could overflow or underflow. Computed expressions, aliases, generic number wrappers, and non-token `.transfer(...)` calls are ignored. A zero mutant asks whether tests reject no value movement; a one mutant asks whether they enforce the exact amount rather than merely some movement.
+
 ## TTL-002 / TTL-003 — lifecycle renewal policies
 
 For recognized Soroban `instance().extend_ttl(threshold, target)` and keyed `persistent()/temporary().extend_ttl(&key, threshold, target)` calls, the following operators leave the call itself intact:

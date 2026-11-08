@@ -219,3 +219,25 @@ jobs:
           printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+EVENT-005' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Weak token amount test must miss TOKEN-003
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-token-amount \
+            --operator TOKEN-003 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^SURVIVED[[:space:]]+TOKEN-003' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Strong token amount assertion must kill TOKEN-003
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-token-amount \
+            --operator TOKEN-003 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^KILLED[[:space:]]+TOKEN-003' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"

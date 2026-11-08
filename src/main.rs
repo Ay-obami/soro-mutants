@@ -71,6 +71,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "swap the sender and recipient arguments of a token transfer",
     ),
     (
+        "TOKEN-003",
+        "replace a typed token transfer amount with zero or one",
+    ),
+    (
         "TTL-001",
         "remove an extend_ttl() call on a Soroban storage accessor",
     ),
@@ -802,6 +806,23 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                     replacement,
                     "swap token transfer sender and recipient".to_string(),
                 );
+            }
+
+            if let Some(amount_arg) = node.args.iter().nth(2) {
+                if let Expr::Reference(reference) = amount_arg {
+                    if let Some(amount_name) = receiver_ident(&reference.expr) {
+                        if self.numeric_params.contains(&amount_name) {
+                            for (replacement, label) in [("&0", "zero"), ("&1", "one")] {
+                                self.push_mutant(
+                                    "TOKEN-003",
+                                    amount_arg.span(),
+                                    replacement.to_owned(),
+                                    format!("transfer {label} instead of {amount_name}"),
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -3721,6 +3742,38 @@ mod tests {
         );
 
         assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn token_amount_mutants_use_zero_and_one_for_typed_numeric_reference() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(token: TokenClient, from: Address, to: Address, amount: i128) {
+                token.transfer(&from, &to, &amount);
+            }
+            "#,
+        );
+        let amounts: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "TOKEN-003")
+            .collect();
+        assert_eq!(amounts.len(), 2);
+        assert_eq!(amounts[0].original, "&amount");
+        assert!(amounts.iter().any(|m| m.replacement == "&0"));
+        assert!(amounts.iter().any(|m| m.replacement == "&1"));
+    }
+
+    #[test]
+    fn token_amount_mutation_rejects_untyped_or_computed_amounts() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(token: TokenClient, from: Address, to: Address, amount: Amount, count: i128) {
+                token.transfer(&from, &to, &amount);
+                token.transfer(&from, &to, &(count + 1));
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-003"));
     }
 
     #[test]
