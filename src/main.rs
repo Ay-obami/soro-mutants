@@ -59,6 +59,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "replace an Address field in a typed Soroban event with another Address parameter",
     ),
     (
+        "EVENT-004",
+        "replace a numeric field in a typed Soroban event with zero",
+    ),
+    (
         "TOKEN-001",
         "swap the sender and recipient arguments of a token transfer",
     ),
@@ -462,6 +466,7 @@ struct FunctionState {
     address_params: Vec<String>,
     token_client_vars: Vec<String>,
     storage_accessor_vars: Vec<String>,
+    numeric_params: Vec<String>,
     env_params: Vec<String>,
 }
 
@@ -472,6 +477,7 @@ struct SemanticVisitor<'a> {
     address_params: Vec<String>,
     token_client_vars: Vec<String>,
     storage_accessor_vars: Vec<String>,
+    numeric_params: Vec<String>,
     env_params: Vec<String>,
     typed_event_structs: std::collections::HashSet<String>,
     mutants: Vec<Mutant>,
@@ -486,6 +492,7 @@ impl<'a> SemanticVisitor<'a> {
             address_params: Vec::new(),
             token_client_vars: Vec::new(),
             storage_accessor_vars: Vec::new(),
+            numeric_params: Vec::new(),
             env_params: Vec::new(),
             typed_event_structs: std::collections::HashSet::new(),
             mutants: Vec::new(),
@@ -501,6 +508,7 @@ impl<'a> SemanticVisitor<'a> {
                 token_client_params(sig),
             ),
             storage_accessor_vars: std::mem::take(&mut self.storage_accessor_vars),
+            numeric_params: std::mem::replace(&mut self.numeric_params, numeric_params(sig)),
             env_params: std::mem::replace(&mut self.env_params, env_params(sig)),
         }
     }
@@ -510,6 +518,7 @@ impl<'a> SemanticVisitor<'a> {
         self.address_params = previous.address_params;
         self.token_client_vars = previous.token_client_vars;
         self.storage_accessor_vars = previous.storage_accessor_vars;
+        self.numeric_params = previous.numeric_params;
         self.env_params = previous.env_params;
     }
 
@@ -590,36 +599,53 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 
                     if let Expr::Struct(event) = call.receiver.as_ref() {
                         for field in &event.fields {
-                            let Some(original_actor) = receiver_ident(&field.expr) else {
-                                continue;
-                            };
-                            if !self.address_params.contains(&original_actor) {
-                                continue;
-                            }
                             let field_name = match &field.member {
                                 syn::Member::Named(name) => name.to_string(),
                                 syn::Member::Unnamed(_) => continue,
                             };
-                            for alternate in self
-                                .address_params
-                                .iter()
-                                .filter(|name| *name != &original_actor)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                            {
-                                let replacement = if field.colon_token.is_none() {
-                                    format!("{field_name}: {alternate}")
-                                } else {
-                                    alternate.clone()
-                                };
-                                self.push_mutant(
-                                    "EVENT-003",
-                                    field.expr.span(),
-                                    replacement,
-                                    format!(
-                                        "emit {alternate} instead of {original_actor} in event field {field_name}"
-                                    ),
-                                );
+
+                            if let Some(original_actor) = receiver_ident(&field.expr) {
+                                if self.address_params.contains(&original_actor) {
+                                    for alternate in self
+                                        .address_params
+                                        .iter()
+                                        .filter(|name| *name != &original_actor)
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                    {
+                                        let replacement = if field.colon_token.is_none() {
+                                            format!("{field_name}: {alternate}")
+                                        } else {
+                                            alternate.clone()
+                                        };
+                                        self.push_mutant(
+                                            "EVENT-003",
+                                            field.expr.span(),
+                                            replacement,
+                                            format!(
+                                                "emit {alternate} instead of {original_actor} in event field {field_name}"
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+
+                            if let Some(original_value) = receiver_ident(&field.expr) {
+                                if self.numeric_params.contains(&original_value) {
+                                    let replacement = if field.colon_token.is_none() {
+                                        format!("{field_name}: 0")
+                                    } else {
+                                        "0".to_owned()
+                                    };
+                                    self.push_mutant(
+                                        "EVENT-004",
+                                        field.expr.span(),
+                                        replacement,
+                                        format!(
+                                            "emit zero instead of {original_value} in event field {field_name}"
+                                        ),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1711,6 +1737,44 @@ fn type_is_address(ty: &Type) -> bool {
             .map(|segment| segment.ident == "Address")
             .unwrap_or(false),
         Type::Reference(reference) => type_is_address(&reference.elem),
+        _ => false,
+    }
+}
+
+fn numeric_params(sig: &Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(pat_type) if type_is_numeric_primitive(&pat_type.ty) => {
+                match pat_type.pat.as_ref() {
+                    Pat::Ident(ident) => Some(ident.ident.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn type_is_numeric_primitive(ty: &Type) -> bool {
+    match ty {
+        Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+            matches!(
+                path.path.segments[0].ident.to_string().as_str(),
+                "i8" | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+            )
+        }
+        Type::Reference(reference) => type_is_numeric_primitive(&reference.elem),
         _ => false,
     }
 }
@@ -3352,6 +3416,41 @@ mod tests {
             "#,
         );
         assert!(!mutants.iter().any(|m| m.operator == "EVENT-003"));
+    }
+
+    #[test]
+    fn typed_event_numeric_value_substitution_targets_primitive_numeric_params() {
+        let mutants = mutations_for(
+            r#"
+            #[contractevent]
+            struct TransferNotice { recipient: Address, amount: i128 }
+            fn record(env: Env, recipient: Address, amount: i128) {
+                TransferNotice { recipient, amount }.publish(&env);
+            }
+            "#,
+        );
+        let value = mutants
+            .iter()
+            .find(|m| m.operator == "EVENT-004")
+            .expect("EVENT-004 mutant");
+        assert_eq!(value.original, "amount");
+        assert_eq!(value.replacement, "amount: 0");
+    }
+
+    #[test]
+    fn event_value_substitution_ignores_non_numeric_and_non_event_fields() {
+        let mutants = mutations_for(
+            r#"
+            struct FakeEvent { amount: i128 }
+            #[contractevent]
+            struct RealEvent { label: String }
+            fn record(env: Env, amount: i128, label: String) {
+                FakeEvent { amount }.publish(&env);
+                RealEvent { label }.publish(&env);
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "EVENT-004"));
     }
 
     #[test]
