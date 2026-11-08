@@ -157,65 +157,65 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-actor \\
-            --operator EVENT-003 \\
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak-event-actor" \\
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-actor \
+            --operator EVENT-003 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak-event-actor" \
             --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\\n' "$output"
+          printf '%s\n' "$output"
           grep -Eq '^SURVIVED[[:space:]]+EVENT-003' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
       - name: Strong event actor assertion must kill EVENT-003
         shell: bash
         run: |
           set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-actor \\
-            --operator EVENT-003 \\
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong-event-actor" \\
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-actor \
+            --operator EVENT-003 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong-event-actor" \
             --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\\n' "$output"
+          printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+EVENT-003' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
       - name: Weak event value test must miss EVENT-004
         shell: bash
         run: |
           set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-value \\
-            --operator EVENT-004 \\
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak-event-value" \\
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-value \
+            --operator EVENT-004 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak-event-value" \
             --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\\n' "$output"
+          printf '%s\n' "$output"
           grep -Eq '^SURVIVED[[:space:]]+EVENT-004' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
       - name: Strong event value assertion must kill EVENT-004
         shell: bash
         run: |
           set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-value \\
-            --operator EVENT-004 \\
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong-event-value" \\
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-value \
+            --operator EVENT-004 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong-event-value" \
             --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\\n' "$output"
+          printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+EVENT-004' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
       - name: Weak event topic test must miss EVENT-005
         shell: bash
         run: |
           set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-topic \\
-            --operator EVENT-005 \\
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak-event-topic" \\
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-topic \
+            --operator EVENT-005 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak-event-topic" \
             --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\\n' "$output"
+          printf '%s\n' "$output"
           grep -Eq '^SURVIVED[[:space:]]+EVENT-005' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
       - name: Strong event topic assertion must kill EVENT-005
         shell: bash
         run: |
           set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-topic \\
-            --operator EVENT-005 \\
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong-event-topic" \\
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-topic \
+            --operator EVENT-005 \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong-event-topic" \
             --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\\n' "$output"
+          printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+EVENT-005' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
