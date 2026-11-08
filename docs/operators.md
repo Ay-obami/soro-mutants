@@ -70,7 +70,9 @@ This intentionally does **not** recognize unrelated same-named methods on arbitr
 
 ## TTL-001 — remove TTL extension
 
-Recognizes `extend_ttl(...)` only when it is called on a Soroban `instance`, `persistent`, or `temporary` storage accessor, including simple locals initialized from those accessors, and replaces the call expression with `()`.
+Recognizes `extend_ttl(...)` only when it is called on a Soroban `instance`, `persistent`, or `temporary` storage accessor, including simple locals and explicitly typed locals initialized directly from those accessors, and replaces the call expression with `()`.
+
+Local recognition is deliberately one hop: aliases of an already recognized local are ignored rather than guessed through dataflow. This keeps TTL discovery conservative and prevents unrelated same-named methods from being pulled in through ambiguous aliases.
 
 Arbitrary methods named `extend_ttl` are ignored. The operator asks whether tests actually enforce the expected state-lifetime behavior.
 

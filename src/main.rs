@@ -602,16 +602,12 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 
     fn visit_local(&mut self, node: &'ast Local) {
-        if let (Pat::Ident(ident), Some(init)) = (&node.pat, &node.init) {
-            let name = ident.ident.to_string();
-
-            if is_token_client_constructor(&init.expr) && !self.token_client_vars.contains(&name) {
+        if let Some((name, init)) = local_binding_name_and_init(node) {
+            if is_token_client_constructor(init) && !self.token_client_vars.contains(&name) {
                 self.token_client_vars.push(name.clone());
             }
 
-            if is_soroban_storage_accessor(&init.expr)
-                && !self.storage_accessor_vars.contains(&name)
-            {
+            if is_soroban_storage_accessor(init) && !self.storage_accessor_vars.contains(&name) {
                 self.storage_accessor_vars.push(name);
             }
         }
@@ -1780,6 +1776,19 @@ fn is_token_transfer_receiver(expr: &Expr, known_clients: &[String]) -> bool {
     receiver_ident(expr)
         .map(|name| known_clients.iter().any(|candidate| candidate == &name))
         .unwrap_or(false)
+}
+
+fn local_binding_name_and_init(local: &Local) -> Option<(String, &Expr)> {
+    let init = local.init.as_ref()?;
+    let ident = match &local.pat {
+        Pat::Ident(ident) => ident,
+        Pat::Type(typed) => match typed.pat.as_ref() {
+            Pat::Ident(ident) => ident,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some((ident.ident.to_string(), init.expr.as_ref()))
 }
 
 fn is_soroban_storage_accessor(expr: &Expr) -> bool {
@@ -3207,6 +3216,36 @@ mod tests {
         );
 
         assert!(mutants.iter().any(|m| m.operator == "TTL-001"));
+    }
+
+    #[test]
+    fn typed_local_storage_accessor_gets_ttl_mutants_without_following_aliases() {
+        let mutants = mutations_for(
+            r#"
+            fn keep_alive(env: Env, key: DataKey) {
+                let persistent: soroban_sdk::storage::Persistent = env.storage().persistent();
+                persistent.extend_ttl(&key, 100, 1000);
+                let alias = persistent;
+                alias.extend_ttl(&key, 100, 1000);
+            }
+            "#,
+        );
+
+        assert_eq!(
+            mutants.iter().filter(|m| m.operator == "TTL-001").count(),
+            1
+        );
+        assert_eq!(
+            mutants.iter().filter(|m| m.operator == "TTL-002").count(),
+            1
+        );
+        assert_eq!(
+            mutants.iter().filter(|m| m.operator == "TTL-003").count(),
+            1
+        );
+        assert!(mutants
+            .iter()
+            .all(|m| !m.original.contains("alias.extend_ttl")));
     }
 
     #[test]

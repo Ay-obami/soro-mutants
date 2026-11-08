@@ -8,7 +8,8 @@ pub struct TtlContract;
 impl TtlContract {
     pub fn save(env: Env, value: u32) -> bool {
         env.storage().persistent().set(&1u32, &value);
-        env.storage().persistent().extend_ttl(&1u32, 100, 1000);
+        let persistent: soroban_sdk::storage::Persistent = env.storage().persistent();
+        persistent.extend_ttl(&1u32, 100, 1000);
         true
     }
 }
