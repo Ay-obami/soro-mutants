@@ -105,6 +105,11 @@ The typed syntax above is supported by Soroban SDK 25.3.0's `#[contractevent]` m
 For a standalone typed `#[contractevent]` struct literal published directly with `.publish(&env)`, Soro Mutants can replace a simple `Address` field value with another explicit `Address` parameter from the same function. Shorthand fields are rewritten explicitly (for example, `actor` becomes `actor: alternate`) so the event schema itself is preserved.
 
 The recognizer does not mutate arbitrary structs, helper-returned events, non-`Address` values, variables holding event instances, or values inferred through aliases. Survivors indicate that tests may assert event existence without checking the emitted actor.
+## EVENT-004 — substitute a numeric event value
+
+For a standalone typed `#[contractevent]` struct literal published directly with `.publish(&env)`, Soro Mutants replaces a simple primitive-integer function parameter used as an event field with `0`. Shorthand fields are expanded (for example, `amount` becomes `amount: 0`) so the event schema remains unchanged.
+
+Supported numeric parameter types are Rust primitive signed and unsigned integers (`i8` through `i128`, `u8` through `u128`, plus `isize`/`usize`). Generic numbers, aliases, arithmetic expressions, and arbitrary structs are intentionally ignored. Zero is deterministic, type-inferred by the event field, and avoids introducing overflow or underflow. Survivors suggest tests may observe the event without enforcing its numeric payload.
 
 ## TOKEN-001 — reverse direct transfer direction
 
