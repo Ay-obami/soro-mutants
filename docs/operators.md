@@ -100,6 +100,12 @@ The initial supported shape is a direct `EventStruct { ... }.publish(&env);` sta
 
 The typed syntax above is supported by Soroban SDK 25.3.0's `#[contractevent]` macro.
 
+## EVENT-003 — substitute an event actor Address
+
+For a standalone typed `#[contractevent]` struct literal published directly with `.publish(&env)`, Soro Mutants can replace a simple `Address` field value with another explicit `Address` parameter from the same function. Shorthand fields are rewritten explicitly (for example, `actor` becomes `actor: alternate`) so the event schema itself is preserved.
+
+The recognizer does not mutate arbitrary structs, helper-returned events, non-`Address` values, variables holding event instances, or values inferred through aliases. Survivors indicate that tests may assert event existence without checking the emitted actor.
+
 ## TOKEN-001 — reverse direct transfer direction
 
 Recognizes a direct three-argument method call named `transfer` only when the receiver is a known Soroban token client. v0.1 recognizes explicit `TokenClient` / `token::Client` parameters, local variables initialized from token-client constructors, and direct token-client constructor chains. It then swaps the first two arguments while preserving the third.

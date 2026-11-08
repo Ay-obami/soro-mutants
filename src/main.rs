@@ -55,6 +55,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "remove a standalone #[contractevent] typed event publication",
     ),
     (
+        "EVENT-003",
+        "replace an Address field in a typed Soroban event with another Address parameter",
+    ),
+    (
         "TOKEN-001",
         "swap the sender and recipient arguments of a token transfer",
     ),
@@ -583,6 +587,42 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                         "()".to_owned(),
                         "remove direct typed Soroban contract event publication".to_owned(),
                     );
+
+                    if let Expr::Struct(event) = call.receiver.as_ref() {
+                        for field in &event.fields {
+                            let Some(original_actor) = receiver_ident(&field.expr) else {
+                                continue;
+                            };
+                            if !self.address_params.contains(&original_actor) {
+                                continue;
+                            }
+                            let field_name = match &field.member {
+                                syn::Member::Named(name) => name.to_string(),
+                                syn::Member::Unnamed(_) => continue,
+                            };
+                            for alternate in self
+                                .address_params
+                                .iter()
+                                .filter(|name| *name != &original_actor)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                            {
+                                let replacement = if field.colon_token.is_none() {
+                                    format!("{field_name}: {alternate}")
+                                } else {
+                                    alternate.clone()
+                                };
+                                self.push_mutant(
+                                    "EVENT-003",
+                                    field.expr.span(),
+                                    replacement,
+                                    format!(
+                                        "emit {alternate} instead of {original_actor} in event field {field_name}"
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3276,6 +3316,42 @@ mod tests {
         );
         assert!(transformed.contains("();"));
         assert!(syn::parse_file(&transformed).is_ok());
+    }
+
+    #[test]
+    fn typed_event_actor_substitution_uses_only_explicit_address_parameters() {
+        let mutants = mutations_for(
+            r#"
+            #[contractevent]
+            struct TransferNotice { actor: Address, amount: i128 }
+            fn record(env: Env, actor: Address, alternate: Address, amount: i128) {
+                TransferNotice { actor, amount }.publish(&env);
+            }
+            "#,
+        );
+        let actor = mutants
+            .iter()
+            .find(|m| m.operator == "EVENT-003")
+            .expect("EVENT-003 mutant");
+        assert_eq!(actor.original, "actor");
+        assert_eq!(actor.replacement, "actor: alternate");
+        assert!(actor.description.contains("alternate instead of actor"));
+    }
+
+    #[test]
+    fn event_actor_substitution_ignores_untyped_and_non_event_structs() {
+        let mutants = mutations_for(
+            r#"
+            struct FakeEvent { actor: Address }
+            #[contractevent]
+            struct RealEvent { actor: Address }
+            fn record(env: Env, actor: Address, alternate: String) {
+                FakeEvent { actor }.publish(&env);
+                RealEvent { actor }.publish(&env);
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "EVENT-003"));
     }
 
     #[test]
