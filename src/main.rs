@@ -63,6 +63,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "replace a numeric field in a typed Soroban event with zero",
     ),
     (
+        "EVENT-005",
+        "replace a typed Soroban event topic Address with another Address parameter",
+    ),
+    (
         "TOKEN-001",
         "swap the sender and recipient arguments of a token transfer",
     ),
@@ -480,6 +484,7 @@ struct SemanticVisitor<'a> {
     numeric_params: Vec<String>,
     env_params: Vec<String>,
     typed_event_structs: std::collections::HashSet<String>,
+    typed_event_topic_fields: std::collections::HashMap<String, std::collections::HashSet<String>>,
     mutants: Vec<Mutant>,
 }
 
@@ -495,6 +500,7 @@ impl<'a> SemanticVisitor<'a> {
             numeric_params: Vec::new(),
             env_params: Vec::new(),
             typed_event_structs: std::collections::HashSet::new(),
+            typed_event_topic_fields: std::collections::HashMap::new(),
             mutants: Vec::new(),
         }
     }
@@ -571,6 +577,35 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 _ => None,
             })
             .collect();
+        self.typed_event_topic_fields = node
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Struct(item)
+                    if self.typed_event_structs.contains(&item.ident.to_string()) =>
+                {
+                    let fields = match &item.fields {
+                        syn::Fields::Named(fields) => fields
+                            .named
+                            .iter()
+                            .filter(|field| {
+                                field.attrs.iter().any(|attribute| {
+                                    attribute
+                                        .path()
+                                        .segments
+                                        .last()
+                                        .is_some_and(|segment| segment.ident == "topic")
+                                })
+                            })
+                            .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
+                            .collect::<std::collections::HashSet<_>>(),
+                        _ => std::collections::HashSet::new(),
+                    };
+                    Some((item.ident.to_string(), fields))
+                }
+                _ => None,
+            })
+            .collect();
         visit::visit_file(self, node);
     }
 
@@ -598,6 +633,12 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                     );
 
                     if let Expr::Struct(event) = call.receiver.as_ref() {
+                        let event_name = event.path.get_ident().map(ToString::to_string);
+                        let topic_fields = event_name
+                            .as_ref()
+                            .and_then(|name| self.typed_event_topic_fields.get(name))
+                            .cloned()
+                            .unwrap_or_default();
                         for field in &event.fields {
                             let field_name = match &field.member {
                                 syn::Member::Named(name) => name.to_string(),
@@ -645,6 +686,34 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                                             "emit zero instead of {original_value} in event field {field_name}"
                                         ),
                                     );
+                                }
+                            }
+
+                            if topic_fields.contains(&field_name) {
+                                if let Some(original_topic) = receiver_ident(&field.expr) {
+                                    if self.address_params.contains(&original_topic) {
+                                        for alternate in self
+                                            .address_params
+                                            .iter()
+                                            .filter(|name| *name != &original_topic)
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                        {
+                                            let replacement = if field.colon_token.is_none() {
+                                                format!("{field_name}: {alternate}")
+                                            } else {
+                                                alternate.clone()
+                                            };
+                                            self.push_mutant(
+                                                "EVENT-005",
+                                                field.expr.span(),
+                                                replacement,
+                                                format!(
+                                                    "emit topic {alternate} instead of {original_topic} in event field {field_name}"
+                                                ),
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -3451,6 +3520,43 @@ mod tests {
             "#,
         );
         assert!(!mutants.iter().any(|m| m.operator == "EVENT-004"));
+    }
+
+    #[test]
+    fn typed_event_topic_substitution_requires_topic_attribute_and_address_params() {
+        let mutants = mutations_for(
+            r#"
+            #[contractevent]
+            struct TransferNotice { #[topic] actor: Address, recipient: Address }
+            fn record(env: Env, actor: Address, alternate: Address, recipient: Address) {
+                TransferNotice { actor, recipient }.publish(&env);
+            }
+            "#,
+        );
+        let topics: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "EVENT-005")
+            .collect();
+        assert_eq!(topics.len(), 2);
+        assert!(topics.iter().all(|m| m.original == "actor"));
+        assert!(topics.iter().any(|m| m.replacement == "actor: alternate"));
+        assert!(topics.iter().any(|m| m.replacement == "actor: recipient"));
+    }
+
+    #[test]
+    fn event_topic_substitution_ignores_non_topic_fields_and_arbitrary_structs() {
+        let mutants = mutations_for(
+            r#"
+            struct FakeEvent { actor: Address }
+            #[contractevent]
+            struct RealEvent { actor: Address }
+            fn record(env: Env, actor: Address, alternate: Address) {
+                FakeEvent { actor }.publish(&env);
+                RealEvent { actor }.publish(&env);
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "EVENT-005"));
     }
 
     #[test]
