@@ -111,6 +111,12 @@ For a standalone typed `#[contractevent]` struct literal published directly with
 
 Supported numeric parameter types are Rust primitive signed and unsigned integers (`i8` through `i128`, `u8` through `u128`, plus `isize`/`usize`). Generic numbers, aliases, arithmetic expressions, and arbitrary structs are intentionally ignored. Zero is deterministic, type-inferred by the event field, and avoids introducing overflow or underflow. Survivors suggest tests may observe the event without enforcing its numeric payload.
 
+## EVENT-005 — substitute a typed event topic Address
+
+For a standalone \`#[contractevent]\` struct literal published directly with \`.publish(&env)\`, this operator changes a field explicitly marked \`#[topic]\` when that field is a simple \`Address\` parameter and another explicit \`Address\` parameter is available. Candidate addresses are ordered by their function-parameter order, making discovery deterministic.
+
+The guard is intentionally strict: the struct must be declared with \`#[contractevent]\` in the same file, the field itself must carry \`#[topic]\`, publication must target an explicit \`Env\` parameter, and both original and replacement values must be explicit \`Address\` parameters. Arbitrary tuples, symbols, normal structs, data fields, aliases, and helper-generated events are ignored.
+
 ## TOKEN-001 — reverse direct transfer direction
 
 Recognizes a direct three-argument method call named `transfer` only when the receiver is a known Soroban token client. v0.1 recognizes explicit `TokenClient` / `token::Client` parameters, local variables initialized from token-client constructors, and direct token-client constructor chains. It then swaps the first two arguments while preserving the third.
