@@ -159,7 +159,7 @@ jobs:
           set -euo pipefail
           output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-actor \
             --operator EVENT-003 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak-event-actor" \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
             --timeout 300 --test-command "cargo test -q --locked")
           printf '%s\n' "$output"
           grep -Eq '^SURVIVED[[:space:]]+EVENT-003' <<<"$output"
@@ -170,7 +170,7 @@ jobs:
           set -euo pipefail
           output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-actor \
             --operator EVENT-003 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong-event-actor" \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
             --timeout 300 --test-command "cargo test -q --locked")
           printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+EVENT-003' <<<"$output"
@@ -181,7 +181,7 @@ jobs:
           set -euo pipefail
           output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-value \
             --operator EVENT-004 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak-event-value" \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
             --timeout 300 --test-command "cargo test -q --locked")
           printf '%s\n' "$output"
           grep -Eq '^SURVIVED[[:space:]]+EVENT-004' <<<"$output"
@@ -192,7 +192,7 @@ jobs:
           set -euo pipefail
           output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-value \
             --operator EVENT-004 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong-event-value" \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
             --timeout 300 --test-command "cargo test -q --locked")
           printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+EVENT-004' <<<"$output"
@@ -203,7 +203,7 @@ jobs:
           set -euo pipefail
           output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-topic \
             --operator EVENT-005 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak-event-topic" \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
             --timeout 300 --test-command "cargo test -q --locked")
           printf '%s\n' "$output"
           grep -Eq '^SURVIVED[[:space:]]+EVENT-005' <<<"$output"
@@ -214,7 +214,7 @@ jobs:
           set -euo pipefail
           output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-topic \
             --operator EVENT-005 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong-event-topic" \
+            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
             --timeout 300 --test-command "cargo test -q --locked")
           printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+EVENT-005' <<<"$output"
