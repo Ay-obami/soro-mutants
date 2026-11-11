@@ -2,7 +2,13 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -10,6 +16,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
@@ -26,8 +33,67 @@ jobs:
         run: cargo package --locked
 
   semantic-fixtures:
+    name: semantic-fixtures (${{ matrix.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        include:
+          - name: auth
+            weak: weak-auth
+            strong: strong-auth
+            expected: AUTH-001,AUTH-002
+          - name: auth-args
+            weak: weak-auth-args
+            strong: strong-auth-args
+            expected: AUTH-003
+          - name: typed-event
+            weak: weak-typed-events
+            strong: strong-typed-events
+            expected: EVENT-002
+          - name: ttl
+            weak: weak-ttl-lifecycle
+            strong: strong-ttl-lifecycle
+            expected: TTL-002,TTL-003
+          - name: call-target
+            weak: weak-call-target
+            strong: strong-call-target
+            expected: CALL-001
+          - name: event-actor
+            weak: weak-event-actor
+            strong: strong-event-actor
+            expected: EVENT-003
+          - name: event-value
+            weak: weak-event-value
+            strong: strong-event-value
+            expected: EVENT-004
+          - name: event-topic
+            weak: weak-event-topic
+            strong: strong-event-topic
+            expected: EVENT-005
+          - name: token-amount
+            weak: weak-token-amount
+            strong: strong-token-amount
+            expected: TOKEN-003
+          - name: token-client
+            weak: weak-token-client
+            strong: strong-token-client
+            expected: TOKEN-004
+          - name: call-args
+            weak: weak-call-args
+            strong: strong-call-args
+            expected: CALL-002
+          - name: call-return
+            weak: weak-call-return
+            strong: strong-call-return
+            expected: CALL-003
+          - name: storage-class
+            weak: weak-storage-class
+            strong: strong-storage-class
+            expected: STORAGE-001
+            function: write
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
@@ -35,287 +101,11 @@ jobs:
           toolchain: "1.91.0"
       - name: Build CLI
         run: cargo build --locked
-      - name: Weak authorization tests must miss both auth mutants
+      - name: Verify weak and strong semantic fixtures
         shell: bash
         run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-auth \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 240 \
-            --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+AUTH-001' <<<"$output"
-          grep -Eq '^SURVIVED[[:space:]]+AUTH-002' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong authorization assertion must kill both auth mutants
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-auth \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 240 \
-            --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+AUTH-001' <<<"$output"
-          grep -Eq '^KILLED[[:space:]]+AUTH-002' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Weak authorized-arguments test must miss AUTH-003
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-auth-args \
-            --operator AUTH-003 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 240 \
-            --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+AUTH-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong authorized-arguments assertion must kill AUTH-003
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-auth-args \
-            --operator AUTH-003 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 240 \
-            --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+AUTH-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Weak typed-event test must miss EVENT-002
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-typed-events \
-            --operator EVENT-002 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 240 \
-            --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+EVENT-002' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong event assertion must kill EVENT-002
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-typed-events \
-            --operator EVENT-002 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 240 \
-            --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+EVENT-002' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-
-      - name: Weak TTL lifecycle test must miss TTL mutants
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-ttl-lifecycle \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+TTL-002' <<<"$output"
-          grep -Eq '^SURVIVED[[:space:]]+TTL-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)[[:space:]]+TTL-' <<<"$output"
-      - name: Strong TTL lifecycle test must kill TTL mutants
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-ttl-lifecycle \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+TTL-002' <<<"$output"
-          grep -Eq '^KILLED[[:space:]]+TTL-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)[[:space:]]+TTL-' <<<"$output"
-      - name: Weak cross-contract routing test must miss CALL-001
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-call-target \
-            --operator CALL-001 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+CALL-001' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong cross-contract routing assertion must kill CALL-001
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-call-target \
-            --operator CALL-001 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+CALL-001' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-
-      - name: Weak event actor test must miss EVENT-003
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-actor \
-            --operator EVENT-003 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+EVENT-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong event actor assertion must kill EVENT-003
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-actor \
-            --operator EVENT-003 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+EVENT-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Weak event value test must miss EVENT-004
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-value \
-            --operator EVENT-004 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+EVENT-004' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong event value assertion must kill EVENT-004
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-value \
-            --operator EVENT-004 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+EVENT-004' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Weak event topic test must miss EVENT-005
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-event-topic \
-            --operator EVENT-005 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+EVENT-005' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong event topic assertion must kill EVENT-005
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-event-topic \
-            --operator EVENT-005 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+EVENT-005' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Weak token amount test must miss TOKEN-003
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-token-amount \
-            --operator TOKEN-003 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+TOKEN-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong token amount assertion must kill TOKEN-003
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-token-amount \
-            --operator TOKEN-003 \
-            --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+TOKEN-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Weak token-client routing test must miss TOKEN-004
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-token-client \
-            --operator TOKEN-004 --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+TOKEN-004' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong token-client routing assertion must kill TOKEN-004
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-token-client \
-            --operator TOKEN-004 --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+TOKEN-004' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Weak generated-client argument test must miss CALL-002
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-call-args \
-            --operator CALL-002 --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+CALL-002' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong generated-client argument assertion must kill CALL-002
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-call-args \
-            --operator CALL-002 --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+CALL-002' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Weak return-check test must miss CALL-003
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-call-return \
-            --operator CALL-003 --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+CALL-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Strong return-check assertion must kill CALL-003
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-call-return \
-            --operator CALL-003 --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+CALL-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
-      - name: Weak storage-class test must miss STORAGE-001
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-storage-class \
-            --operator STORAGE-001 --function write --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^SURVIVED[[:space:]]+STORAGE-001' <<<"$output"
-      - name: Strong storage-class assertion must kill STORAGE-001
-        shell: bash
-        run: |
-          set -euo pipefail
-          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-storage-class \
-            --operator STORAGE-001 --function write --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
-            --timeout 300 --test-command "cargo test -q --locked")
-          printf '%s\n' "$output"
-          grep -Eq '^KILLED[[:space:]]+STORAGE-001' <<<"$output"
+          .github/scripts/check-semantic-fixture.sh \
+            "${{ matrix.weak }}" \
+            "${{ matrix.strong }}" \
+            "${{ matrix.expected }}" \
+            "${{ matrix.function }}"
