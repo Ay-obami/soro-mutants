@@ -184,6 +184,12 @@ For recognized Soroban `instance().extend_ttl(threshold, target)` and keyed `per
 
 Both substitutions are `u32`-compatible and preserve keys, source spans and deterministic IDs. Identical replacements are skipped. These are lifecycle-policy checks, not generic arithmetic mutations. Tests should control ledger minimum TTL and sequence and assert remaining TTL, not just a function's return value. Depending on the host's initial TTL and the chosen parameters, either candidate may be observationally equivalent; Soro Mutants does not claim to prove equivalence. Compile-invalid mutations are classified `UNVIABLE` by the standard separate compile gate.
 
+## CALL-003 — bypass a generated contract-client return mismatch check
+
+The initial supported shape is deliberately narrow: a local generated Soroban client created directly as `SomeContractClient::new(&env, &dependency)` is called inside the condition `if client.method(...) != expected { ... }`. `CALL-003` replaces that mismatch comparison with `false`, preserving the surrounding control flow while testing whether the suite enforces the rejected-return path.
+
+Ordinary local function returns, arbitrary method receivers, equality checks, helper-returned clients, aliases, and more complex boolean expressions are out of scope. A surviving mutant does not prove the external call is wrong; equivalent behavior is possible when tests never exercise a mismatching return value or the branch has no observable effect.
+
 ## CALL-001 — direct cross-contract dependency address substitution
 
 For a direct Soroban env.invoke_contract call where env is an explicit Env parameter and the first argument is a reference to an explicit Address parameter, substitute another explicitly typed Address parameter in the same function. Only the first argument changes; method, return type, function name and other arguments remain intact. Output identifies both original and substituted target names.

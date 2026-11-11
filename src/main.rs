@@ -47,6 +47,7 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
     ),
     ("CALL-001", "replace direct Env::invoke_contract dependency address with another typed Address parameter"),
     ("CALL-002", "replace a generated contract-client call argument with another compatible typed parameter"),
+    ("CALL-003", "remove a supported generated contract-client return mismatch check"),
     (
         "EVENT-001",
         "remove a Soroban event publication (env.events().publish(...))",
@@ -768,6 +769,28 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         }
 
         visit::visit_local(self, node);
+    }
+
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        if let Expr::Binary(binary) = node.cond.as_ref() {
+            if matches!(binary.op, syn::BinOp::Ne(_))
+                && (is_generated_contract_client_method_call(
+                    &binary.left,
+                    &self.contract_client_vars,
+                ) || is_generated_contract_client_method_call(
+                    &binary.right,
+                    &self.contract_client_vars,
+                ))
+            {
+                self.push_mutant(
+                    "CALL-003",
+                    binary.span(),
+                    "false".to_owned(),
+                    "bypass generated contract-client return mismatch check".to_owned(),
+                );
+            }
+        }
+        visit::visit_expr_if(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
@@ -2054,6 +2077,15 @@ fn is_generated_contract_client_constructor(expr: &Expr) -> bool {
         },
         Expr::Paren(paren) => is_generated_contract_client_constructor(&paren.expr),
         Expr::Reference(reference) => is_generated_contract_client_constructor(&reference.expr),
+        _ => false,
+    }
+}
+
+fn is_generated_contract_client_method_call(expr: &Expr, known_clients: &[String]) -> bool {
+    match expr {
+        Expr::MethodCall(call) => receiver_ident(&call.receiver)
+            .is_some_and(|name| known_clients.iter().any(|candidate| candidate == &name)),
+        Expr::Paren(paren) => is_generated_contract_client_method_call(&paren.expr, known_clients),
         _ => false,
     }
 }
@@ -3429,6 +3461,39 @@ mod tests {
             .expect("TOKEN-001 should be generated");
 
         assert!(mutant.replacement.contains("transfer(&to, &from, &amount)"));
+    }
+
+    #[test]
+    fn generated_client_return_mismatch_check_can_be_bypassed() {
+        let mutants = mutations_for(
+            r#"
+            fn verify(env: Env, dep: Address, expected: u32) -> bool {
+                let client = OracleClient::new(&env, &dep);
+                if client.value() != expected { panic!("mismatch"); }
+                true
+            }
+            "#,
+        );
+        let calls: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "CALL-003")
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].original.contains("client.value() != expected"));
+        assert_eq!(calls[0].replacement, "false");
+    }
+
+    #[test]
+    fn call_return_check_ignores_ordinary_local_results() {
+        let mutants = mutations_for(
+            r#"
+            fn verify(expected: u32) -> bool {
+                if local_value() != expected { panic!("mismatch"); }
+                true
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "CALL-003"));
     }
 
     #[test]
