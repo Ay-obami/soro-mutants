@@ -157,6 +157,12 @@ The normal `list` and `test` text output gives the total suppressed count and th
 
 **These conservative heuristics are not a proof of general program equivalence.** Many context-dependent equivalent mutants remain intentionally unsuppressed rather than risk hiding a meaningful test gap.
 
+## TOKEN-002 — substitute token allowance owner/spender roles
+
+The initial supported allowance call is the Soroban token-client `approve(&owner, &spender, &amount, &expiration_ledger)` shape. The receiver must already be recognized as a Soroban token client and the first two arguments must be references to distinct explicit `Address` parameters. Two deterministic mutants are produced: use the spender as the owner, and use the owner as the spender. Amount and expiration remain unchanged.
+
+Calls named `approve` on event helpers, arbitrary objects, helper-returned values, or unknown client types are ignored. More general allowance APIs (`allowance`, `transfer_from`, `burn_from`) are not yet mutated. Generated candidates still pass through the runner's normal compile-viability gate before tests are scored. A survivor indicates an allowance-role test gap, not a vulnerability claim.
+
 ## TOKEN-003 — substitute the token transfer amount
 
 For a recognized Soroban token-client `transfer(&from, &to, &amount)` call, this operator is emitted only when the third argument is a reference to a simple function parameter with a primitive integer type. It generates two deterministic replacements: `&0` and `&1`.
