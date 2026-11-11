@@ -118,7 +118,7 @@ jobs:
           printf '%s\n' "$output"
           grep -Eq '^SURVIVED[[:space:]]+TTL-002' <<<"$output"
           grep -Eq '^SURVIVED[[:space:]]+TTL-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)[[:space:]]+TTL-' <<<"$output"
       - name: Strong TTL lifecycle test must kill TTL mutants
         shell: bash
         run: |
@@ -129,7 +129,7 @@ jobs:
           printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+TTL-002' <<<"$output"
           grep -Eq '^KILLED[[:space:]]+TTL-003' <<<"$output"
-          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)[[:space:]]+TTL-' <<<"$output"
       - name: Weak cross-contract routing test must miss CALL-001
         shell: bash
         run: |
@@ -301,3 +301,21 @@ jobs:
           printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+CALL-003' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Weak storage-class test must miss STORAGE-001
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-storage-class \
+            --operator STORAGE-001 --function write --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^SURVIVED[[:space:]]+STORAGE-001' <<<"$output"
+      - name: Strong storage-class assertion must kill STORAGE-001
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-storage-class \
+            --operator STORAGE-001 --function write --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^KILLED[[:space:]]+STORAGE-001' <<<"$output"

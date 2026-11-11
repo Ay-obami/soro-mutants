@@ -69,6 +69,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "replace a typed Soroban event topic Address with another Address parameter",
     ),
     (
+        "STORAGE-001",
+        "replace a direct Soroban storage class accessor with another storage class",
+    ),
+    (
         "TOKEN-001",
         "swap the sender and recipient arguments of a token transfer",
     ),
@@ -794,6 +798,27 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        if matches!(
+            node.method.to_string().as_str(),
+            "instance" | "persistent" | "temporary"
+        ) && is_direct_env_storage_receiver(&node.receiver, &self.env_params)
+        {
+            let original = node.method.to_string();
+            if let Some(receiver) = source_for_span(self.source, node.receiver.span()) {
+                for alternate in ["instance", "persistent", "temporary"]
+                    .into_iter()
+                    .filter(|candidate| *candidate != original)
+                {
+                    self.push_mutant(
+                        "STORAGE-001",
+                        node.span(),
+                        format!("{receiver}.{alternate}()"),
+                        format!("use {alternate} storage instead of {original}"),
+                    );
+                }
+            }
+        }
+
         // Only mutate a direct env.invoke_contract call with a simple typed
         // Address parameter as its first argument. Avoid arbitrary typed inference.
         if node.method == "invoke_contract"
@@ -2111,6 +2136,18 @@ fn local_binding_name_and_init(local: &Local) -> Option<(String, &Expr)> {
         _ => return None,
     };
     Some((ident.ident.to_string(), init.expr.as_ref()))
+}
+
+fn is_direct_env_storage_receiver(expr: &Expr, env_params: &[String]) -> bool {
+    match expr {
+        Expr::MethodCall(call) if call.method == "storage" && call.args.is_empty() => {
+            receiver_ident(&call.receiver)
+                .is_some_and(|name| env_params.iter().any(|candidate| candidate == &name))
+        }
+        Expr::Paren(paren) => is_direct_env_storage_receiver(&paren.expr, env_params),
+        Expr::Reference(reference) => is_direct_env_storage_receiver(&reference.expr, env_params),
+        _ => false,
+    }
 }
 
 fn is_soroban_storage_accessor(expr: &Expr) -> bool {
@@ -3528,6 +3565,40 @@ mod tests {
         "#,
         );
         assert!(!mutants.iter().any(|m| m.operator == "CALL-001"));
+    }
+
+    #[test]
+    fn storage_class_substitution_targets_only_direct_env_storage_accessors() {
+        let mutants = mutations_for(
+            r#"
+            fn write(env: Env, key: u32, value: u32) {
+                env.storage().persistent().set(&key, &value);
+            }
+            "#,
+        );
+        let storage: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "STORAGE-001")
+            .collect();
+        assert_eq!(storage.len(), 2);
+        assert!(storage
+            .iter()
+            .any(|m| m.replacement.ends_with(".instance()")));
+        assert!(storage
+            .iter()
+            .any(|m| m.replacement.ends_with(".temporary()")));
+    }
+
+    #[test]
+    fn storage_class_substitution_ignores_unrelated_storage_chains() {
+        let mutants = mutations_for(
+            r#"
+            fn write(env: Env, cache: Cache, key: u32, value: u32) {
+                cache.storage().persistent().set(&key, &value);
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "STORAGE-001"));
     }
 
     #[test]
