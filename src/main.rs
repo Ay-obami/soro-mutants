@@ -71,6 +71,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "swap the sender and recipient arguments of a token transfer",
     ),
     (
+        "TOKEN-002",
+        "substitute owner and spender roles in a recognized token approval",
+    ),
+    (
         "TOKEN-003",
         "replace a typed token transfer amount with zero or one",
     ),
@@ -793,6 +797,37 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 "()".to_string(),
                 "remove Soroban event publication".to_string(),
             );
+        }
+
+        if node.method == "approve"
+            && node.args.len() == 4
+            && is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
+        {
+            let args: Vec<_> = node.args.iter().collect();
+            if let (Expr::Reference(owner_ref), Expr::Reference(spender_ref)) = (args[0], args[1]) {
+                if let (Some(owner), Some(spender)) = (
+                    receiver_ident(&owner_ref.expr),
+                    receiver_ident(&spender_ref.expr),
+                ) {
+                    if owner != spender
+                        && self.address_params.contains(&owner)
+                        && self.address_params.contains(&spender)
+                    {
+                        self.push_mutant(
+                            "TOKEN-002",
+                            args[0].span(),
+                            format!("&{spender}"),
+                            format!("approve with {spender} as owner instead of {owner}"),
+                        );
+                        self.push_mutant(
+                            "TOKEN-002",
+                            args[1].span(),
+                            format!("&{owner}"),
+                            format!("approve {owner} as spender instead of {spender}"),
+                        );
+                    }
+                }
+            }
         }
 
         if node.method == "transfer"
@@ -3742,6 +3777,40 @@ mod tests {
         );
 
         assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn token_allowance_mutants_swap_explicit_owner_and_spender_roles() {
+        let mutants = mutations_for(
+            r#"
+            fn set_allowance(token: TokenClient, owner: Address, spender: Address, amount: i128, expiration: u32) {
+                token.approve(&owner, &spender, &amount, &expiration);
+            }
+            "#,
+        );
+        let allowance: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "TOKEN-002")
+            .collect();
+        assert_eq!(allowance.len(), 2);
+        assert!(allowance
+            .iter()
+            .any(|m| m.original == "&owner" && m.replacement == "&spender"));
+        assert!(allowance
+            .iter()
+            .any(|m| m.original == "&spender" && m.replacement == "&owner"));
+    }
+
+    #[test]
+    fn token_allowance_mutation_ignores_unrecognized_approve_methods() {
+        let mutants = mutations_for(
+            r#"
+            fn set_allowance(helper: Helper, owner: Address, spender: Address, amount: i128, expiration: u32) {
+                helper.approve(&owner, &spender, &amount, &expiration);
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-002"));
     }
 
     #[test]
