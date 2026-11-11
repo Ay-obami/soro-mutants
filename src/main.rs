@@ -75,6 +75,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "replace a typed token transfer amount with zero or one",
     ),
     (
+        "TOKEN-004",
+        "replace a recognized token client receiver with another in-scope token client",
+    ),
+    (
         "TTL-001",
         "remove an extend_ttl() call on a Soroban storage accessor",
     ),
@@ -806,6 +810,25 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                     replacement,
                     "swap token transfer sender and recipient".to_string(),
                 );
+            }
+
+            if let Some(original_client) = receiver_ident(&node.receiver) {
+                if self.token_client_vars.contains(&original_client) {
+                    for alternate in self
+                        .token_client_vars
+                        .iter()
+                        .filter(|name| *name != &original_client)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                    {
+                        self.push_mutant(
+                            "TOKEN-004",
+                            node.receiver.span(),
+                            alternate.clone(),
+                            format!("use token client {alternate} instead of {original_client}"),
+                        );
+                    }
+                }
             }
 
             if let Some(amount_arg) = node.args.iter().nth(2) {
@@ -3742,6 +3765,39 @@ mod tests {
         );
 
         assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn token_client_substitution_uses_other_recognized_clients_in_order() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(env: Env, a: Address, b: Address, from: Address, to: Address, amount: i128) {
+                let primary = token::Client::new(&env, &a);
+                let secondary = token::Client::new(&env, &b);
+                primary.transfer(&from, &to, &amount);
+            }
+            "#,
+        );
+        let clients: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "TOKEN-004")
+            .collect();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].original, "primary");
+        assert_eq!(clients[0].replacement, "secondary");
+    }
+
+    #[test]
+    fn token_client_substitution_ignores_constructor_and_unrecognized_receivers() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(env: Env, a: Address, from: Address, to: Address, amount: i128) {
+                token::Client::new(&env, &a).transfer(&from, &to, &amount);
+                helper.transfer(&from, &to, &amount);
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-004"));
     }
 
     #[test]
