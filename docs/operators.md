@@ -117,6 +117,12 @@ For a standalone \`#[contractevent]\` struct literal published directly with \`.
 
 The guard is intentionally strict: the struct must be declared with \`#[contractevent]\` in the same file, the field itself must carry \`#[topic]\`, publication must target an explicit \`Env\` parameter, and both original and replacement values must be explicit \`Address\` parameters. Arbitrary tuples, symbols, normal structs, data fields, aliases, and helper-generated events are ignored.
 
+## CALL-002 — generated contract-client argument substitution
+
+Recognizes a local generated Soroban contract client initialized directly as `SomeContractClient::new(&env, &dependency)`. On later method calls through that simple local variable, a referenced `Address` or primitive integer function parameter may be replaced with another explicit parameter of the same supported category. The client receiver itself is not changed.
+
+The recognizer intentionally rejects token clients, helper-returned clients, struct fields, aliases, computed arguments, cloned expressions, and unknown argument types. Candidate ordering follows the enclosing function signature, so output is deterministic. This is not general Rust argument permutation or whole-program type inference.
+
 ## TOKEN-001 — reverse direct transfer direction
 
 Recognizes a direct three-argument method call named `transfer` only when the receiver is a known Soroban token client. v0.1 recognizes explicit `TokenClient` / `token::Client` parameters, local variables initialized from token-client constructors, and direct token-client constructor chains. It then swaps the first two arguments while preserving the third.
