@@ -68,6 +68,12 @@ The mutation asks whether the tests enforce the exact signed argument set. A fun
 
 This intentionally does **not** recognize unrelated same-named methods on arbitrary receivers, chained receiver expressions, calls outside a function with an explicit `Env` and `Address` parameter, or helper-mediated authorization. It does not attempt to prove the semantic type of arbitrary locals.
 
+## STORAGE-001 — substitute a direct Soroban storage class
+
+For a direct accessor rooted at an explicit `Env` parameter, `env.storage().persistent()`, `env.storage().temporary()`, or `env.storage().instance()` is replaced with each other storage class in deterministic `instance`, `persistent`, `temporary` order. The operation performed on the accessor (`set`, `get`, `remove`, `extend_ttl`, and so on) is left unchanged.
+
+The guard intentionally excludes locals, aliases, helper-returned storage handles, and unrelated methods with the same names. Some substitutions are not type-compatible with the downstream operation; those mutants are intentionally generated and the normal compile-viability phase classifies them as `UNVIABLE` rather than treating them as test failures.
+
 ## TTL-001 — remove TTL extension
 
 Recognizes `extend_ttl(...)` only when it is called on a Soroban `instance`, `persistent`, or `temporary` storage accessor, including simple locals and explicitly typed locals initialized directly from those accessors, and replaces the call expression with `()`.
