@@ -46,6 +46,7 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "replace require_auth_for_args(...) argument set with an empty Soroban Vec",
     ),
     ("CALL-001", "replace direct Env::invoke_contract dependency address with another typed Address parameter"),
+    ("CALL-002", "replace a generated contract-client call argument with another compatible typed parameter"),
     (
         "EVENT-001",
         "remove a Soroban event publication (env.events().publish(...))",
@@ -477,6 +478,7 @@ struct FunctionState {
     current_function: Option<String>,
     address_params: Vec<String>,
     token_client_vars: Vec<String>,
+    contract_client_vars: Vec<String>,
     storage_accessor_vars: Vec<String>,
     numeric_params: Vec<String>,
     env_params: Vec<String>,
@@ -488,6 +490,7 @@ struct SemanticVisitor<'a> {
     current_function: Option<String>,
     address_params: Vec<String>,
     token_client_vars: Vec<String>,
+    contract_client_vars: Vec<String>,
     storage_accessor_vars: Vec<String>,
     numeric_params: Vec<String>,
     env_params: Vec<String>,
@@ -504,6 +507,7 @@ impl<'a> SemanticVisitor<'a> {
             current_function: None,
             address_params: Vec::new(),
             token_client_vars: Vec::new(),
+            contract_client_vars: Vec::new(),
             storage_accessor_vars: Vec::new(),
             numeric_params: Vec::new(),
             env_params: Vec::new(),
@@ -521,6 +525,7 @@ impl<'a> SemanticVisitor<'a> {
                 &mut self.token_client_vars,
                 token_client_params(sig),
             ),
+            contract_client_vars: std::mem::take(&mut self.contract_client_vars),
             storage_accessor_vars: std::mem::take(&mut self.storage_accessor_vars),
             numeric_params: std::mem::replace(&mut self.numeric_params, numeric_params(sig)),
             env_params: std::mem::replace(&mut self.env_params, env_params(sig)),
@@ -531,6 +536,7 @@ impl<'a> SemanticVisitor<'a> {
         self.current_function = previous.current_function;
         self.address_params = previous.address_params;
         self.token_client_vars = previous.token_client_vars;
+        self.contract_client_vars = previous.contract_client_vars;
         self.storage_accessor_vars = previous.storage_accessor_vars;
         self.numeric_params = previous.numeric_params;
         self.env_params = previous.env_params;
@@ -750,6 +756,12 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 self.token_client_vars.push(name.clone());
             }
 
+            if is_generated_contract_client_constructor(init)
+                && !self.contract_client_vars.contains(&name)
+            {
+                self.contract_client_vars.push(name.clone());
+            }
+
             if is_soroban_storage_accessor(init) && !self.storage_accessor_vars.contains(&name) {
                 self.storage_accessor_vars.push(name);
             }
@@ -781,6 +793,42 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                                 format!("&{alternate}"),
                                 format!(
                                     "invoke contract at {alternate} instead of {original_target}"
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if receiver_ident(&node.receiver)
+            .is_some_and(|name| self.contract_client_vars.contains(&name))
+        {
+            for argument in &node.args {
+                if let Expr::Reference(reference) = argument {
+                    if let Some(original) = receiver_ident(&reference.expr) {
+                        let candidates = if self.address_params.contains(&original) {
+                            self.address_params
+                                .iter()
+                                .filter(|name| *name != &original)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        } else if self.numeric_params.contains(&original) {
+                            self.numeric_params
+                                .iter()
+                                .filter(|name| *name != &original)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
+                        for alternate in candidates {
+                            self.push_mutant(
+                                "CALL-002",
+                                argument.span(),
+                                format!("&{alternate}"),
+                                format!(
+                                    "pass {alternate} instead of {original} to generated contract client call"
                                 ),
                             );
                         }
@@ -1981,6 +2029,31 @@ fn is_token_client_constructor(expr: &Expr) -> bool {
         },
         Expr::Paren(paren) => is_token_client_constructor(&paren.expr),
         Expr::Reference(reference) => is_token_client_constructor(&reference.expr),
+        _ => false,
+    }
+}
+
+fn is_generated_contract_client_constructor(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(call) => match call.func.as_ref() {
+            Expr::Path(path) => {
+                let names = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                names.last().is_some_and(|name| name == "new")
+                    && names.len() >= 2
+                    && names[names.len() - 2].ends_with("Client")
+                    && !names[..names.len() - 1]
+                        .iter()
+                        .any(|name| name.to_ascii_lowercase().contains("token"))
+            }
+            _ => false,
+        },
+        Expr::Paren(paren) => is_generated_contract_client_constructor(&paren.expr),
+        Expr::Reference(reference) => is_generated_contract_client_constructor(&reference.expr),
         _ => false,
     }
 }
@@ -3298,6 +3371,46 @@ mod tests {
         );
 
         assert!(mutants.iter().any(|m| m.operator == "TOKEN-001"));
+    }
+
+    #[test]
+    fn generated_contract_client_arguments_substitute_only_compatible_params() {
+        let mutants = mutations_for(
+            r#"
+            fn route(env: Env, dep: Address, actor: Address, alternate: Address, amount: i128, other: i128) {
+                let client = RecorderClient::new(&env, &dep);
+                client.record(&actor, &amount);
+            }
+            "#,
+        );
+        let calls: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "CALL-002")
+            .collect();
+        assert_eq!(calls.len(), 3);
+        assert!(calls
+            .iter()
+            .any(|m| m.original == "&actor" && m.replacement == "&dep"));
+        assert!(calls
+            .iter()
+            .any(|m| m.original == "&actor" && m.replacement == "&alternate"));
+        assert!(calls
+            .iter()
+            .any(|m| m.original == "&amount" && m.replacement == "&other"));
+    }
+
+    #[test]
+    fn call_argument_substitution_ignores_unrecognized_clients_and_expressions() {
+        let mutants = mutations_for(
+            r#"
+            fn route(env: Env, dep: Address, actor: Address, alternate: Address, amount: i128) {
+                helper.record(&actor, &amount);
+                let client = RecorderClient::new(&env, &dep);
+                client.record(&actor.clone(), &(amount + 1));
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "CALL-002"));
     }
 
     #[test]

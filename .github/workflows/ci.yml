@@ -261,3 +261,23 @@ jobs:
           printf '%s\n' "$output"
           grep -Eq '^KILLED[[:space:]]+TOKEN-004' <<<"$output"
           ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Weak generated-client argument test must miss CALL-002
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/weak-call-args \
+            --operator CALL-002 --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/weak" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^SURVIVED[[:space:]]+CALL-002' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
+      - name: Strong generated-client argument assertion must kill CALL-002
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(./target/debug/cargo-soro-mutants test fixtures/strong-call-args \
+            --operator CALL-002 --target-dir "$GITHUB_WORKSPACE/.ci-fixture-target/strong" \
+            --timeout 300 --test-command "cargo test -q --locked")
+          printf '%s\n' "$output"
+          grep -Eq '^KILLED[[:space:]]+CALL-002' <<<"$output"
+          ! grep -Eq '^(UNVIABLE|TIMEOUT)' <<<"$output"
