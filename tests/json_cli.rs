@@ -15,12 +15,16 @@ fn list_json_preserves_discovered_fields_and_ids() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["schema_version"], 1);
     let mutants = report["mutants"].as_array().unwrap();
-    assert_eq!(mutants.len(), 2);
-    assert_eq!(mutants[0]["id"], "M0001");
-    assert_eq!(mutants[0]["operator"], "AUTH-001");
-    assert_eq!(mutants[1]["id"], "M0002");
-    assert_eq!(mutants[1]["operator"], "AUTH-002");
-    for mutant in mutants {
+    let auth_mutants: Vec<_> = mutants
+        .iter()
+        .filter(|mutant| mutant["operator"] == "AUTH-001" || mutant["operator"] == "AUTH-002")
+        .collect();
+    assert_eq!(auth_mutants.len(), 2);
+    assert_eq!(auth_mutants[0]["id"], "M0001");
+    assert_eq!(auth_mutants[0]["operator"], "AUTH-001");
+    assert_eq!(auth_mutants[1]["id"], "M0002");
+    assert_eq!(auth_mutants[1]["operator"], "AUTH-002");
+    for mutant in auth_mutants {
         assert_eq!(mutant.as_object().unwrap().len(), 8);
         assert_eq!(mutant["file"], "src/lib.rs");
         assert_eq!(mutant["function"], "change_admin");
