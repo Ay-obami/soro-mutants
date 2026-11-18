@@ -50,6 +50,20 @@ Mutated runs use a separate cache:
 
 This prevents mutant build artifacts from contaminating the baseline while still allowing dependencies to be reused between mutant runs. Build caches persist deliberately for performance and can be removed with `cargo soro-mutants clean`; cleanup never removes the target repository's normal Cargo cache or source files.
 
+Each cache root includes an artifact marker (`.soro-baseline-artifact` or `.soro-mutant-artifact`) to ensure baseline and mutant artifacts cannot be mixed or confused. In addition, `cache-identity.json` maintains a cryptographic fingerprint of source files, active operators, test commands, toolchain versions, and workspace packages. If any of these attributes change, stale caches are invalidated and purged automatically.
+
+## Resumability and progress tracking
+
+Mutation test runs maintain a local progress file (`<target-dir>/progress.json` or `--progress-file <path>`).
+- State is updated atomically after each mutant completes execution.
+- If interrupted, runs can be resumed with `--resume`, safely skipping already completed mutants and executing pending or interrupted ones.
+- Incompatible resumes (detecting changes in source files, toolchains, commands, or configurations) are refused safely.
+- The progress file is removed when running `cargo soro-mutants clean`.
+
+## Workspace and crate scoping
+
+In multi-package Cargo workspaces, `--package` (`-p`) scopes mutation discovery to the source directories of selected packages, pruning unrelated packages. Test commands are automatically scoped with `-p <pkg>` flags when using default runners (`cargo test` or `cargo nextest`), while custom `--test-command` invocations are executed as provided.
+
 ## Classification
 
 A mutant must first pass a compile-only Cargo test command. Compile failures are `UNVIABLE`.

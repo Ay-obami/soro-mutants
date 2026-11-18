@@ -68,6 +68,18 @@ fn bundled_corpus_example_validates_and_has_two_entries() {
 }
 
 #[test]
+fn generalized_soroban_bug_corpus_validates_and_has_at_least_five_entries() {
+    let output = run(&["validate-corpus", "docs/soroban-bug-corpus.json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Validated 6 corpus entries"));
+}
+
+#[test]
 fn manifest_validation_rejects_unsupported_version_and_duplicate_ids() {
     let unsupported =
         serde_json::json!({"schema_version": 2, "entries": [valid_entry("auth-removal") ]});

@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "auth-001-unauthorized-state-mutation",
+      "operator": "AUTH-001",
+      "source_pattern": {
+        "language": "rust",
+        "code": "pub fn withdraw(env: Env, recipient: Address, amount: i128) { recipient.require_auth(); env.storage().instance().set(&DataKey::Balance, &0); }"
+      },
+      "mutation": {
+        "original": "recipient.require_auth()",
+        "replacement": "()"
+      },
+      "expectations": {
+        "weak": "SURVIVED",
+        "strong": "KILLED"
+      },
+      "provenance": {
+        "kind": "stellar-documentation",
+        "reference": "https://developers.stellar.org/docs/smart-contracts/getting-started/authorization",
+        "note": "Omitting require_auth() on privileged actions allows arbitrary callers to execute state mutations."
+      }
+    },
+    {
+      "id": "auth-002-substituted-signing-authority",
+      "operator": "AUTH-002",
+      "source_pattern": {
+        "language": "rust",
+        "code": "pub fn update_admin(env: Env, current_admin: Address, new_admin: Address) { current_admin.require_auth(); env.storage().instance().set(&DataKey::Admin, &new_admin); }"
+      },
+      "mutation": {
+        "original": "current_admin.require_auth()",
+        "replacement": "new_admin.require_auth()"
+      },
+      "expectations": {
+        "weak": "SURVIVED",
+        "strong": "KILLED"
+      },
+      "provenance": {
+        "kind": "stellar-ecosystem-issue",
+        "reference": "https://github.com/stellar/soroban-sdk/issues/1126",
+        "note": "Authenticating the recipient or new admin instead of current owner allows privilege takeover."
+      }
+    },
+    {
+      "id": "ttl-001-state-archival-denial-of-service",
+      "operator": "TTL-001",
+      "source_pattern": {
+        "language": "rust",
+        "code": "pub fn touch(env: Env) { env.storage().instance().extend_ttl(100, 1000); }"
+      },
+      "mutation": {
+        "original": "env.storage().instance().extend_ttl(100, 1000)",
+        "replacement": "()"
+      },
+      "expectations": {
+        "weak": "SURVIVED",
+        "strong": "KILLED"
+      },
+      "provenance": {
+        "kind": "stellar-documentation",
+        "reference": "https://developers.stellar.org/docs/smart-contracts/state-archival",
+        "note": "Failing to extend storage TTL causes state entries to be archived and inaccessible upon ledger expiry."
+      }
+    },
+    {
+      "id": "token-001-inverted-transfer-direction",
+      "operator": "TOKEN-001",
+      "source_pattern": {
+        "language": "rust",
+        "code": "pub fn payout(env: Env, vault: Address, beneficiary: Address, amount: i128) { let client = token::Client::new(&env, &token_id); client.transfer(&vault, &beneficiary, &amount); }"
+      },
+      "mutation": {
+        "original": "client.transfer(&vault, &beneficiary, &amount)",
+        "replacement": "client.transfer(&beneficiary, &vault, &amount)"
+      },
+      "expectations": {
+        "weak": "SURVIVED",
+        "strong": "KILLED"
+      },
+      "provenance": {
+        "kind": "stellar-standards",
+        "reference": "https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md",
+        "note": "Inverting sender and recipient transfers funds from the beneficiary back to the vault."
+      }
+    },
+    {
+      "id": "storage-001-temporary-storage-leakage",
+      "operator": "STORAGE-001",
+      "source_pattern": {
+        "language": "rust",
+        "code": "pub fn store_config(env: Env, key: Symbol, value: Val) { env.storage().persistent().set(&key, &value); }"
+      },
+      "mutation": {
+        "original": "env.storage().persistent()",
+        "replacement": "env.storage().temporary()"
+      },
+      "expectations": {
+        "weak": "SURVIVED",
+        "strong": "KILLED"
+      },
+      "provenance": {
+        "kind": "stellar-documentation",
+        "reference": "https://developers.stellar.org/docs/smart-contracts/fundamentals/storage",
+        "note": "Using temporary storage instead of persistent causes contract state to disappear after transaction boundaries."
+      }
+    },
+    {
+      "id": "call-001-unvalidated-contract-dependency",
+      "operator": "CALL-001",
+      "source_pattern": {
+        "language": "rust",
+        "code": "pub fn query_price(env: Env, oracle: Address) -> i128 { env.invoke_contract(&oracle, &symbol_short!(\"price\"), vec![&env]) }"
+      },
+      "mutation": {
+        "original": "&oracle",
+        "replacement": "&env.current_contract_address()"
+      },
+      "expectations": {
+        "weak": "SURVIVED",
+        "strong": "KILLED"
+      },
+      "provenance": {
+        "kind": "stellar-documentation",
+        "reference": "https://developers.stellar.org/docs/smart-contracts/fundamentals/cross-contract-calls",
+        "note": "Substituting target contract address causes calls to target the caller itself or an arbitrary contract."
+      }
+    }
+  ]
+}

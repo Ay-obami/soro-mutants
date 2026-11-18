@@ -152,3 +152,22 @@ fn custom_cache_only_removes_managed_subdirectories() {
         "keep"
     );
 }
+
+#[test]
+fn clean_removes_progress_and_cache_identity_files() {
+    let temp = TempDir::new();
+    let cache = temp.path().join(".soro-mutants-target");
+    fs::create_dir_all(&cache).unwrap();
+    let progress = cache.join("progress.json");
+    let identity = cache.join("cache-identity.json");
+    fs::write(&progress, "{}").unwrap();
+    fs::write(&identity, "{}").unwrap();
+
+    let output = run(temp.path(), &[]);
+    let out = stdout(&output);
+    assert!(out.contains(&format!("Removed {}", progress.display())));
+    assert!(out.contains(&format!("Removed {}", identity.display())));
+    assert!(!progress.exists());
+    assert!(!identity.exists());
+    assert!(!cache.exists());
+}

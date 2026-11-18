@@ -22,7 +22,11 @@ include = [
 
 [workspace]
 members = ["."]
-exclude = ["fixtures/weak-auth", "fixtures/strong-auth"]
+exclude = [
+    "fixtures/weak-auth",
+    "fixtures/strong-auth",
+    "fixtures/workspace-multi-package",
+]
 
 [dependencies]
 anyhow = "1"

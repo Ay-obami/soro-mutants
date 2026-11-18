@@ -111,6 +111,9 @@ enum Commands {
         /// Cargo project or workspace to inspect.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Only list mutants in the specified Cargo workspace package (repeatable).
+        #[arg(short = 'p', long = "package", value_name = "SPEC")]
+        package: Vec<String>,
         /// Only list mutants produced by this operator ID, such as AUTH-001.
         #[arg(long, value_parser = parse_operator)]
         operator: Option<String>,
@@ -150,6 +153,9 @@ enum Commands {
         /// Cargo project or workspace to mutate.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Only execute mutants in the specified Cargo workspace package (repeatable).
+        #[arg(short = 'p', long = "package", value_name = "SPEC")]
+        package: Vec<String>,
         /// Only execute mutants produced by this operator ID, such as AUTH-001.
         #[arg(long, value_parser = parse_operator)]
         operator: Option<String>,
@@ -219,6 +225,12 @@ enum Commands {
         /// Write the selected text, JSON, or Markdown report to a file.
         #[arg(long)]
         output: Option<PathBuf>,
+        /// Resume an interrupted mutation run from the local progress file.
+        #[arg(long)]
+        resume: bool,
+        /// Path to local progress file for resuming interrupted runs [default: <target-dir>/progress.json].
+        #[arg(long, value_name = "PATH")]
+        progress_file: Option<PathBuf>,
     },
     /// Remove Soro Mutants scratch and build-cache directories.
     Clean {
@@ -358,7 +370,7 @@ struct Mutant {
     end_byte: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum Outcome {
     Killed,
@@ -428,6 +440,416 @@ fn tool_version(binary: &str) -> Option<String> {
     let version = String::from_utf8(output.stdout).ok()?;
     let version = version.trim();
     (!version.is_empty()).then(|| version.to_owned())
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct CacheIdentity {
+    workspace_root: PathBuf,
+    source_hash: String,
+    test_command: String,
+    rustc_version: Option<String>,
+    cargo_version: Option<String>,
+    packages: Vec<String>,
+    operator: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct RunProgress {
+    version: u32,
+    run_identity: CacheIdentity,
+    completed: Vec<CompletedMutant>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct CompletedMutant {
+    id: String,
+    operator: String,
+    file: PathBuf,
+    line: usize,
+    original: String,
+    replacement: String,
+    outcome: Outcome,
+}
+
+impl RunProgress {
+    fn new(run_identity: CacheIdentity) -> Self {
+        Self {
+            version: 1,
+            run_identity,
+            completed: Vec::new(),
+        }
+    }
+
+    fn find_completed(&self, mutant: &Mutant) -> Option<&CompletedMutant> {
+        self.completed.iter().find(|c| {
+            c.operator == mutant.operator
+                && c.file == mutant.file
+                && c.line == mutant.span.line
+                && c.original == mutant.original
+                && c.replacement == mutant.replacement
+        })
+    }
+
+    fn record_completed(&mut self, mutant: &Mutant, outcome: Outcome) {
+        if let Some(pos) = self.completed.iter().position(|c| {
+            c.operator == mutant.operator
+                && c.file == mutant.file
+                && c.line == mutant.span.line
+                && c.original == mutant.original
+                && c.replacement == mutant.replacement
+        }) {
+            self.completed[pos].outcome = outcome;
+        } else {
+            self.completed.push(CompletedMutant {
+                id: mutant.id.clone(),
+                operator: mutant.operator.clone(),
+                file: mutant.file.clone(),
+                line: mutant.span.line,
+                original: mutant.original.clone(),
+                replacement: mutant.replacement.clone(),
+                outcome,
+            });
+        }
+    }
+}
+
+fn load_and_validate_progress(path: &Path, expected: &CacheIdentity) -> Result<RunProgress> {
+    if !path.exists() {
+        bail!("cannot resume: progress file not found at {}", path.display());
+    }
+
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("cannot read progress file at {}", path.display()))?;
+
+    let progress: RunProgress = serde_json::from_str(&content)
+        .with_context(|| format!("cannot resume: malformed progress file at {}", path.display()))?;
+
+    if progress.version != 1 {
+        bail!(
+            "cannot resume: unsupported progress file version {}",
+            progress.version
+        );
+    }
+
+    let prev = &progress.run_identity;
+    if prev.workspace_root != expected.workspace_root {
+        bail!(
+            "cannot resume: workspace changed from '{}' to '{}'",
+            prev.workspace_root.display(),
+            expected.workspace_root.display()
+        );
+    }
+    if prev.source_hash != expected.source_hash {
+        bail!("cannot resume: source files have changed since the previous run");
+    }
+    if prev.test_command != expected.test_command {
+        bail!(
+            "cannot resume: test command changed from '{}' to '{}'",
+            prev.test_command,
+            expected.test_command
+        );
+    }
+    if prev.rustc_version != expected.rustc_version || prev.cargo_version != expected.cargo_version {
+        bail!("cannot resume: toolchain changed since the previous run");
+    }
+    if prev.packages != expected.packages {
+        bail!("cannot resume: package selection changed since the previous run");
+    }
+    if prev.operator != expected.operator {
+        bail!("cannot resume: operator configuration changed since the previous run");
+    }
+
+    Ok(progress)
+}
+
+fn save_progress_atomic(path: &Path, progress: &RunProgress) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+    let json = serde_json::to_string_pretty(progress)?;
+    fs::write(&tmp_path, json)?;
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+#[derive(Default)]
+struct DeterministicHasher(u64);
+
+impl DeterministicHasher {
+    fn new() -> Self {
+        Self(0xcbf29ce484222325)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= byte as u64;
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn write_str(&mut self, s: &str) {
+        self.write(s.as_bytes());
+        self.write(&[0xff]);
+    }
+
+    fn hex(&self) -> String {
+        format!("{:016x}", self.0)
+    }
+}
+
+fn compute_source_hash(root: &Path, package_dirs: Option<&[PathBuf]>) -> Result<String> {
+    let mut hasher = DeterministicHasher::new();
+    let mut files = Vec::new();
+
+    for entry in WalkDir::new(root).into_iter().filter_entry(|e| !ignored_entry(e, root)) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.file_type().is_file() {
+            let path = entry.path();
+            let is_rs = path.extension().and_then(|ext| ext.to_str()) == Some("rs");
+            let is_manifest = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "Cargo.toml" || n == "Cargo.lock");
+            if is_rs || is_manifest {
+                if let Some(dirs) = package_dirs {
+                    if !dirs.iter().any(|d| path.starts_with(d)) {
+                        continue;
+                    }
+                }
+                if let Ok(rel) = path.strip_prefix(root) {
+                    files.push((rel.to_path_buf(), path.to_path_buf()));
+                }
+            }
+        }
+    }
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (rel, abs) in files {
+        hasher.write_str(&rel.to_string_lossy());
+        if let Ok(meta) = fs::metadata(&abs) {
+            hasher.write(&meta.len().to_le_bytes());
+        }
+        if let Ok(bytes) = fs::read(&abs) {
+            hasher.write(&bytes);
+        }
+    }
+
+    Ok(hasher.hex())
+}
+
+fn validate_and_isolate_cache(
+    cache_base: &Path,
+    baseline: &Path,
+    mutants: &Path,
+    identity: &CacheIdentity,
+) -> Result<()> {
+    fs::create_dir_all(cache_base)?;
+    let identity_path = cache_base.join("cache-identity.json");
+
+    let is_stale = if identity_path.exists() {
+        if let Ok(content) = fs::read_to_string(&identity_path) {
+            if let Ok(existing) = serde_json::from_str::<CacheIdentity>(&content) {
+                &existing != identity
+            } else {
+                true
+            }
+        } else {
+            true
+        }
+    } else {
+        false
+    };
+
+    if is_stale {
+        if baseline.exists() {
+            let _ = fs::remove_dir_all(baseline);
+        }
+        if mutants.exists() {
+            let _ = fs::remove_dir_all(mutants);
+        }
+    }
+
+    let json = serde_json::to_string_pretty(identity)?;
+    fs::write(&identity_path, json)?;
+
+    fs::create_dir_all(baseline)?;
+    fs::create_dir_all(mutants)?;
+
+    let baseline_marker = baseline.join(".soro-baseline-artifact");
+    let mutant_in_baseline = baseline.join(".soro-mutant-artifact");
+    let mutant_marker = mutants.join(".soro-mutant-artifact");
+    let baseline_in_mutant = mutants.join(".soro-baseline-artifact");
+
+    if mutant_in_baseline.exists() {
+        let _ = fs::remove_dir_all(baseline);
+        fs::create_dir_all(baseline)?;
+    }
+    if baseline_in_mutant.exists() {
+        let _ = fs::remove_dir_all(mutants);
+        fs::create_dir_all(mutants)?;
+    }
+
+    fs::write(&baseline_marker, "baseline")?;
+    fs::write(&mutant_marker, "mutant")?;
+
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct WorkspacePackage {
+    name: String,
+    manifest_path: PathBuf,
+    package_dir: PathBuf,
+}
+
+fn discover_workspace_packages(root: &Path) -> Result<Vec<WorkspacePackage>> {
+    let manifest_path = root.join("Cargo.toml");
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let output = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1", "--manifest-path"])
+        .arg(&manifest_path)
+        .current_dir(root)
+        .output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                if let Some(packages) = val.get("packages").and_then(|p| p.as_array()) {
+                    let mut result = Vec::new();
+                    for pkg in packages {
+                        if let (Some(name), Some(manifest)) = (
+                            pkg.get("name").and_then(|n| n.as_str()),
+                            pkg.get("manifest_path").and_then(|m| m.as_str()),
+                        ) {
+                            let manifest_buf = PathBuf::from(manifest);
+                            let pkg_dir = manifest_buf.parent().unwrap_or(root).to_path_buf();
+                            result.push(WorkspacePackage {
+                                name: name.to_string(),
+                                manifest_path: manifest_buf,
+                                package_dir: pkg_dir,
+                            });
+                        }
+                    }
+                    if !result.is_empty() {
+                        return Ok(result);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: parse manifest directly
+    let mut packages = Vec::new();
+    let content = fs::read_to_string(&manifest_path).unwrap_or_default();
+    if let Some(name) = parse_package_name_from_toml(&content) {
+        packages.push(WorkspacePackage {
+            name,
+            manifest_path: manifest_path.clone(),
+            package_dir: root.to_path_buf(),
+        });
+    }
+
+    // Also look for workspace members if [workspace]
+    if let Some(members) = parse_workspace_members_from_toml(&content) {
+        for member in members {
+            let member_dir = root.join(&member);
+            let member_manifest = member_dir.join("Cargo.toml");
+            if member_manifest.exists() {
+                if let Ok(member_content) = fs::read_to_string(&member_manifest) {
+                    if let Some(name) = parse_package_name_from_toml(&member_content) {
+                        packages.push(WorkspacePackage {
+                            name,
+                            manifest_path: member_manifest,
+                            package_dir: member_dir,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(packages)
+}
+
+fn parse_package_name_from_toml(content: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if in_package && trimmed.starts_with("name") {
+            if let Some((_, val)) = trimmed.split_once('=') {
+                return Some(val.trim().trim_matches('"').trim_matches('\'').to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_workspace_members_from_toml(content: &str) -> Option<Vec<String>> {
+    let mut in_workspace = false;
+    let mut in_members = false;
+    let mut members = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_workspace = trimmed == "[workspace]";
+            in_members = false;
+            continue;
+        }
+        if in_workspace && trimmed.starts_with("members") {
+            if let Some((_, val)) = trimmed.split_once('=') {
+                let val = val.trim();
+                if val.starts_with('[') {
+                    in_members = true;
+                }
+            }
+        }
+        if in_members {
+            for part in trimmed.split(',') {
+                let clean = part.trim().trim_matches('[').trim_matches(']').trim().trim_matches('"').trim_matches('\'');
+                if !clean.is_empty() {
+                    members.push(clean.to_string());
+                }
+            }
+            if trimmed.ends_with(']') {
+                in_members = false;
+            }
+        }
+    }
+
+    if members.is_empty() {
+        None
+    } else {
+        Some(members)
+    }
+}
+
+fn resolve_package_filter(root: &Path, selected: &[String]) -> Result<Option<Vec<PathBuf>>> {
+    if selected.is_empty() {
+        return Ok(None);
+    }
+
+    let all_packages = discover_workspace_packages(root)?;
+    let mut selected_dirs = Vec::new();
+    for name in selected {
+        if let Some(pkg) = all_packages.iter().find(|p| &p.name == name) {
+            let canonical = pkg.package_dir.canonicalize().unwrap_or_else(|_| pkg.package_dir.clone());
+            selected_dirs.push(canonical);
+        } else {
+            bail!("package `{}` not found in workspace", name);
+        }
+    }
+
+    Ok(Some(selected_dirs))
 }
 
 fn list_report(mutants: &[Mutant]) -> ListReport<'_> {
@@ -1134,6 +1556,7 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::List {
             path,
+            package,
             operator,
             exclude_path,
             shard,
@@ -1146,15 +1569,20 @@ fn run() -> Result<()> {
             count_only,
             output,
         } => {
+            let root = path
+                .canonicalize()
+                .with_context(|| format!("cannot resolve {}", path.display()))?;
+            let package_dirs = resolve_package_filter(&root, &package)?;
             let (mutants, suppressed) = discover_mutants_with_suppressions(
-                &path,
+                &root,
+                package_dirs.as_deref(),
                 operator.as_deref(),
                 file.as_deref(),
                 function.as_deref(),
                 &exclusion_set(exclude_path)?,
             )?;
             let mutants = filter_changed_mutants(
-                &path,
+                &root,
                 mutants,
                 &changed_file,
                 diff_base.as_deref(),
@@ -1183,6 +1611,7 @@ fn run() -> Result<()> {
         }
         Commands::Test {
             path,
+            package,
             operator,
             exclude_path,
             shard,
@@ -1206,15 +1635,32 @@ fn run() -> Result<()> {
             github_summary,
             min_score,
             output,
+            resume,
+            progress_file,
         } => {
             let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
-            let test_command = resolve_runner_command(runner, &test_command)?;
+            let mut test_command = resolve_runner_command(runner, &test_command)?;
+            if !package.is_empty() {
+                if runner == Runner::Nextest && test_command == "cargo nextest run" {
+                    test_command = format!(
+                        "cargo nextest run {}",
+                        package.iter().map(|p| format!("-p {}", p)).collect::<Vec<_>>().join(" ")
+                    );
+                } else if runner == Runner::CargoTest && test_command == "cargo test -q" {
+                    test_command = format!(
+                        "cargo test -q {}",
+                        package.iter().map(|p| format!("-p {}", p)).collect::<Vec<_>>().join(" ")
+                    );
+                }
+            }
             let metadata = RunMetadata::capture(&test_command, timeouts);
             let root = path
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
+            let package_dirs = resolve_package_filter(&root, &package)?;
             let (mutants, suppressed) = discover_mutants_with_suppressions(
                 &root,
+                package_dirs.as_deref(),
                 operator.as_deref(),
                 file.as_deref(),
                 function.as_deref(),
@@ -1267,12 +1713,42 @@ fn run() -> Result<()> {
                 return Ok(());
             }
 
+            let cache_base = target_dir_base(&root, target_dir.as_deref());
             let (baseline_target_dir, mutant_target_root) =
                 target_dirs(&root, target_dir.as_deref());
             // Keep the clean baseline isolated, but let mutants share a cache.
             // The scratch path is stable and each source mutation changes file contents,
             // so Cargo rebuilds the affected crate while reusing dependencies.
             let shared_target = true;
+
+            let source_hash = compute_source_hash(&root, package_dirs.as_deref())?;
+            let current_identity = CacheIdentity {
+                workspace_root: root.clone(),
+                source_hash,
+                test_command: test_command.clone(),
+                rustc_version: tool_version("rustc"),
+                cargo_version: tool_version("cargo"),
+                packages: package.clone(),
+                operator: operator.clone(),
+            };
+
+            validate_and_isolate_cache(
+                &cache_base,
+                &baseline_target_dir,
+                &mutant_target_root,
+                &current_identity,
+            )?;
+
+            let progress_path = progress_file
+                .unwrap_or_else(|| cache_base.join("progress.json"));
+            let mut progress = if resume {
+                load_and_validate_progress(&progress_path, &current_identity)?
+            } else {
+                let prog = RunProgress::new(current_identity);
+                save_progress_atomic(&progress_path, &prog)?;
+                prog
+            };
+
             let test_cwd = test_dir
                 .as_deref()
                 .map(|dir| root.join(dir))
@@ -1304,26 +1780,44 @@ fn run() -> Result<()> {
 
             let mut results = Vec::new();
             for mutant in mutants {
-                let outcome = execute_mutant(
-                    &root,
-                    &mutant,
-                    test_dir.as_deref(),
-                    &test_command,
-                    timeouts,
-                    &mutant_target_root,
-                    shared_target,
-                )?;
-                if !json && !markdown && !html && !sarif {
-                    writeln!(
-                        report,
-                        "{:<10} {:<8} {}:{} {}",
-                        outcome_label(&outcome),
-                        mutant.operator,
-                        mutant.file.display(),
-                        mutant.span.line,
-                        mutant.description
+                let outcome = if let Some(completed) = progress.find_completed(&mutant) {
+                    if !json && !markdown && !html && !sarif {
+                        writeln!(
+                            report,
+                            "{:<10} {:<8} {}:{} {} (resumed)",
+                            outcome_label(&completed.outcome),
+                            mutant.operator,
+                            mutant.file.display(),
+                            mutant.span.line,
+                            mutant.description
+                        )?;
+                    }
+                    completed.outcome.clone()
+                } else {
+                    let outcome = execute_mutant(
+                        &root,
+                        &mutant,
+                        test_dir.as_deref(),
+                        &test_command,
+                        timeouts,
+                        &mutant_target_root,
+                        shared_target,
                     )?;
-                }
+                    if !json && !markdown && !html && !sarif {
+                        writeln!(
+                            report,
+                            "{:<10} {:<8} {}:{} {}",
+                            outcome_label(&outcome),
+                            mutant.operator,
+                            mutant.file.display(),
+                            mutant.span.line,
+                            mutant.description
+                        )?;
+                    }
+                    progress.record_completed(&mutant, outcome.clone());
+                    save_progress_atomic(&progress_path, &progress)?;
+                    outcome
+                };
                 results.push(MutantResult { mutant, outcome });
             }
 
@@ -1834,6 +2328,7 @@ fn discover_mutants(
 ) -> Result<Vec<Mutant>> {
     Ok(discover_mutants_with_suppressions(
         root,
+        None,
         operator,
         file_filter,
         function_filter,
@@ -1844,6 +2339,7 @@ fn discover_mutants(
 
 fn discover_mutants_with_suppressions(
     root: &Path,
+    package_dirs: Option<&[PathBuf]>,
     operator: Option<&str>,
     file_filter: Option<&str>,
     function_filter: Option<&str>,
@@ -1855,9 +2351,23 @@ fn discover_mutants_with_suppressions(
     let mut mutants = Vec::new();
 
     for entry in WalkDir::new(&root).into_iter().filter_entry(|entry| {
-        !ignored_entry(entry, &root)
-            && (entry.path() == root
-                || !exclusions.is_match(entry.path().strip_prefix(&root).unwrap_or(entry.path())))
+        if ignored_entry(entry, &root) {
+            return false;
+        }
+        if entry.path() != root && exclusions.is_match(entry.path().strip_prefix(&root).unwrap_or(entry.path())) {
+            return false;
+        }
+        if let Some(allowed) = package_dirs {
+            let p = entry.path();
+            if entry.file_type().is_dir() {
+                if !allowed.iter().any(|dir| dir.starts_with(p) || p.starts_with(dir)) {
+                    return false;
+                }
+            } else if !allowed.iter().any(|dir| p.starts_with(dir)) {
+                return false;
+            }
+        }
+        true
     }) {
         let entry = entry?;
         if !entry.file_type().is_file()
@@ -2290,20 +2800,26 @@ fn ignored_entry(entry: &DirEntry, root: &Path) -> bool {
     )
 }
 
-fn target_dirs(root: &Path, target_dir: Option<&Path>) -> (PathBuf, PathBuf) {
-    let base = match target_dir {
+fn target_dir_base(root: &Path, target_dir: Option<&Path>) -> PathBuf {
+    match target_dir {
         Some(path) if path.is_absolute() => path.to_path_buf(),
         Some(path) => root.join(path),
         None => root.join(".soro-mutants-target"),
-    };
+    }
+}
 
+fn target_dirs(root: &Path, target_dir: Option<&Path>) -> (PathBuf, PathBuf) {
+    let base = target_dir_base(root, target_dir);
     (base.join("baseline"), base.join("mutants-shared"))
 }
 
 fn managed_cleanup_paths(root: &Path, target_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
     let scratch = root.join(".soro-mutants-worktree");
     let (baseline, mutants) = target_dirs(root, target_dir);
-    let mut paths: Vec<PathBuf> = [scratch, baseline, mutants]
+    let base = target_dir_base(root, target_dir);
+    let progress = base.join("progress.json");
+    let identity = base.join("cache-identity.json");
+    let mut paths: Vec<PathBuf> = [scratch, baseline, mutants, progress, identity]
         .into_iter()
         .filter(|path| path.exists())
         .collect();
@@ -2319,7 +2835,7 @@ fn managed_cleanup_paths(root: &Path, target_dir: Option<&Path>) -> Result<Vec<P
             if entries.iter().all(|entry| {
                 matches!(
                     entry.file_name().to_str(),
-                    Some("baseline" | "mutants-shared")
+                    Some("baseline" | "mutants-shared" | "progress.json" | "cache-identity.json")
                 ) && paths.iter().any(|path| path == &entry.path())
             }) {
                 paths.push(default_root);
@@ -2339,9 +2855,14 @@ fn clean_generated_state(
     if !dry_run {
         for path in &paths {
             if target_dir.is_none() && path == &root.join(".soro-mutants-target") {
-                fs::remove_dir(path)
+                if path.exists() {
+                    fs::remove_dir(path)
+                        .with_context(|| format!("failed to remove {}", path.display()))?;
+                }
+            } else if path.is_file() {
+                fs::remove_file(path)
                     .with_context(|| format!("failed to remove {}", path.display()))?;
-            } else {
+            } else if path.is_dir() {
                 fs::remove_dir_all(path)
                     .with_context(|| format!("failed to remove {}", path.display()))?;
             }
@@ -2500,8 +3021,13 @@ fn ensure_nextest_available() -> Result<()> {
 }
 
 fn compile_command_for(test_command: &str) -> Option<String> {
-    if test_command == "cargo nextest run" {
-        return Some("cargo test --no-run".to_string());
+    if test_command.starts_with("cargo nextest run") {
+        let tail = test_command["cargo nextest run".len()..].trim();
+        if tail.is_empty() {
+            return Some("cargo test --no-run".to_string());
+        } else {
+            return Some(format!("cargo test --no-run {}", tail));
+        }
     }
     if test_command.contains("--no-run") {
         return Some(test_command.to_string());

@@ -168,6 +168,52 @@ jobs:
 
 This workflow uses the current `main` branch for illustration; pin the tool to a reviewed commit or a release that includes `--github-summary` for reproducible CI. The command still runs the normal baseline and mutant tests, so its exit status is preserved. The GitHub summary file is appended to, not replaced.
 
+### Workspace package selection
+
+In Cargo workspaces, scope mutation testing to one or more packages using `-p` / `--package`:
+
+```bash
+# List mutants in a specific workspace package
+cargo soro-mutants list /path/to/workspace -p my-contract
+
+# Execute mutants across multiple selected packages
+cargo soro-mutants test /path/to/workspace -p contract-a -p contract-b
+```
+
+Unselected packages in the workspace are completely excluded from mutation discovery.
+During test execution:
+- When using the default test command (`cargo test -q`), `-p <package>` is automatically appended for each selected package for both baseline and mutant test execution.
+- When using `cargo nextest` (`--runner nextest`), `-p <package>` is similarly passed to `cargo nextest run`.
+- When an explicit custom `--test-command` is provided, Soro Mutants executes the user's custom command as specified, while mutation discovery remains scoped strictly to the selected packages.
+
+### Cache isolation and invalidation
+
+Soro Mutants isolates Cargo build artifacts and prevents contamination between clean baselines and mutated runs:
+- Baseline artifacts are stored in `<target-dir>/baseline/` and tagged with `.soro-baseline-artifact`.
+- Mutant artifacts are stored in `<target-dir>/mutants-shared/` and tagged with `.soro-mutant-artifact`.
+- If an artifact marker from one phase is detected in the other's directory, the contaminated directory is immediately cleared.
+- A deterministic `cache-identity.json` file records run identity, covering source files (cryptographic hash of source `.rs` and manifest files), active mutation operators, test-command arguments, Rust/Cargo toolchain versions, and workspace packages.
+- Whenever source code, operators, test commands, toolchains, or workspaces change, stale caches are automatically invalidated and purged before execution.
+- No remote cache backend is used; all cache isolation and invalidation occurs deterministically on local disk.
+
+### Resuming interrupted mutation runs
+
+Long-running mutation suites can be interrupted and safely resumed using `--resume`:
+
+```bash
+# Resume an interrupted run from the local progress file
+cargo soro-mutants test /path/to/project --resume
+
+# Specify a custom progress file path
+cargo soro-mutants test /path/to/project --resume --progress-file /path/to/progress.json
+```
+
+- Local progress is saved atomically to `<target-dir>/progress.json` (or the path passed to `--progress-file`) after each completed mutant.
+- Only mutants with valid completed results are skipped upon resume; interrupted or partially completed mutants are re-executed.
+- Resuming is refused with a clear diagnostic if the source code, toolchain, test command, operator configuration, or workspace changes between runs.
+- Malformed or incompatible progress files are rejected safely.
+- The progress file is automatically cleaned up when running `cargo soro-mutants clean`.
+
 ### Versioned mutation corpus manifest
 
 Corpus contributors can describe generalized Soroban source patterns, mutation operators, expected weak/strong test outcomes, and provenance using the [version 1 JSON manifest format](docs/corpus-manifest.md). A [JSON Schema](docs/corpus-manifest.schema.json) and [two-entry example](docs/corpus-example.json) are included.
