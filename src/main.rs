@@ -1527,6 +1527,15 @@ fn append_github_summary(results: &[MutantResult]) -> Result<()> {
 fn report_writer(output: Option<&Path>) -> Result<Box<dyn Write>> {
     match output {
         Some(path) => {
+            if fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                bail!(
+                    "refusing to write report through symbolic link {}",
+                    path.display()
+                );
+            }
             let file = fs::File::create(path)
                 .with_context(|| format!("cannot create report at {}", path.display()))?;
             Ok(Box::new(file))
