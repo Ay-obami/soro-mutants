@@ -4998,3 +4998,659 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             edits,
+            vec![
+                ("require_owner(&stored)", "()"),
+                ("require_owner(&from)", "()"),
+                ("&from", "&to"),
+            ]
+        );
+        assert!(mutants[0].3.contains("authorization of an argument"));
+    }
+
+    #[test]
+    fn helper_sink_still_gets_direct_auth_removal() {
+        let mutants = mutations_for(
+            r#"
+            fn require_owner(owner: &Address) {
+                owner.require_auth();
+            }
+            "#,
+        );
+        assert!(mutants
+            .iter()
+            .any(|m| m.operator == "AUTH-001" && m.function.as_deref() == Some("require_owner")));
+        assert!(mutants.iter().all(|m| m.operator != "AUTH-004"));
+    }
+
+    #[test]
+    fn generic_require_auth_is_not_treated_as_soroban_authorization() {
+        let mutants = mutations_for(
+            r#"
+            fn authenticate(session: Session) {
+                session.require_auth();
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "AUTH-001"));
+        assert!(!mutants.iter().any(|m| m.operator == "AUTH-002"));
+    }
+
+    #[test]
+    fn auth_wrong_address_ignores_non_address_parameters() {
+        let mutants = mutations_for(
+            r#"
+            use soroban_sdk::Address;
+
+            fn update(admin: Address, label: String, amount: i128) {
+                admin.require_auth();
+            }
+            "#,
+        );
+
+        assert!(mutants.iter().any(|m| m.operator == "AUTH-001"));
+        assert!(!mutants.iter().any(|m| m.operator == "AUTH-002"));
+    }
+
+    #[test]
+    fn auth_wrong_address_requires_a_distinct_address_parameter() {
+        let mutants = mutations_for(
+            r#"
+            use soroban_sdk::Address;
+
+            fn update(admin: Address) {
+                admin.require_auth();
+            }
+            "#,
+        );
+
+        assert_eq!(
+            mutants.iter().filter(|m| m.operator == "AUTH-001").count(),
+            1
+        );
+        assert_eq!(
+            mutants.iter().filter(|m| m.operator == "AUTH-002").count(),
+            0
+        );
+    }
+
+    #[test]
+    fn generic_publish_is_not_treated_as_soroban_event_publication() {
+        let mutants = mutations_for(
+            r#"
+            fn log(logger: Logger) {
+                logger.publish("hello");
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn generic_events_publish_chain_is_not_treated_as_soroban_event_publication() {
+        let mutants = mutations_for(
+            r#"
+            fn log(logger: Logger) {
+                logger.events().publish("hello");
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn borrowed_env_event_publication_is_detected() {
+        let mutants = mutations_for(
+            r#"
+            fn emit(env: &Env) {
+                env.events().publish(("admin", "changed"), ());
+            }
+            "#,
+        );
+
+        assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
+    }
+
+    #[test]
+    fn token_client_substitution_uses_other_recognized_clients_in_order() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(env: Env, a: Address, b: Address, from: Address, to: Address, amount: i128) {
+                let primary = token::Client::new(&env, &a);
+                let secondary = token::Client::new(&env, &b);
+                primary.transfer(&from, &to, &amount);
+            }
+            "#,
+        );
+        let clients: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "TOKEN-004")
+            .collect();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].original, "primary");
+        assert_eq!(clients[0].replacement, "secondary");
+    }
+
+    #[test]
+    fn token_client_substitution_ignores_constructor_and_unrecognized_receivers() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(env: Env, a: Address, from: Address, to: Address, amount: i128) {
+                token::Client::new(&env, &a).transfer(&from, &to, &amount);
+                helper.transfer(&from, &to, &amount);
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-004"));
+    }
+
+    #[test]
+    fn allowance_role_swaps_cover_supported_token_calls() {
+        let mutants = mutations_for(
+            r#"
+            fn allowances(env: Env, token: Address, owner: Address, spender: Address, to: Address, amount: i128, expiration_ledger: u32) -> i128 {
+                let client = token::Client::new(&env, &token);
+                client.approve(&owner, &spender, &amount, &expiration_ledger);
+                client.transfer_from(&spender, &owner, &to, &amount);
+                client.burn_from(&spender, &owner, &amount);
+                client.allowance(&owner, &spender)
+            }
+            "#,
+        );
+        let swaps = mutants
+            .iter()
+            .filter(|m| m.operator == "TOKEN-002")
+            .map(|m| {
+                (
+                    m.original.as_str(),
+                    m.replacement.as_str(),
+                    m.description.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            swaps,
+            vec![
+                (
+                    "&owner, &spender",
+                    "&spender, &owner",
+                    "swap token approve() owner/spender arguments (owner <-> spender)",
+                ),
+                (
+                    "&spender, &owner",
+                    "&owner, &spender",
+                    "swap token transfer_from() spender/owner arguments (spender <-> owner)",
+                ),
+                (
+                    "&spender, &owner",
+                    "&owner, &spender",
+                    "swap token burn_from() spender/owner arguments (spender <-> owner)",
+                ),
+                (
+                    "&owner, &spender",
+                    "&spender, &owner",
+                    "swap token allowance() owner/spender arguments (owner <-> spender)",
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn allowance_role_swap_preserves_separator_and_other_arguments() {
+        let source = r#"
+            fn approve(env: Env, token: TokenClient, from: Address, spender: Address, amount: i128) {
+                token.approve(&from,   /* role */ &spender, &amount, &200);
+            }
+            "#;
+        let mutants = mutations_for(source);
+        let swap = mutants
+            .iter()
+            .find(|m| m.operator == "TOKEN-002")
+            .expect("typed token-client parameter should be recognized");
+        assert_eq!(swap.original, "&from,   /* role */ &spender");
+        assert_eq!(swap.replacement, "&spender,   /* role */ &from");
+        assert_eq!(&source[swap.start_byte..swap.end_byte], swap.original);
+    }
+
+    #[test]
+    fn allowance_role_swap_ignores_unrelated_receivers_shapes_and_values() {
+        let mutants = mutations_for(
+            r#"
+            fn not_token(env: Env, registry: Registry, owner: Address, spender: Address, amount: i128) {
+                registry.approve(&owner, &spender, &amount, &100);
+                TokenUtils::new(&env).events().approve(&owner, &spender, &amount, &100);
+                env.events().publish((symbol_short!("approve"),), (&owner, &spender));
+            }
+
+            fn unsupported(env: Env, token: Address, owner: Address, spender: Address, amount: i128) {
+                let client = token::Client::new(&env, &token);
+                let alias = owner.clone();
+                client.approve(&alias, &spender, &amount, &100);
+                client.approve(&owner, &owner, &amount, &100);
+                client.approve(&owner.clone(), &spender, &amount, &100);
+                client.approve(&owner, &spender, &amount);
+                client.transfer_from(&spender, &owner, &amount);
+                client.allowance(&owner);
+                client.transfer(&owner, &spender, &amount);
+            }
+            "#,
+        );
+        assert!(
+            mutants.iter().all(|m| m.operator != "TOKEN-002"),
+            "{mutants:#?}"
+        );
+    }
+
+    #[test]
+    fn token_amount_mutants_use_zero_and_one_for_typed_numeric_reference() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(token: TokenClient, from: Address, to: Address, amount: i128) {
+                token.transfer(&from, &to, &amount);
+            }
+            "#,
+        );
+        let amounts: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == "TOKEN-003")
+            .collect();
+        assert_eq!(amounts.len(), 2);
+        assert_eq!(amounts[0].original, "&amount");
+        assert!(amounts.iter().any(|m| m.replacement == "&0"));
+        assert!(amounts.iter().any(|m| m.replacement == "&1"));
+    }
+
+    #[test]
+    fn token_amount_mutation_rejects_untyped_or_computed_amounts() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(token: TokenClient, from: Address, to: Address, amount: Amount, count: i128) {
+                token.transfer(&from, &to, &amount);
+                token.transfer(&from, &to, &(count + 1));
+            }
+            "#,
+        );
+        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-003"));
+    }
+
+    #[test]
+    fn token_direction_mutant_preserves_complex_amount_expression() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(token: TokenClient, from: Address, to: Address, amount: i128) {
+                token.transfer(&from, &to, &(amount - 1));
+            }
+            "#,
+        );
+
+        let mutant = mutants
+            .iter()
+            .find(|m| m.operator == "TOKEN-001")
+            .expect("TOKEN-001 should be generated");
+
+        assert!(mutant
+            .replacement
+            .contains("transfer(&to, &from, &(amount - 1))"));
+    }
+
+    #[test]
+    fn token_direction_skips_identical_sender_and_recipient() {
+        let mutants = mutations_for(
+            r#"
+            fn pay(token: TokenClient, owner: Address, amount: i128) {
+                token.transfer(&owner, &owner, &amount);
+            }
+            "#,
+        );
+
+        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
+    }
+
+    #[test]
+    fn separate_timeout_overrides_do_not_change_other_phase() {
+        assert_eq!(
+            Timeouts::resolve(120, None, None),
+            Timeouts {
+                compile: 120,
+                test: 120
+            }
+        );
+        assert_eq!(
+            Timeouts::resolve(120, Some(10), None),
+            Timeouts {
+                compile: 10,
+                test: 120
+            }
+        );
+        assert_eq!(
+            Timeouts::resolve(120, None, Some(20)),
+            Timeouts {
+                compile: 120,
+                test: 20
+            }
+        );
+        assert_eq!(
+            Timeouts::resolve(120, Some(10), Some(20)),
+            Timeouts {
+                compile: 10,
+                test: 20
+            }
+        );
+    }
+
+    #[test]
+    fn execute_mutant_cleans_scratch_worktree() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("soro-mutants-runner-{nonce}"));
+        let target = env::temp_dir().join(format!("soro-mutants-runner-target-{nonce}"));
+        fs::create_dir_all(root.join("src")).expect("fixture directory should be created");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "runner-fixture"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .expect("fixture manifest should be written");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+pub struct Address;
+
+impl Address {
+    pub fn require_auth(&self) {}
+}
+
+pub fn guarded(user: Address) {
+    user.require_auth();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn functional_only() {
+        guarded(Address);
+    }
+}
+"#,
+        )
+        .expect("fixture source should be written");
+
+        let mutants = discover_mutants(&root, Some("AUTH-001"), None, None, &GlobSet::empty())
+            .expect("fixture mutation discovery should work");
+        let mutant = mutants.first().expect("AUTH-001 should be discovered");
+
+        let outcome = execute_mutant(
+            &root,
+            mutant,
+            None,
+            "cargo test -q",
+            Timeouts::resolve(30, None, None),
+            &root.join(".soro-mutants-worktree"),
+            &target,
+            &[],
+        )
+        .expect("mutant execution should succeed");
+
+        assert!(matches!(outcome, Outcome::Survived));
+        assert!(!root.join(".soro-mutants-worktree").exists());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn parallel_workers_never_share_scratch_or_cargo_state_with_each_other_or_baseline() {
+        for (root, target_dir) in [
+            (Path::new("/tmp/example-project"), None),
+            (Path::new("/tmp/example-project"), Some(Path::new("custom"))),
+            (
+                Path::new("/tmp/example-project"),
+                Some(Path::new("/tmp/shared-cache")),
+            ),
+        ] {
+            let (baseline, serial) = target_dirs(root, target_dir);
+            let parallel = parallel_target_root(root, target_dir);
+            assert_eq!(parallel.parent(), baseline.parent());
+            assert!(!parallel.starts_with(&baseline) && !baseline.starts_with(&parallel));
+            assert!(!parallel.starts_with(&serial) && !serial.starts_with(&parallel));
+
+            let workers = (0..4)
+                .map(|worker| worker_paths(root, target_dir, worker))
+                .collect::<Vec<_>>();
+            for (index, (scratch, target)) in workers.iter().enumerate() {
+                assert!(scratch.starts_with(root.join(".soro-mutants-worktree")));
+                assert!(target.starts_with(&parallel));
+                assert!(!target.starts_with(&baseline));
+                for (other_scratch, other_target) in &workers[index + 1..] {
+                    assert!(!scratch.starts_with(other_scratch));
+                    assert!(!other_scratch.starts_with(scratch));
+                    assert!(!target.starts_with(other_target));
+                    assert!(!other_target.starts_with(target));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clean_also_removes_parallel_worker_caches() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("soro-mutants-clean-parallel-{nonce}"));
+        let (_, worker_target) = worker_paths(&root, None, 0);
+        fs::create_dir_all(&worker_target).expect("worker cache should be created");
+        fs::create_dir_all(root.join(".soro-mutants-target/baseline"))
+            .expect("baseline directory should be created");
+
+        let removed = clean_generated_state(&root, None, false).expect("cleanup should succeed");
+
+        assert!(removed.contains(&parallel_target_root(&root, None)));
+        assert!(!root.join(".soro-mutants-target").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Three AUTH-001 mutants whose expected outcomes differ. The test suite
+    /// tolerates exactly one missing guard, so if any mutant leaked into another
+    /// mutant's source tree (two guards missing at once) `b` or `c` would be
+    /// KILLED instead of SURVIVED.
+    fn write_leak_detection_fixture(root: &Path) {
+        fs::create_dir_all(root.join("src")).expect("fixture directory should be created");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "parallel-leak-fixture"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+"#,
+        )
+        .expect("fixture manifest should be written");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+use std::cell::Cell;
+
+thread_local! {
+    static AUTHS: Cell<u32> = const { Cell::new(0) };
+}
+
+pub struct Address;
+
+impl Address {
+    pub fn require_auth(&self) {
+        AUTHS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+pub fn auths() -> u32 {
+    AUTHS.with(Cell::get)
+}
+
+pub fn a(user: Address) {
+    user.require_auth();
+}
+
+pub fn b(user: Address) {
+    user.require_auth();
+}
+
+pub fn c(user: Address) {
+    user.require_auth();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_is_guarded() {
+        a(Address);
+        assert_eq!(auths(), 1);
+    }
+
+    #[test]
+    fn at_most_one_guard_is_missing() {
+        a(Address);
+        b(Address);
+        c(Address);
+        assert!(auths() >= 2);
+    }
+}
+"#,
+        )
+        .expect("fixture source should be written");
+    }
+
+    #[test]
+    fn parallel_execution_isolates_mutants_and_reports_in_input_order() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("soro-mutants-parallel-{nonce}"));
+        let cache = env::temp_dir().join(format!("soro-mutants-parallel-cache-{nonce}"));
+        write_leak_detection_fixture(&root);
+        let original_source = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        let (baseline, _) = target_dirs(&root, Some(&cache));
+        fs::create_dir_all(&baseline).unwrap();
+        fs::write(baseline.join("sentinel"), "baseline").unwrap();
+
+        let mutants = discover_mutants(&root, Some("AUTH-001"), None, None, &GlobSet::empty())
+            .expect("fixture mutation discovery should work");
+        let functions = mutants
+            .iter()
+            .map(|m| m.function.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(functions, ["a", "b", "c"]);
+
+        for jobs in [1, 3, 8] {
+            let mut reported = Vec::new();
+            let outcomes = execute_mutants(
+                &root,
+                &mutants,
+                &ExecutionSettings {
+                    test_dir: None,
+                    test_command: "cargo test -q",
+                    timeouts: Timeouts::resolve(120, None, None),
+                    target_dir: Some(&cache),
+                    jobs,
+                },
+                &mut |mutant, outcome| {
+                    reported.push((mutant.id.clone(), outcome_label(outcome)));
+                    Ok(())
+                },
+            )
+            .expect("mutant execution should succeed");
+
+            let labels = outcomes.iter().map(outcome_label).collect::<Vec<_>>();
+            assert_eq!(labels, ["KILLED", "SURVIVED", "SURVIVED"], "jobs={jobs}");
+            assert_eq!(
+                reported,
+                [
+                    ("M0001".to_owned(), "KILLED"),
+                    ("M0002".to_owned(), "SURVIVED"),
+                    ("M0003".to_owned(), "SURVIVED"),
+                ],
+                "jobs={jobs}: results must be reported in mutant order"
+            );
+            assert!(!root.join(".soro-mutants-worktree").exists(), "jobs={jobs}");
+            assert_eq!(
+                fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+                original_source,
+                "jobs={jobs}: the target repository must never be mutated"
+            );
+        }
+
+        // Mutant builds never touched the baseline cache.
+        let baseline_entries = fs::read_dir(&baseline)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(baseline_entries, ["sentinel"]);
+        for worker in 0..3 {
+            assert!(worker_paths(&root, Some(&cache), worker).1.exists());
+        }
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn jobs_defaults_to_serial_and_rejects_non_positive_values() {
+        let jobs = |args: &[&str]| {
+            Cli::try_parse_from(["cargo-soro-mutants", "test", "."].iter().chain(args)).map(|cli| {
+                match cli.command {
+                    Commands::Test { jobs, .. } => jobs,
+                    _ => unreachable!("test subcommand"),
+                }
+            })
+        };
+        assert_eq!(jobs(&[]).unwrap(), 1);
+        assert_eq!(jobs(&["--jobs", "4"]).unwrap(), 4);
+        assert_eq!(jobs(&["-j", "2"]).unwrap(), 2);
+        for invalid in ["0", "-1", "two"] {
+            assert!(jobs(&["--jobs", invalid]).is_err(), "--jobs {invalid}");
+        }
+    }
+
+    #[test]
+    fn compile_gate_preserves_test_prefix_and_arguments() {
+        assert_eq!(
+            compile_command_for("RUSTFLAGS='-Dwarnings' cargo test -q -p pool auth").as_deref(),
+            Some("RUSTFLAGS='-Dwarnings' cargo test --no-run -q -p pool auth")
+        );
+        assert_eq!(
+            compile_command_for("cargo test --no-run -q").as_deref(),
+            Some("cargo test --no-run -q")
+        );
+        assert_eq!(
+            compile_command_for("cargo +1.91.0 test -q -p pool").as_deref(),
+            Some("cargo +1.91.0 test --no-run -q -p pool")
+        );
+        assert_eq!(
+            compile_command_for("cd contracts && cargo +stable test auth").as_deref(),
+            Some("cd contracts && cargo +stable test --no-run auth")
+        );
+        assert_eq!(
+            compile_command_for("cargo nextest run").as_deref(),
+            Some("cargo test --no-run")
+        );
+    }
+}
