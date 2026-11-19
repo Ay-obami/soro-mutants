@@ -157,3 +157,31 @@ fn unwritable_output_path_reports_a_clear_error() {
         assert!(error.contains("report.json"), "{error}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn report_output_refuses_symbolic_link_target() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let victim = temp.path().join("victim.txt");
+    let report = temp.path().join("report.json");
+    fs::write(&victim, "do not overwrite").unwrap();
+    symlink(&victim, &report).unwrap();
+
+    let output = run(&[
+        "list",
+        fixture().to_str().unwrap(),
+        "--json",
+        "--output",
+        report.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("refusing to write report through symbolic link"),
+        "{error}"
+    );
+    assert_eq!(fs::read_to_string(victim).unwrap(), "do not overwrite");
+}
