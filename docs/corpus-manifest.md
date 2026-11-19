@@ -58,4 +58,4 @@ All additions to the Soroban semantic bug corpus must adhere to the following st
 
 ## Future integration
 
-The format is intended for future benchmark-matrix automation and a curated Soroban fault corpus. It does not automatically execute the benchmarks, assert that examples compile, or import external source repositories.
+The corpus format remains descriptive and does not execute benchmarks. Benchmark execution is handled separately by the opt-in [benchmark matrix](benchmark-matrix.md), which uses its own versioned manifest and is never part of unit CI.

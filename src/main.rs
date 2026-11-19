@@ -53,6 +53,14 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "AUTH-005",
         "replace a stored admin/owner authority Address with another Address parameter",
     ),
+    (
+        "AUTH-006",
+        "remove or redirect authorization in a recognized Soroban initialization entrypoint",
+    ),
+    (
+        "AUTH-007",
+        "remove or redirect authorization in a recognized Soroban contract upgrade entrypoint",
+    ),
     ("CALL-001", "replace direct Env::invoke_contract dependency address with another typed Address parameter"),
     ("CALL-002", "replace a generated contract-client call argument with another compatible typed parameter"),
     ("CALL-003", "remove a supported generated contract-client return mismatch check"),
@@ -247,6 +255,15 @@ enum Commands {
         /// Path to local progress file for resuming interrupted runs [default: <target-dir>/progress.json].
         #[arg(long, value_name = "PATH")]
         progress_file: Option<PathBuf>,
+        /// Reuse persistent mutation outcomes when the complete cache identity matches (off by default).
+        #[arg(long)]
+        cache: bool,
+        /// Do not read or write the persistent mutation-result cache.
+        #[arg(long, conflicts_with = "cache")]
+        no_cache: bool,
+        /// Clear persistent mutation results under --target-dir before starting this run.
+        #[arg(long)]
+        clear_cache: bool,
     },
     /// Remove Soro Mutants scratch and build-cache directories.
     Clean {
@@ -264,6 +281,39 @@ enum Commands {
     ValidateCorpus {
         /// Path to the JSON corpus manifest.
         path: PathBuf,
+    },
+    /// Run the opt-in benchmark matrix (never part of unit CI; external targets need --allow-external).
+    BenchmarkMatrix {
+        /// Machine-readable benchmark target manifest.
+        #[arg(default_value = "docs/benchmark-matrix.json")]
+        manifest: PathBuf,
+        /// Fetch and execute pinned external repositories. Required for kind=external targets.
+        #[arg(long)]
+        allow_external: bool,
+        /// Execute only local fixture targets and skip every external repository.
+        #[arg(long)]
+        local_only: bool,
+        /// Directory used to store pinned external checkouts.
+        #[arg(long, default_value = ".soro-mutants-benchmarks")]
+        checkout_dir: PathBuf,
+        /// Timeout in seconds for each target's baseline and mutant commands.
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+        /// Only run the target with this manifest id.
+        #[arg(long, value_name = "ID")]
+        target: Option<String>,
+        /// Emit machine-readable JSON on stdout.
+        #[arg(long)]
+        json: bool,
+        /// Write the Markdown or JSON summary to a file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Verify this environment against the v1.0 supported-platform policy (docs/supported-platforms.md).
+    CheckPlatform {
+        /// Emit machine-readable JSON on stdout.
+        #[arg(long)]
+        json: bool,
     },
     /// Print all built-in operator IDs and their descriptions.
     Operators,
@@ -469,6 +519,107 @@ struct CacheIdentity {
     operator: Option<String>,
 }
 
+const RESULT_CACHE_VERSION: u32 = 1;
+
+/// Every input that may change a mutation outcome is part of this identity.
+/// `docs/result-cache.md` documents each field and the reason it is included.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct ResultCacheIdentity {
+    workspace_root: String,
+    source_hash: String,
+    workspace_source_hash: String,
+    lockfile_hash: String,
+    toolchain_file_hash: String,
+    test_command: String,
+    rustc_version: Option<String>,
+    cargo_version: Option<String>,
+    packages: Vec<String>,
+    operator: Option<String>,
+    file: Option<String>,
+    function: Option<String>,
+    test_dir: Option<String>,
+    exclude_globs: Vec<String>,
+    shard: Option<String>,
+    changed_file: Vec<String>,
+    diff_base: Option<String>,
+    changed_functions: bool,
+    jobs: usize,
+    execution_env_hash: String,
+    compile_timeout_seconds: u64,
+    test_timeout_seconds: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct PersistentResultCache {
+    version: u32,
+    identity: ResultCacheIdentity,
+    /// Digest of `entries`; any out-of-band edit invalidates the whole cache.
+    entries_hash: String,
+    entries: Vec<CompletedMutant>,
+}
+
+impl PersistentResultCache {
+    fn empty(identity: ResultCacheIdentity) -> Self {
+        Self {
+            version: RESULT_CACHE_VERSION,
+            identity,
+            entries_hash: Self::hash_entries(&[]),
+            entries: Vec::new(),
+        }
+    }
+
+    fn hash_entries(entries: &[CompletedMutant]) -> String {
+        let Ok(json) = serde_json::to_string(entries) else {
+            return "unserializable".to_owned();
+        };
+        let mut hasher = DeterministicHasher::new();
+        hasher.write_str(&json);
+        hasher.hex()
+    }
+
+    fn refresh_hash(&mut self) {
+        self.entries_hash = Self::hash_entries(&self.entries);
+    }
+
+    fn find(&self, mutant: &Mutant) -> Option<&CompletedMutant> {
+        self.entries.iter().find(|entry| {
+            entry.operator == mutant.operator
+                && entry.file == mutant.file
+                && entry.line == mutant.span.line
+                && entry.original == mutant.original
+                && entry.replacement == mutant.replacement
+        })
+    }
+
+    fn record(&mut self, mutant: &Mutant, outcome: Outcome) {
+        // Timeouts depend on host load and are never reused as cached evidence.
+        if matches!(outcome, Outcome::Timeout) {
+            return;
+        }
+        if let Some(existing) = self.entries.iter_mut().find(|entry| {
+            entry.operator == mutant.operator
+                && entry.file == mutant.file
+                && entry.line == mutant.span.line
+                && entry.original == mutant.original
+                && entry.replacement == mutant.replacement
+        }) {
+            existing.outcome = outcome;
+            existing.id = mutant.id.clone();
+        } else {
+            self.entries.push(CompletedMutant {
+                id: mutant.id.clone(),
+                operator: mutant.operator.clone(),
+                file: mutant.file.clone(),
+                line: mutant.span.line,
+                original: mutant.original.clone(),
+                replacement: mutant.replacement.clone(),
+                outcome,
+            });
+        }
+        self.refresh_hash();
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct RunProgress {
     version: u32,
@@ -667,6 +818,108 @@ fn compute_source_hash(root: &Path, package_dirs: Option<&[PathBuf]>) -> Result<
     }
 
     Ok(hasher.hex())
+}
+
+fn hash_optional_file(root: &Path, names: &[&str]) -> String {
+    let mut hasher = DeterministicHasher::new();
+    let mut found = false;
+    for name in names {
+        let path = root.join(name);
+        if path.is_file() {
+            hasher.write_str(name);
+            if let Ok(bytes) = fs::read(&path) {
+                hasher.write(&bytes);
+            }
+            found = true;
+            break;
+        }
+    }
+    if found {
+        hasher.hex()
+    } else {
+        "absent".to_owned()
+    }
+}
+
+fn lockfile_hash(root: &Path) -> String {
+    hash_optional_file(root, &["Cargo.lock"])
+}
+
+fn toolchain_file_hash(root: &Path) -> String {
+    hash_optional_file(root, &["rust-toolchain.toml", "rust-toolchain"])
+}
+
+fn result_cache_path(cache_base: &Path) -> PathBuf {
+    cache_base.join("result-cache.json")
+}
+
+fn load_result_cache(path: &Path, expected: &ResultCacheIdentity) -> Result<PersistentResultCache> {
+    if !path.exists() {
+        return Ok(PersistentResultCache::empty(expected.clone()));
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("cannot read result cache at {}", path.display()))?;
+    let cache: PersistentResultCache = match serde_json::from_str(&content) {
+        Ok(cache) => cache,
+        Err(_) => {
+            eprintln!(
+                "result cache miss: ignoring malformed cache at {}",
+                path.display()
+            );
+            return Ok(PersistentResultCache::empty(expected.clone()));
+        }
+    };
+    if cache.version != RESULT_CACHE_VERSION {
+        eprintln!(
+            "result cache miss: unsupported cache version {} at {}",
+            cache.version,
+            path.display()
+        );
+        return Ok(PersistentResultCache::empty(expected.clone()));
+    }
+    if cache.identity != *expected {
+        eprintln!("result cache miss: cache identity does not match the current run");
+        return Ok(PersistentResultCache::empty(expected.clone()));
+    }
+    if cache.entries_hash != PersistentResultCache::hash_entries(&cache.entries) {
+        eprintln!("result cache miss: stored outcomes failed their integrity check");
+        return Ok(PersistentResultCache::empty(expected.clone()));
+    }
+    Ok(cache)
+}
+
+fn save_result_cache(path: &Path, cache: &mut PersistentResultCache) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    cache.refresh_hash();
+    let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+    let json = serde_json::to_string_pretty(&*cache)?;
+    fs::write(&tmp_path, json)?;
+    fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+/// Environment variables that can change how a test command behaves even when
+/// the command string itself is identical. Values are hashed, never logged.
+fn execution_env_hash() -> String {
+    const KEYS: &[&str] = &[
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_BUILD_RUSTFLAGS",
+        "CARGO_BUILD_TARGET",
+        "RUSTC_WRAPPER",
+        "RUST_TEST_THREADS",
+        "RUSTUP_TOOLCHAIN",
+    ];
+    let mut hasher = DeterministicHasher::new();
+    for key in KEYS {
+        if let Some(value) = env::var_os(key) {
+            hasher.write_str(key);
+            hasher.write_str(&value.to_string_lossy());
+        }
+    }
+    hasher.hex()
 }
 
 fn validate_and_isolate_cache(
@@ -946,8 +1199,15 @@ impl Timeouts {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LifecycleKind {
+    Initialization,
+    Upgrade,
+}
+
 struct FunctionState {
     current_function: Option<String>,
+    lifecycle: Option<LifecycleKind>,
     address_params: Vec<String>,
     token_client_vars: Vec<String>,
     contract_client_vars: Vec<String>,
@@ -970,6 +1230,7 @@ struct SemanticVisitor<'a> {
     source: &'a str,
     file: PathBuf,
     current_function: Option<String>,
+    lifecycle: Option<LifecycleKind>,
     address_params: Vec<String>,
     token_client_vars: Vec<String>,
     contract_client_vars: Vec<String>,
@@ -990,6 +1251,7 @@ impl<'a> SemanticVisitor<'a> {
             source,
             file,
             current_function: None,
+            lifecycle: None,
             address_params: Vec::new(),
             token_client_vars: Vec::new(),
             contract_client_vars: Vec::new(),
@@ -1011,6 +1273,7 @@ impl<'a> SemanticVisitor<'a> {
         FunctionState {
             local_bindings: std::mem::replace(&mut self.local_bindings, bindings.0),
             current_function: self.current_function.replace(sig.ident.to_string()),
+            lifecycle: std::mem::replace(&mut self.lifecycle, recognized_lifecycle(sig, body)),
             address_params: std::mem::replace(&mut self.address_params, address_params(sig)),
             token_client_vars: std::mem::replace(
                 &mut self.token_client_vars,
@@ -1025,6 +1288,7 @@ impl<'a> SemanticVisitor<'a> {
 
     fn leave_signature(&mut self, previous: FunctionState) {
         self.current_function = previous.current_function;
+        self.lifecycle = previous.lifecycle;
         self.address_params = previous.address_params;
         self.token_client_vars = previous.token_client_vars;
         self.contract_client_vars = previous.contract_client_vars;
@@ -1816,6 +2080,47 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
+        if node.method == "require_auth" && node.args.is_empty() {
+            if let Some(kind) = self.lifecycle {
+                if let Some(receiver) = receiver_ident(&node.receiver) {
+                    if self.address_params.contains(&receiver) {
+                        let operator = match kind {
+                            LifecycleKind::Initialization => "AUTH-006",
+                            LifecycleKind::Upgrade => "AUTH-007",
+                        };
+                        let action = match kind {
+                            LifecycleKind::Initialization => "initialization",
+                            LifecycleKind::Upgrade => "contract upgrade",
+                        };
+                        self.push_mutant(
+                            operator,
+                            node.span(),
+                            "()".to_owned(),
+                            format!(
+                                "remove {receiver}.require_auth() authorization in recognized Soroban {action} entrypoint"
+                            ),
+                        );
+                        for alternate in self
+                            .address_params
+                            .iter()
+                            .filter(|name| *name != &receiver)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                        {
+                            self.push_mutant(
+                                operator,
+                                node.span(),
+                                format!("{alternate}.require_auth()"),
+                                format!(
+                                    "authenticate {alternate} instead of {receiver} in recognized Soroban {action} entrypoint"
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         if node.method == "require_auth"
             && (!self.env_params.is_empty() || !self.address_params.is_empty())
         {
@@ -2025,6 +2330,9 @@ fn run() -> Result<()> {
             output,
             resume,
             progress_file,
+            cache,
+            no_cache,
+            clear_cache,
         } => {
             let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
             let mut test_command = resolve_runner_command(runner, &test_command)?;
@@ -2054,6 +2362,10 @@ fn run() -> Result<()> {
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
             let package_dirs = resolve_package_filter(&root, &package)?;
+            let exclude_globs = exclude_path
+                .iter()
+                .map(|glob| glob.glob().to_string())
+                .collect::<Vec<_>>();
             let (mutants, suppressed) = discover_mutants_with_suppressions(
                 &root,
                 package_dirs.as_deref(),
@@ -2115,14 +2427,45 @@ fn run() -> Result<()> {
             let parallel_mutant_root = parallel_target_root(&root, target_dir.as_deref());
 
             let source_hash = compute_source_hash(&root, package_dirs.as_deref())?;
+            // The result cache is intentionally more conservative than the
+            // build cache: path dependencies outside a selected package can
+            // still affect outcomes, so hash the full workspace as well.
+            let workspace_source_hash = compute_source_hash(&root, None)?;
             let current_identity = CacheIdentity {
                 workspace_root: root.clone(),
-                source_hash,
+                source_hash: source_hash.clone(),
                 test_command: test_command.clone(),
                 rustc_version: tool_version("rustc"),
                 cargo_version: tool_version("cargo"),
                 packages: package.clone(),
                 operator: operator.clone(),
+            };
+            let result_identity = ResultCacheIdentity {
+                workspace_root: root.display().to_string(),
+                source_hash,
+                workspace_source_hash,
+                lockfile_hash: lockfile_hash(&root),
+                toolchain_file_hash: toolchain_file_hash(&root),
+                test_command: test_command.clone(),
+                rustc_version: current_identity.rustc_version.clone(),
+                cargo_version: current_identity.cargo_version.clone(),
+                packages: package.clone(),
+                operator: operator.clone(),
+                file: file.clone(),
+                function: function.clone(),
+                test_dir: test_dir.as_ref().map(|dir| dir.display().to_string()),
+                exclude_globs,
+                shard: shard.map(|value| format!("{}/{}", value.index, value.total)),
+                changed_file: changed_file
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+                diff_base: diff_base.clone(),
+                changed_functions,
+                jobs: usize::from(jobs),
+                execution_env_hash: execution_env_hash(),
+                compile_timeout_seconds: timeouts.compile,
+                test_timeout_seconds: timeouts.test,
             };
 
             validate_and_isolate_cache(
@@ -2141,6 +2484,32 @@ fn run() -> Result<()> {
                 save_progress_atomic(&progress_path, &prog)?;
                 prog
             };
+
+            let cache_file = result_cache_path(&cache_base);
+            if clear_cache && cache_file.exists() {
+                fs::remove_file(&cache_file).with_context(|| {
+                    format!("cannot clear result cache at {}", cache_file.display())
+                })?;
+                eprintln!(
+                    "cleared persistent result cache at {}",
+                    cache_file.display()
+                );
+            }
+            let cache_enabled = cache && !no_cache;
+            let mut result_cache = if cache_enabled {
+                eprintln!(
+                    "persistent result cache enabled at {}",
+                    cache_file.display()
+                );
+                load_result_cache(&cache_file, &result_identity)?
+            } else {
+                if no_cache {
+                    eprintln!("persistent result cache disabled");
+                }
+                PersistentResultCache::empty(result_identity.clone())
+            };
+            let mut cache_hits = 0usize;
+            let mut cache_misses = 0usize;
 
             let test_cwd = test_dir
                 .as_deref()
@@ -2190,6 +2559,36 @@ fn run() -> Result<()> {
                         )?;
                     }
                     outcome_slots[index] = Some(completed.outcome.clone());
+                } else if cache_enabled {
+                    if let Some(completed) = result_cache.find(mutant) {
+                        cache_hits += 1;
+                        if text_progress {
+                            writeln!(
+                                report,
+                                "{:<10} {:<8} {}:{} {} (cache hit)",
+                                outcome_label(&completed.outcome),
+                                mutant.operator,
+                                mutant.file.display(),
+                                mutant.span.line,
+                                mutant.description
+                            )?;
+                        }
+                        outcome_slots[index] = Some(completed.outcome.clone());
+                    } else {
+                        cache_misses += 1;
+                        if text_progress {
+                            writeln!(
+                                report,
+                                "cache miss  {:<8} {}:{} {}",
+                                mutant.operator,
+                                mutant.file.display(),
+                                mutant.span.line,
+                                mutant.description
+                            )?;
+                        }
+                        pending_indices.push(index);
+                        pending_mutants.push(mutant.clone());
+                    }
                 } else {
                     pending_indices.push(index);
                     pending_mutants.push(mutant.clone());
@@ -2220,6 +2619,10 @@ fn run() -> Result<()> {
                     }
                     progress.record_completed(mutant, outcome.clone());
                     save_progress_atomic(&progress_path, &progress)?;
+                    if cache_enabled {
+                        result_cache.record(mutant, outcome.clone());
+                        save_result_cache(&cache_file, &mut result_cache)?;
+                    }
                     Ok(())
                 },
             )?;
@@ -2238,6 +2641,15 @@ fn run() -> Result<()> {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
+
+            if cache_enabled {
+                result_cache.identity = result_identity;
+                save_result_cache(&cache_file, &mut result_cache)?;
+                eprintln!(
+                    "result cache: {cache_hits} hit(s), {cache_misses} miss(es), {} stored",
+                    result_cache.entries.len()
+                );
+            }
 
             if json {
                 writeln!(
@@ -2296,6 +2708,49 @@ fn run() -> Result<()> {
         Commands::ValidateCorpus { path } => {
             let count = validate_corpus(&path)?;
             println!("Validated {count} corpus entries (schema version 1).");
+        }
+        Commands::BenchmarkMatrix {
+            manifest,
+            allow_external,
+            local_only,
+            checkout_dir,
+            timeout,
+            target,
+            json,
+            output,
+        } => {
+            let summary = run_benchmark_matrix(
+                &manifest,
+                allow_external,
+                local_only,
+                &checkout_dir,
+                timeout,
+                target.as_deref(),
+            )?;
+            let mut report = report_writer(output.as_deref())?;
+            if json {
+                writeln!(report, "{}", serde_json::to_string_pretty(&summary)?)?;
+            } else {
+                print_benchmark_markdown(&mut report, &summary)?;
+            }
+            if summary
+                .targets
+                .iter()
+                .any(|target| target.status == "failed")
+            {
+                bail!("one or more benchmark targets failed baseline/execution; see the summary above");
+            }
+        }
+        Commands::CheckPlatform { json } => {
+            let report = check_platform_policy()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_platform_report(&mut io::stdout(), &report)?;
+            }
+            if report.status == "unsupported" {
+                bail!("{}", report.summary);
+            }
         }
         Commands::Operators => {
             print_operators(&mut io::stdout())?;
@@ -2419,6 +2874,1067 @@ fn validate_corpus(path: &Path) -> Result<usize> {
         }
     }
     Ok(manifest.entries.len())
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in benchmark matrix. This code path is never used by ordinary `test`
+// runs and is deliberately absent from unit CI.
+// ---------------------------------------------------------------------------
+
+const BENCHMARK_MANIFEST_VERSION: u32 = 1;
+
+#[derive(Deserialize)]
+struct BenchmarkManifest {
+    schema_version: u32,
+    #[serde(default)]
+    description: Option<String>,
+    targets: Vec<BenchmarkTarget>,
+}
+
+#[derive(Deserialize, Clone)]
+struct BenchmarkTarget {
+    id: String,
+    kind: BenchmarkTargetKind,
+    #[serde(default)]
+    path: Option<PathBuf>,
+    #[serde(default)]
+    repository: Option<String>,
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    operator: Option<String>,
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    function: Option<String>,
+    test_command: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum BenchmarkTargetKind {
+    Local,
+    External,
+}
+
+#[derive(Serialize)]
+struct BenchmarkSummary {
+    schema_version: u32,
+    generated_by: String,
+    notice: String,
+    description: Option<String>,
+    allow_external: bool,
+    local_only: bool,
+    checkout_dir: String,
+    timeout_seconds: u64,
+    rustc_version: Option<String>,
+    cargo_version: Option<String>,
+    targets: Vec<BenchmarkTargetSummary>,
+}
+
+#[derive(Serialize)]
+struct BenchmarkTargetSummary {
+    id: String,
+    kind: BenchmarkTargetKind,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_revision: Option<String>,
+    test_command: String,
+    baseline: Option<BenchmarkCommandRecord>,
+    counts: Option<BenchmarkCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score_percent: Option<f64>,
+    mutants: Vec<BenchmarkMutantRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BenchmarkCounts {
+    generated: usize,
+    killed: usize,
+    survived: usize,
+    unviable: usize,
+    timeout: usize,
+}
+
+#[derive(Serialize)]
+struct BenchmarkCommandRecord {
+    phase: String,
+    command: String,
+    exit_code: Option<i32>,
+    outcome: String,
+    duration_ms: u128,
+    cwd: String,
+    target_dir: String,
+}
+
+#[derive(Serialize)]
+struct BenchmarkMutantRecord {
+    id: String,
+    operator: String,
+    file: String,
+    line: usize,
+    description: String,
+    original: String,
+    replacement: String,
+    outcome: String,
+}
+
+#[derive(Deserialize)]
+struct BenchmarkTestReport {
+    schema_version: u32,
+    results: Vec<BenchmarkReportedResult>,
+}
+
+#[derive(Deserialize)]
+struct BenchmarkReportedResult {
+    mutant: BenchmarkReportedMutant,
+    outcome: Outcome,
+}
+
+#[derive(Deserialize)]
+struct BenchmarkReportedMutant {
+    id: String,
+    operator: String,
+    file: PathBuf,
+    span: BenchmarkReportedSpan,
+    original: String,
+    replacement: String,
+    description: String,
+}
+
+#[derive(Deserialize)]
+struct BenchmarkReportedSpan {
+    line: usize,
+}
+
+fn benchmark_id_is_safe(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn pinned_revision_is_valid(revision: &str) -> bool {
+    (7..=40).contains(&revision.len()) && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn load_benchmark_manifest(path: &Path) -> Result<BenchmarkManifest> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("cannot read benchmark manifest {}", path.display()))?;
+    let manifest: BenchmarkManifest = serde_json::from_str(&content)
+        .with_context(|| format!("invalid benchmark manifest JSON at {}", path.display()))?;
+    if manifest.schema_version != BENCHMARK_MANIFEST_VERSION {
+        bail!(
+            "unsupported benchmark schema_version {}; expected {}",
+            manifest.schema_version,
+            BENCHMARK_MANIFEST_VERSION
+        );
+    }
+    if manifest.targets.is_empty() {
+        bail!("benchmark manifest targets must not be empty");
+    }
+
+    let repo_root = env::current_dir()?.canonicalize()?;
+    let mut seen = std::collections::HashSet::new();
+    for (index, target) in manifest.targets.iter().enumerate() {
+        let location = format!("targets[{index}]");
+        if !benchmark_id_is_safe(&target.id) {
+            bail!("{location}.id must be 1-64 characters of A-Z, a-z, 0-9, '-' or '_'");
+        }
+        if !seen.insert(target.id.as_str()) {
+            bail!("{location}.id is duplicate: {}", target.id);
+        }
+        if target.test_command.trim().is_empty() {
+            bail!("{location}.test_command must not be empty");
+        }
+        if let Some(operator) = target.operator.as_deref() {
+            if !BUILTIN_OPERATORS.iter().any(|(id, _)| *id == operator) {
+                bail!("{location}.operator is not a built-in operator: {operator}");
+            }
+        }
+        match target.kind {
+            BenchmarkTargetKind::Local => {
+                if target.path.is_none() {
+                    bail!("{location}.path is required for kind=local");
+                }
+                if target.repository.is_some() || target.revision.is_some() {
+                    bail!("{location} must not declare repository/revision for kind=local");
+                }
+                let declared = target.path.as_deref().unwrap();
+                let resolved = declared.canonicalize().with_context(|| {
+                    format!("{location}.path does not exist: {}", declared.display())
+                })?;
+                if !resolved.starts_with(&repo_root) {
+                    bail!(
+                        "{location}.path must be inside the repository root {}",
+                        repo_root.display()
+                    );
+                }
+                if !resolved.is_dir() {
+                    bail!("{location}.path is not a directory: {}", declared.display());
+                }
+            }
+            BenchmarkTargetKind::External => {
+                let Some(repository) = target.repository.as_deref() else {
+                    bail!("{location}.repository is required for kind=external");
+                };
+                if !repository.starts_with("https://") {
+                    bail!("{location}.repository must be a public https:// URL");
+                }
+                let Some(revision) = target.revision.as_deref() else {
+                    bail!("{location}.revision is required for kind=external");
+                };
+                if !pinned_revision_is_valid(revision) {
+                    bail!("{location}.revision must be 7-40 hexadecimal characters");
+                }
+                if target.path.is_some() {
+                    bail!("{location} must not declare path for kind=external");
+                }
+            }
+        }
+    }
+    Ok(manifest)
+}
+
+fn git_output(args: Vec<std::ffi::OsString>, label: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(&args)
+        .output()
+        .with_context(|| format!("cannot run git {label}; is git installed?"))?;
+    if !output.status.success() {
+        bail!(
+            "git {label} failed with exit code {}: {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn revision_matches(revision: &str, resolved: &str) -> bool {
+    let (requested, resolved) = (revision.to_ascii_lowercase(), resolved.to_ascii_lowercase());
+    if requested.len() == 40 {
+        requested == resolved
+    } else {
+        resolved.starts_with(&requested)
+    }
+}
+
+fn prepare_external_checkout(
+    target: &BenchmarkTarget,
+    checkout_dir: &Path,
+) -> Result<(PathBuf, String)> {
+    let repository = target.repository.as_deref().unwrap_or_default();
+    let revision = target.revision.as_deref().unwrap_or_default();
+    let checkout = checkout_dir.join(&target.id);
+
+    if checkout.exists() {
+        reject_cleanup_symlink(&checkout)?;
+        if !checkout.join(".git").exists() {
+            bail!(
+                "benchmark checkout {} exists but is not a git checkout; move it aside or use another --checkout-dir",
+                checkout.display()
+            );
+        }
+        let label = format!("rev-parse HEAD in {}", target.id);
+        let resolved = git_output(
+            vec![
+                std::ffi::OsString::from("-C"),
+                checkout.as_os_str().to_os_string(),
+                std::ffi::OsString::from("rev-parse"),
+                std::ffi::OsString::from("HEAD"),
+            ],
+            &label,
+        )?;
+        if !revision_matches(revision, &resolved) {
+            bail!(
+                "benchmark checkout {} is at {} but manifest pins {}; move it aside or use another --checkout-dir",
+                checkout.display(),
+                resolved,
+                revision
+            );
+        }
+        let remote = git_output(
+            vec![
+                std::ffi::OsString::from("-C"),
+                checkout.as_os_str().to_os_string(),
+                std::ffi::OsString::from("remote"),
+                std::ffi::OsString::from("get-url"),
+                std::ffi::OsString::from("origin"),
+            ],
+            &format!("remote get-url in {}", target.id),
+        )?;
+        if remote.trim_end_matches(".git").trim_end_matches('/')
+            != repository.trim_end_matches(".git").trim_end_matches('/')
+        {
+            bail!(
+                "benchmark checkout {} points at {} but manifest declares {}; move it aside or use another --checkout-dir",
+                checkout.display(),
+                remote,
+                repository
+            );
+        }
+        return Ok((checkout, resolved));
+    }
+
+    fs::create_dir_all(checkout_dir)?;
+    git_output(
+        vec![
+            std::ffi::OsString::from("clone"),
+            std::ffi::OsString::from("--quiet"),
+            std::ffi::OsString::from(repository),
+            checkout.as_os_str().to_os_string(),
+        ],
+        &format!("clone {repository}"),
+    )?;
+    git_output(
+        vec![
+            std::ffi::OsString::from("-C"),
+            checkout.as_os_str().to_os_string(),
+            std::ffi::OsString::from("checkout"),
+            std::ffi::OsString::from("--quiet"),
+            std::ffi::OsString::from("--detach"),
+            std::ffi::OsString::from(revision),
+        ],
+        &format!("checkout {revision} in {}", target.id),
+    )?;
+    let resolved = git_output(
+        vec![
+            std::ffi::OsString::from("-C"),
+            checkout.as_os_str().to_os_string(),
+            std::ffi::OsString::from("rev-parse"),
+            std::ffi::OsString::from("HEAD"),
+        ],
+        &format!("rev-parse HEAD in {}", target.id),
+    )?;
+    if !revision_matches(revision, &resolved) {
+        bail!(
+            "benchmark checkout {} resolved to {} which does not match pinned revision {}",
+            checkout.display(),
+            resolved,
+            revision
+        );
+    }
+    Ok((checkout, resolved))
+}
+
+fn format_command_line(program: &std::ffi::OsStr, args: &[std::ffi::OsString]) -> String {
+    fn quote(value: &std::ffi::OsStr) -> String {
+        let text = value.to_string_lossy();
+        if !text.is_empty()
+            && text
+                .chars()
+                .all(|ch| !ch.is_whitespace() && ch != '\'' && ch != '"')
+        {
+            text.into_owned()
+        } else {
+            format!("'{}'", text.replace('\'', "'\\''"))
+        }
+    }
+    std::iter::once(program.to_os_string())
+        .chain(args.iter().cloned())
+        .map(|arg| quote(arg.as_os_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Runs one benchmark command with a wall-clock timeout, writing both streams
+/// to files so a verbose test run cannot fill a pipe and deadlock the runner.
+#[allow(clippy::too_many_arguments)]
+fn run_timed_command(
+    mut command: Command,
+    label: String,
+    phase: &str,
+    timeout_seconds: u64,
+    cwd: &Path,
+    target_dir: &Path,
+    log_dir: &Path,
+) -> Result<(BenchmarkCommandRecord, String)> {
+    fs::create_dir_all(target_dir)?;
+    fs::create_dir_all(log_dir)?;
+    let stdout_path = log_dir.join(format!("{phase}.stdout.log"));
+    let stderr_path = log_dir.join(format!("{phase}.stderr.log"));
+    let mut child = command
+        .current_dir(cwd)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .stdout(Stdio::from(fs::File::create(&stdout_path)?))
+        .stderr(Stdio::from(fs::File::create(&stderr_path)?))
+        .spawn()
+        .with_context(|| format!("failed to execute benchmark command: {label}"))?;
+
+    let started = std::time::Instant::now();
+    let (outcome, exit_code) = match child.wait_timeout(Duration::from_secs(timeout_seconds))? {
+        Some(status) if status.success() => ("passed".to_owned(), status.code()),
+        Some(status) => ("failed".to_owned(), status.code()),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            ("timeout".to_owned(), None)
+        }
+    };
+    let duration_ms = started.elapsed().as_millis();
+
+    let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
+    if !stderr.trim().is_empty() {
+        eprintln!("{}", stderr.trim_end());
+    }
+
+    Ok((
+        BenchmarkCommandRecord {
+            phase: phase.to_owned(),
+            command: label,
+            exit_code,
+            outcome,
+            duration_ms,
+            cwd: cwd.display().to_string(),
+            target_dir: target_dir.display().to_string(),
+        },
+        stdout,
+    ))
+}
+
+fn benchmark_empty_summary(id: &str, reason: &str) -> String {
+    format!("benchmark target {id}: {reason}")
+}
+
+fn run_benchmark_matrix(
+    manifest_path: &Path,
+    allow_external: bool,
+    local_only: bool,
+    checkout_dir: &Path,
+    timeout: u64,
+    only_target: Option<&str>,
+) -> Result<BenchmarkSummary> {
+    if local_only && allow_external {
+        bail!("--local-only and --allow-external are mutually exclusive");
+    }
+    let manifest = load_benchmark_manifest(manifest_path)?;
+    let selected = manifest
+        .targets
+        .iter()
+        .filter(|target| only_target.is_none_or(|id| id == target.id))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        match only_target {
+            Some(id) => bail!(
+                "no benchmark target with id {id} in {}",
+                manifest_path.display()
+            ),
+            None => bail!("benchmark manifest contains no targets"),
+        }
+    }
+
+    let external = selected
+        .iter()
+        .filter(|target| target.kind == BenchmarkTargetKind::External && !local_only)
+        .map(|target| target.id.as_str())
+        .collect::<Vec<_>>();
+    if !external.is_empty() && !allow_external {
+        bail!(
+            "external benchmark targets require explicit --allow-external: {}",
+            external.join(", ")
+        );
+    }
+
+    let checkout_dir = if checkout_dir.is_absolute() {
+        checkout_dir.to_path_buf()
+    } else {
+        env::current_dir()?.join(checkout_dir)
+    };
+    fs::create_dir_all(&checkout_dir)?;
+
+    let rustc_version = tool_version("rustc");
+    let cargo_version = tool_version("cargo");
+    let mut summaries = Vec::with_capacity(selected.len());
+    let mut failures = Vec::new();
+
+    for target in selected {
+        let mut summary = BenchmarkTargetSummary {
+            id: target.id.clone(),
+            kind: target.kind,
+            status: "completed".to_owned(),
+            reason: None,
+            path: None,
+            repository: target.repository.clone(),
+            requested_revision: target.revision.clone(),
+            resolved_revision: None,
+            test_command: target.test_command.clone(),
+            baseline: None,
+            counts: None,
+            score_percent: None,
+            mutants: Vec::new(),
+            note: target.note.clone(),
+        };
+
+        if target.kind == BenchmarkTargetKind::External && local_only {
+            summary.status = "skipped".to_owned();
+            summary.reason = Some(benchmark_empty_summary(
+                &target.id,
+                "skipped by --local-only",
+            ));
+            summaries.push(summary);
+            continue;
+        }
+
+        let (root, resolved_revision) = match target.kind {
+            BenchmarkTargetKind::Local => {
+                let declared = target.path.as_deref().unwrap_or(Path::new(""));
+                let resolved = declared.canonicalize().with_context(|| {
+                    format!("cannot resolve local benchmark path {}", declared.display())
+                })?;
+                summary.path = Some(resolved.display().to_string());
+                (resolved, None)
+            }
+            BenchmarkTargetKind::External => {
+                let (checkout, resolved) = prepare_external_checkout(target, &checkout_dir)?;
+                summary.path = Some(checkout.display().to_string());
+                (checkout, Some(resolved))
+            }
+        };
+        summary.resolved_revision = resolved_revision;
+
+        let workspace_dir = checkout_dir.join(&target.id);
+        let target_dir = workspace_dir.join("target");
+        let baseline_command = format!("bash -lc '{}'", target.test_command.replace('\'', "'\\''"));
+        let (baseline, _) = run_timed_command(
+            {
+                let mut command = Command::new("bash");
+                command.arg("-lc").arg(&target.test_command);
+                command
+            },
+            baseline_command,
+            "baseline",
+            timeout,
+            &root,
+            &target_dir,
+            &workspace_dir,
+        )?;
+        summary.baseline = Some(baseline);
+
+        // A red baseline invalidates every mutant outcome, so no scoring is
+        // attempted and no mutant command is launched for this target.
+        if summary
+            .baseline
+            .as_ref()
+            .is_some_and(|record| record.outcome != "passed")
+        {
+            let reason = benchmark_empty_summary(
+                &target.id,
+                "baseline did not pass; mutation results were not scored",
+            );
+            summary.status = "failed".to_owned();
+            summary.reason = Some(reason.clone());
+            failures.push(reason);
+            summaries.push(summary);
+            continue;
+        }
+
+        let (mutants, _) = discover_mutants_with_suppressions(
+            &root,
+            None,
+            target.operator.as_deref(),
+            target.file.as_deref(),
+            target.function.as_deref(),
+            &exclusion_set(Vec::new())?,
+        )?;
+
+        let executable = env::current_exe()?;
+        let mut args = vec![
+            std::ffi::OsString::from("test"),
+            root.as_os_str().to_os_string(),
+            std::ffi::OsString::from("--target-dir"),
+            target_dir.as_os_str().to_os_string(),
+            std::ffi::OsString::from("--timeout"),
+            std::ffi::OsString::from(timeout.to_string()),
+            std::ffi::OsString::from("--test-command"),
+            std::ffi::OsString::from(&target.test_command),
+            std::ffi::OsString::from("--json"),
+            // Benchmark evidence is never served from the interactive result cache.
+            std::ffi::OsString::from("--no-cache"),
+        ];
+        if let Some(operator) = target.operator.as_deref() {
+            args.push(std::ffi::OsString::from("--operator"));
+            args.push(std::ffi::OsString::from(operator));
+        }
+        if let Some(file) = target.file.as_deref() {
+            args.push(std::ffi::OsString::from("--file"));
+            args.push(std::ffi::OsString::from(file));
+        }
+        if let Some(function) = target.function.as_deref() {
+            args.push(std::ffi::OsString::from("--function"));
+            args.push(std::ffi::OsString::from(function));
+        }
+        let label = format_command_line(executable.as_os_str(), &args);
+        let mutant_timeout = timeout
+            .saturating_mul(mutants.len().max(1) as u64)
+            .saturating_add(60);
+        let mut command = Command::new(&executable);
+        command.args(&args);
+        let (record, stdout) = run_timed_command(
+            command,
+            label.clone(),
+            "mutants",
+            mutant_timeout,
+            &root,
+            &target_dir,
+            &workspace_dir,
+        )?;
+
+        if record.outcome != "passed" {
+            let reason = benchmark_empty_summary(
+                &target.id,
+                &format!(
+                    "mutant command exited with code {} ({})",
+                    record.exit_code.unwrap_or(-1),
+                    record.outcome
+                ),
+            );
+            summary.status = "failed".to_owned();
+            summary.reason = Some(reason.clone());
+            failures.push(reason);
+            summaries.push(summary);
+            continue;
+        }
+
+        let report: BenchmarkTestReport = serde_json::from_str(&stdout).with_context(|| {
+            format!(
+                "benchmark target {} did not emit a valid mutation JSON report",
+                target.id
+            )
+        })?;
+        if report.schema_version != JSON_SCHEMA_VERSION {
+            bail!(
+                "benchmark target {} emitted unsupported JSON schema_version {}",
+                target.id,
+                report.schema_version
+            );
+        }
+
+        let mut counts = BenchmarkCounts {
+            generated: report.results.len(),
+            killed: 0,
+            survived: 0,
+            unviable: 0,
+            timeout: 0,
+        };
+        for result in &report.results {
+            match result.outcome {
+                Outcome::Killed => counts.killed += 1,
+                Outcome::Survived => counts.survived += 1,
+                Outcome::Unviable => counts.unviable += 1,
+                Outcome::Timeout => counts.timeout += 1,
+            }
+            summary.mutants.push(BenchmarkMutantRecord {
+                id: result.mutant.id.clone(),
+                operator: result.mutant.operator.clone(),
+                file: result.mutant.file.display().to_string(),
+                line: result.mutant.span.line,
+                description: result.mutant.description.clone(),
+                original: result.mutant.original.clone(),
+                replacement: result.mutant.replacement.clone(),
+                outcome: outcome_label(&result.outcome).to_owned(),
+            });
+        }
+        let viable = counts.killed + counts.survived;
+        summary.score_percent = Some(if viable == 0 {
+            0.0
+        } else {
+            counts.killed as f64 * 100.0 / viable as f64
+        });
+        summary.counts = Some(counts);
+        summaries.push(summary);
+    }
+
+    let summary = BenchmarkSummary {
+        schema_version: BENCHMARK_MANIFEST_VERSION,
+        generated_by: "cargo soro-mutants benchmark-matrix".to_owned(),
+        notice: "Mutation-testing observation only; not a security finding about any third-party project.".to_owned(),
+        description: manifest.description.clone(),
+        allow_external,
+        local_only,
+        checkout_dir: checkout_dir.display().to_string(),
+        timeout_seconds: timeout,
+        rustc_version,
+        cargo_version,
+        targets: summaries,
+    };
+    if !failures.is_empty() {
+        eprintln!(
+            "benchmark baseline/execution failures: {}",
+            failures.join("; ")
+        );
+    }
+    Ok(summary)
+}
+
+fn print_benchmark_markdown(report: &mut dyn Write, summary: &BenchmarkSummary) -> Result<()> {
+    writeln!(report, "# Benchmark matrix summary")?;
+    writeln!(report)?;
+    writeln!(report, "> {}", summary.notice)?;
+    writeln!(report)?;
+    if let Some(description) = summary.description.as_deref() {
+        writeln!(report, "{description}")?;
+        writeln!(report)?;
+    }
+    writeln!(report, "- Schema version: {}", summary.schema_version)?;
+    writeln!(
+        report,
+        "- External targets allowed: {}",
+        summary.allow_external
+    )?;
+    writeln!(report, "- Local-only mode: {}", summary.local_only)?;
+    writeln!(report, "- Checkout directory: `{}`", summary.checkout_dir)?;
+    writeln!(
+        report,
+        "- Per-command timeout: {}s",
+        summary.timeout_seconds
+    )?;
+    writeln!(
+        report,
+        "- Toolchain: {} / {}",
+        summary.rustc_version.as_deref().unwrap_or("rustc unknown"),
+        summary.cargo_version.as_deref().unwrap_or("cargo unknown")
+    )?;
+    writeln!(report)?;
+
+    for target in &summary.targets {
+        writeln!(report, "## `{}` ({:?})", target.id, target.kind)?;
+        writeln!(report)?;
+        writeln!(report, "- Status: {}", target.status)?;
+        if let Some(reason) = target.reason.as_deref() {
+            writeln!(report, "- Reason: {reason}")?;
+        }
+        if let Some(path) = target.path.as_deref() {
+            writeln!(report, "- Checked-out or local path: `{path}`")?;
+        }
+        if let Some(repository) = target.repository.as_deref() {
+            writeln!(report, "- Repository: `{repository}`")?;
+        }
+        if let Some(revision) = target.requested_revision.as_deref() {
+            writeln!(report, "- Pinned revision: `{revision}`")?;
+        }
+        if let Some(revision) = target.resolved_revision.as_deref() {
+            writeln!(report, "- Resolved revision: `{revision}`")?;
+        }
+        writeln!(report, "- Test command: `{}`", target.test_command)?;
+        if let Some(note) = target.note.as_deref() {
+            writeln!(report, "- Note: {note}")?;
+        }
+        writeln!(report)?;
+
+        if let Some(baseline) = target.baseline.as_ref() {
+            writeln!(report, "### Baseline")?;
+            writeln!(report)?;
+            writeln!(
+                report,
+                "| Phase | Command | Exit code | Outcome | Duration |"
+            )?;
+            writeln!(report, "| --- | --- | --- | --- | --- |")?;
+            writeln!(
+                report,
+                "| {} | `{}` | {} | {} | {} ms |",
+                baseline.phase,
+                baseline.command.replace('|', "\\|"),
+                baseline
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "n/a".to_owned()),
+                baseline.outcome,
+                baseline.duration_ms
+            )?;
+            writeln!(report)?;
+        }
+
+        if let Some(counts) = target.counts.as_ref() {
+            writeln!(
+                report,
+                "| Generated | Killed | Survived | Unviable | Timeout | Score |"
+            )?;
+            writeln!(report, "| --- | --- | --- | --- | --- | --- |")?;
+            writeln!(
+                report,
+                "| {} | {} | {} | {} | {} | {:.1}% |",
+                counts.generated,
+                counts.killed,
+                counts.survived,
+                counts.unviable,
+                counts.timeout,
+                target.score_percent.unwrap_or(0.0)
+            )?;
+            writeln!(report)?;
+        }
+
+        if !target.mutants.is_empty() {
+            writeln!(report, "| Mutant | Operator | Location | Outcome |")?;
+            writeln!(report, "| --- | --- | --- | --- |")?;
+            for mutant in &target.mutants {
+                writeln!(
+                    report,
+                    "| {} | {} | `{}:{}` | {} |",
+                    mutant.id, mutant.operator, mutant.file, mutant.line, mutant.outcome
+                )?;
+            }
+            writeln!(report)?;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// v1.0 supported-platform policy. The check is pure observation: it never
+// changes the environment and returns structured findings instead of panics.
+// ---------------------------------------------------------------------------
+
+const PLATFORM_POLICY_VERSION: &str = "1.0";
+const MSRV: (u32, u32, u32) = (1, 85, 0);
+
+#[derive(Serialize)]
+struct PlatformCheck {
+    id: String,
+    requirement: String,
+    observed: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remediation: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PlatformReport {
+    schema_version: u32,
+    policy_version: String,
+    status: String,
+    summary: String,
+    msrv: String,
+    host: String,
+    rustc_version: Option<String>,
+    cargo_version: Option<String>,
+    checks: Vec<PlatformCheck>,
+    limitations: Vec<String>,
+}
+
+fn parse_semver(raw: Option<&str>) -> Option<(u32, u32, u32)> {
+    let raw = raw?;
+    let token = raw
+        .split_whitespace()
+        .find(|token| token.as_bytes().first().is_some_and(u8::is_ascii_digit))?;
+    let mut parts = token.split('.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next()?.parse::<u32>().ok()?;
+    let patch = parts
+        .next()
+        .and_then(|value| {
+            value
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u32>()
+                .ok()
+        })
+        .unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+fn probe_tool(binary: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(binary).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn check_platform_policy() -> Result<PlatformReport> {
+    let os = env::consts::OS;
+    let arch = env::consts::ARCH;
+    let rustc_raw = probe_tool("rustc", &["--version"]);
+    let cargo_raw = probe_tool("cargo", &["--version"]);
+    let rustc_verbose = probe_tool("rustc", &["-Vv"]);
+    let rustc_version = parse_semver(rustc_raw.as_deref());
+    let cargo_version = parse_semver(cargo_raw.as_deref());
+    let host = rustc_verbose
+        .as_deref()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("host: ").map(str::trim))
+        })
+        .unwrap_or("unknown")
+        .to_owned();
+
+    let mut checks = Vec::new();
+    let mut push = |id: &str,
+                    requirement: &str,
+                    observed: String,
+                    status: &str,
+                    remediation: Option<String>| {
+        checks.push(PlatformCheck {
+            id: id.to_owned(),
+            requirement: requirement.to_owned(),
+            observed,
+            status: status.to_owned(),
+            remediation,
+        });
+    };
+
+    let (os_status, os_remediation) = match os {
+        "linux" | "macos" => ("pass", None),
+        "windows" => (
+            "warning",
+            Some(
+                "Use WSL2 with a Linux distribution for reproducible test and benchmark runs."
+                    .to_owned(),
+            ),
+        ),
+        _ => (
+            "fail",
+            Some("Use a supported Linux or macOS host, or WSL2 on Windows.".to_owned()),
+        ),
+    };
+    push(
+        "operating-system",
+        "Linux or macOS; Windows is best-effort via WSL2",
+        os.to_owned(),
+        os_status,
+        os_remediation,
+    );
+
+    let arch_ok = matches!(arch, "x86_64" | "aarch64");
+    push(
+        "architecture",
+        "x86_64 or aarch64",
+        arch.to_owned(),
+        if arch_ok { "pass" } else { "fail" },
+        (!arch_ok).then(|| "Use a 64-bit x86_64 or aarch64 host.".to_owned()),
+    );
+
+    let rustc_ok = rustc_version.is_some_and(|version| version >= MSRV);
+    push(
+        "rustc-msrv",
+        "rustc >= 1.85.0 (MSRV)",
+        rustc_raw.clone().unwrap_or_else(|| "not found".to_owned()),
+        if rustc_ok { "pass" } else { "fail" },
+        (!rustc_ok).then(|| "Install Rust 1.85.0 or newer with rustup and retry.".to_owned()),
+    );
+
+    let cargo_ok = cargo_version.is_some_and(|version| version >= MSRV);
+    push(
+        "cargo-version",
+        "cargo >= 1.85.0, matching the selected Rust toolchain",
+        cargo_raw.clone().unwrap_or_else(|| "not found".to_owned()),
+        if cargo_ok { "pass" } else { "fail" },
+        (!cargo_ok).then(|| "Install Cargo 1.85.0 or newer with rustup and retry.".to_owned()),
+    );
+
+    let toolchain_match = match (rustc_version, cargo_version) {
+        (Some(rustc), Some(cargo)) => (rustc.0, rustc.1) == (cargo.0, cargo.1),
+        _ => false,
+    };
+    push(
+        "toolchain-pair",
+        "cargo and rustc come from the same installed toolchain series",
+        format!("rustc={:?}, cargo={:?}", rustc_version, cargo_version),
+        if toolchain_match { "pass" } else { "warning" },
+        (!toolchain_match).then(|| {
+            "Use `rustup default stable` (or a pinned 1.85 toolchain) so Cargo and rustc match."
+                .to_owned()
+        }),
+    );
+
+    let bash_ok = probe_tool("bash", &["--version"]).is_some();
+    push(
+        "shell",
+        "bash is on PATH (the runner executes test commands with bash -lc)",
+        if bash_ok { "available" } else { "not found" }.to_owned(),
+        if bash_ok { "pass" } else { "fail" },
+        (!bash_ok)
+            .then(|| "Install bash or use a supported Linux/macOS/WSL2 environment.".to_owned()),
+    );
+
+    let git_ok = probe_tool("git", &["--version"]).is_some();
+    push(
+        "git",
+        "git is on PATH (required only for pinned external benchmark targets)",
+        if git_ok { "available" } else { "not found" }.to_owned(),
+        if git_ok { "pass" } else { "warning" },
+        (!git_ok).then(|| "Install git, or run the benchmark matrix with --local-only.".to_owned()),
+    );
+
+    let status = if checks.iter().any(|check| check.status == "fail") {
+        "unsupported"
+    } else if checks.iter().any(|check| check.status == "warning") {
+        "best-effort"
+    } else {
+        "supported"
+    };
+    let summary = match status {
+        "supported" => "This environment meets the v1.0 supported-platform policy.".to_owned(),
+        "best-effort" => {
+            "This environment is supported on a best-effort basis; see warnings.".to_owned()
+        }
+        _ => "This environment does not meet the v1.0 supported-platform policy.".to_owned(),
+    };
+
+    Ok(PlatformReport {
+        schema_version: 1,
+        policy_version: PLATFORM_POLICY_VERSION.to_owned(),
+        status: status.to_owned(),
+        summary,
+        msrv: format!("{}.{}.{}", MSRV.0, MSRV.1, MSRV.2),
+        host,
+        rustc_version: rustc_raw,
+        cargo_version: cargo_raw,
+        checks,
+        limitations: vec![
+            "Windows without WSL2 is best-effort because command execution uses bash -lc.".to_owned(),
+            "External benchmark targets additionally require network access and git.".to_owned(),
+            "Soroban host tests depend on the SDK's testutils feature and a compatible installed toolchain.".to_owned(),
+        ],
+    })
+}
+
+fn print_platform_report(report: &mut dyn Write, policy: &PlatformReport) -> Result<()> {
+    writeln!(
+        report,
+        "Soro Mutants v{} platform check",
+        policy.policy_version
+    )?;
+    writeln!(report, "Status: {}", policy.status)?;
+    writeln!(report, "{}", policy.summary)?;
+    writeln!(report, "MSRV: {}", policy.msrv)?;
+    writeln!(report, "Host: {}", policy.host)?;
+    writeln!(report)?;
+    for check in &policy.checks {
+        writeln!(
+            report,
+            "{:<18} {:<10} {} ({})",
+            check.id, check.status, check.requirement, check.observed
+        )?;
+        if let Some(remediation) = check.remediation.as_deref() {
+            writeln!(report, "  fix: {remediation}")?;
+        }
+    }
+    writeln!(report)?;
+    writeln!(report, "Known limitations:")?;
+    for limitation in &policy.limitations {
+        writeln!(report, "  - {limitation}")?;
+    }
+    writeln!(report)?;
+    writeln!(report, "Policy: docs/supported-platforms.md")?;
+    Ok(())
 }
 
 fn append_github_summary(results: &[MutantResult]) -> Result<()> {
@@ -3029,6 +4545,49 @@ fn auth_helper(function: &ItemFn) -> Option<AuthHelper> {
     })
 }
 
+fn recognized_lifecycle(sig: &Signature, body: &syn::Block) -> Option<LifecycleKind> {
+    let envs = env_params(sig);
+    if envs.is_empty() || address_params(sig).is_empty() {
+        return None;
+    }
+    match sig.ident.to_string().as_str() {
+        "initialize" | "init" | "__constructor" | "constructor" => {
+            Some(LifecycleKind::Initialization)
+        }
+        "upgrade" if block_contains_upgrade_wasm(body, &envs) => Some(LifecycleKind::Upgrade),
+        _ => None,
+    }
+}
+
+fn block_contains_upgrade_wasm(body: &syn::Block, env_names: &[String]) -> bool {
+    struct UpgradeScan<'a> {
+        env_names: &'a [String],
+        found: bool,
+    }
+    impl<'ast> Visit<'ast> for UpgradeScan<'_> {
+        fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+            if call.method == "update_current_contract_wasm" && call.args.len() == 1 {
+                if let Expr::MethodCall(deployer) = call.receiver.as_ref() {
+                    if deployer.method == "deployer"
+                        && deployer.args.is_empty()
+                        && receiver_ident(&deployer.receiver)
+                            .is_some_and(|name| self.env_names.contains(&name))
+                    {
+                        self.found = true;
+                    }
+                }
+            }
+            visit::visit_expr_method_call(self, call);
+        }
+    }
+    let mut scan = UpgradeScan {
+        env_names,
+        found: false,
+    };
+    scan.visit_block(body);
+    scan.found
+}
+
 fn address_params(sig: &Signature) -> Vec<String> {
     sig.inputs
         .iter()
@@ -3472,16 +5031,25 @@ fn managed_cleanup_paths(root: &Path, target_dir: Option<&Path>) -> Result<Vec<P
     let base = target_dir_base(root, target_dir);
     let progress = base.join("progress.json");
     let identity = base.join("cache-identity.json");
+    let result_cache = result_cache_path(&base);
     let target_root = baseline.parent().unwrap_or(root);
     reject_cleanup_symlink(&scratch)?;
     reject_cleanup_symlink(target_root)?;
     reject_cleanup_symlink(&baseline)?;
     reject_cleanup_symlink(&mutants)?;
     reject_cleanup_symlink(&parallel)?;
-    let mut paths: Vec<PathBuf> = [scratch, baseline, mutants, parallel, progress, identity]
-        .into_iter()
-        .filter(|path| path.exists())
-        .collect();
+    let mut paths: Vec<PathBuf> = [
+        scratch,
+        baseline,
+        mutants,
+        parallel,
+        progress,
+        identity,
+        result_cache,
+    ]
+    .into_iter()
+    .filter(|path| path.exists())
+    .collect();
 
     // The default cache root is also removed when no unrelated content remains.
     // Determine this without mutating anything, so a dry run is accurate.
@@ -3500,6 +5068,7 @@ fn managed_cleanup_paths(root: &Path, target_dir: Option<&Path>) -> Result<Vec<P
                             | "mutants-parallel"
                             | "progress.json"
                             | "cache-identity.json"
+                            | "result-cache.json"
                     )
                 ) && paths.iter().any(|path| path == &entry.path())
             }) {

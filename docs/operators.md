@@ -184,6 +184,81 @@ A survivor means the tests did not distinguish the stored authority from another
 
 Tests that assert the exact authorizing address — for example by comparing `env.auths()` with the expected `AuthorizedInvocation`, or by mocking authorization only for the stored admin — should kill it.
 
+## AUTH-006 — initialization authorization
+
+`AUTH-006` is a narrowly scoped lifecycle variant of `AUTH-001`/`AUTH-002`. It
+fires only inside a function that has **explicit Soroban lifecycle context**:
+
+1. an explicit `Env` / `&Env` parameter;
+2. at least one explicit `Address` / `&Address` parameter;
+3. a supported initialization name: `initialize`, `init`, `__constructor`, or
+   `constructor`;
+4. a direct `authority.require_auth()` call whose receiver is one of those
+   explicit `Address` parameters.
+
+```rust
+pub fn initialize(env: Env, admin: Address, proposer: Address) -> Address {
+    admin.require_auth();
+    // ...
+}
+```
+
+Two mutants are produced:
+
+- **remove lifecycle authorization** — the call becomes `()`;
+- **wrong authority** — for each other explicit `Address` parameter (in
+  signature order), the receiver becomes that parameter, e.g.
+  `proposer.require_auth()`.
+
+This operator deliberately does not infer roles from names, follow helpers,
+look into nested functions, or recognize initializers without an explicit
+`Env` and `Address` parameter. The generic `AUTH-001`/`AUTH-002` operators still
+apply at the same sink; use `--operator AUTH-006` when only lifecycle mutants
+are wanted.
+
+Tests that assert `env.auths()` for the expected `AuthorizedInvocation` should
+kill both mutants. A functional-only test using `mock_all_auths()` may let them
+survive. A survivor is not a vulnerability claim; it says the configured tests
+did not distinguish the lifecycle authorization semantics.
+
+Fixtures: `fixtures/weak-init-auth` (expected `SURVIVED`) and
+`fixtures/strong-init-auth` (expected `KILLED`).
+
+## AUTH-007 — contract-upgrade authorization
+
+`AUTH-007` has the same explicit-context requirements as `AUTH-006`, but it
+recognizes only a function named `upgrade` whose body contains the canonical
+Soroban WASM-update pattern rooted at that `Env` parameter:
+
+```rust
+env.deployer().update_current_contract_wasm(wasm_hash);
+```
+
+The update call must have exactly one argument, be written as a direct method
+call on `env.deployer()`, and use the explicit `Env` parameter. Aliases,
+helpers, struct fields, other method names, and upgrade-like functions without
+that concrete call are ignored.
+
+```rust
+pub fn upgrade(env: Env, admin: Address, proposer: Address, wasm_hash: BytesN<32>) {
+    admin.require_auth();
+    env.deployer().update_current_contract_wasm(wasm_hash);
+}
+```
+
+The same two mutations as `AUTH-006` are generated: removal and wrong-authority
+substitution from other explicit `Address` parameters. Upgrade compatibility
+analysis and migration execution are **out of scope**; this operator only
+changes the authorization call, never the wasm hash or executable.
+
+The strong fixture keeps the canonical update call behind `#[cfg(not(test))]`
+so host tests exercise the authorization path without replacing a real
+contract executable. Recognition is performed on source, before `cfg`
+stripping.
+
+Fixtures: `fixtures/weak-upgrade-auth` (expected `SURVIVED`) and
+`fixtures/strong-upgrade-auth` (expected `KILLED`).
+
 ## STORAGE-001 — substitute a direct Soroban storage class
 
 For a direct accessor rooted at an explicit `Env` parameter, `env.storage().persistent()`, `env.storage().temporary()`, or `env.storage().instance()` is replaced with each other storage class in deterministic `instance`, `persistent`, `temporary` order. The operation performed on the accessor (`set`, `get`, `remove`, `extend_ttl`, and so on) is left unchanged.

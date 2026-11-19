@@ -31,6 +31,8 @@ This is the objective release gate for v1.0. A release candidate is ready only w
 - [ ] Scratch worktrees are cleaned after success and failure.
 - [ ] `clean --dry-run` is non-destructive; `clean` removes only managed state.
 - [ ] Timeout and shard determinism tests pass.
+- [ ] Opt-in result-cache hits occur only with a fully matching identity; `--no-cache` and `--clear-cache` behave as documented ([tests](result-cache.md#regression-coverage)).
+- [ ] Benchmark matrix refuses external targets without `--allow-external` and never scores a failed baseline ([docs](benchmark-matrix.md#safety-model)).
 
 ## Security — Required
 
@@ -45,7 +47,7 @@ This is the objective release gate for v1.0. A release candidate is ready only w
 
 - [ ] Cargo.toml declares the minimum Rust version and CI verifies it.
 - [ ] Current stable Rust CI passes.
-- [ ] Supported operating systems are documented.
+- [ ] Supported operating systems are documented in the versioned [v1.0 platform policy](supported-platforms.md) and `check-platform --json` agrees on a primary host.
 - [ ] Any v0.1.x incompatibility has a migration note.
 - [ ] v1 JSON compatibility rules are documented.
 
@@ -63,7 +65,7 @@ Run `cargo package --locked`, then verify:
 
 - [ ] README install and quick-start commands work.
 - [ ] Every public CLI subcommand is documented.
-- [ ] Operator, reporting, changed-selection, nextest, troubleshooting, and architecture docs match release behavior.
+- [ ] Operator, reporting, changed-selection, nextest, troubleshooting, architecture, result-cache, benchmark-matrix, and supported-platforms docs match release behavior.
 - [ ] Known limitations distinguish non-goals from missing release requirements.
 
 ## Release notes — Required

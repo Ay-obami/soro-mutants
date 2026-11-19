@@ -16,6 +16,9 @@ underlying test command from that project subdirectory.
 | A mutant is `TIMEOUT` | Compare cold-build and test timings against the two configured budgets. | Increase the budget for the affected phase and rerun with the same filters. Custom commands without a separate compile gate use the test budget. |
 | Report is missing, empty, or unwritable | Check the exit status, output parent, write permissions, and free disk space. For a job summary, also check `GITHUB_STEP_SUMMARY`. | Create the output parent and retry. A failed baseline can leave an empty report. Exit 4 means the threshold failed after the report was written. |
 | Score threshold failed (exit 4) | Read the report's killed and survived counts and confirm which shard or filters were used. | Inspect survivors and check for a zero viable count. See the [score calculation](report-consumer.md#reproduce-the-cli-score). |
+| A run unexpectedly reuses cached outcomes | The invocation passed `--cache` and the full identity matched. | Compare stderr's cache diagnostics, then use `--no-cache` or `--clear-cache`. See [result cache](result-cache.md#invalidation-rules). |
+| `check-platform` reports `unsupported` | Read the failing check id and `remediation` in the JSON report. | Follow the [platform troubleshooting table](supported-platforms.md#troubleshooting). |
+| Benchmark matrix refuses external targets | External targets need an explicit `--allow-external` and a pinned revision. | Use `--local-only` for local fixtures, or opt in deliberately. See [benchmark safety](benchmark-matrix.md#safety-model). |
 
 For example, compare discovery and execution with the same operator filter,
 then save the report to a directory that already exists.

@@ -35,6 +35,24 @@ Reuse the same cache location on later runs. When reclaiming space, preview
 cleanup first and run the same command without `--dry-run` after the mutation
 process has stopped. See [troubleshooting](troubleshooting.md#disk-usage).
 
+## Reuse unchanged mutation results (opt-in)
+
+With `--cache`, outcomes are stored in `<target-dir>/result-cache.json` and
+reused only when the complete identity matches. This skips mutant execution,
+not the baseline. The first run warms the cache; an immediate identical run
+reports hits on stderr. Changing source, test command, toolchain, lockfile,
+filters, timeouts, or concurrency invalidates results.
+
+```bash
+cargo soro-mutants test . --operator AUTH-001 --cache
+cargo soro-mutants test . --operator AUTH-001 --cache   # cache hits
+cargo soro-mutants test . --operator AUTH-001 --no-cache
+```
+
+Use `--clear-cache` before a run that must measure everything again. Timeouts
+and tampered entries are never reused. The complete key and invalidation rules
+are documented in [docs/result-cache.md](result-cache.md).
+
 ## Set budgets for compilation and tests
 
 `--compile-timeout` applies to each mutant's separate compile gate.

@@ -2,6 +2,26 @@
 
 These results are evidence for the product hypothesis, not security audit findings.
 
+## Reproducing the matrix
+
+The targets below are described in the machine-readable
+[benchmark matrix manifest](benchmark-matrix.json). Use the opt-in
+[automated runner](benchmark-matrix.md) to record fresh commands, pinned
+revisions, baseline status, exit codes, and mutant outcomes:
+
+```bash
+# Local fixtures only: no network access and no external code execution.
+cargo soro-mutants benchmark-matrix docs/benchmark-matrix.json --local-only
+
+# Pinned public targets require explicit opt-in.
+cargo soro-mutants benchmark-matrix docs/benchmark-matrix.json --allow-external
+```
+
+The runner never updates this file automatically. A maintainer reviews the
+generated summary and edits these notes manually. A failing baseline stops
+scoring for that target, and no result here is a security claim about a
+third-party project.
+
 ## Controlled fixtures
 
 ### Weak auth fixture

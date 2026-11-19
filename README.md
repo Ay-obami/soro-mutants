@@ -27,6 +27,8 @@ Soro Mutants targets those semantics.
 | `AUTH-002` | Authenticate a different in-scope `Address` |
 | `AUTH-004` | Skip or redirect authorization performed through a simple local `require_auth()` helper |
 | `AUTH-005` | Authenticate another in-scope `Address` instead of a stored admin/owner authority |
+| `AUTH-006` | Remove or redirect authorization in a recognized Soroban initialization entrypoint |
+| `AUTH-007` | Remove or redirect authorization in a recognized Soroban contract-upgrade entrypoint |
 | `TTL-001` | Remove `extend_ttl()` from recognized Soroban storage accessors |
 | `EVENT-001` | Remove direct `Env.events().publish(...)` publication |
 | `TOKEN-001` | Swap sender and recipient on recognized Soroban token-client transfers |
@@ -209,6 +211,30 @@ Soro Mutants isolates Cargo build artifacts and prevents contamination between c
 - Whenever source code, operators, test commands, toolchains, or workspaces change, stale caches are automatically invalidated and purged before execution.
 - No remote cache backend is used; all cache isolation and invalidation occurs deterministically on local disk.
 
+### Persistent mutation-result cache (opt-in)
+
+Reuse unchanged mutation outcomes with `--cache`. This is separate from the
+Cargo build cache above and is **off by default**:
+
+```bash
+# First run populates <target-dir>/result-cache.json.
+cargo soro-mutants test . --operator AUTH-001 --cache
+
+# Identical later runs report "(cache hit)" and skip re-execution.
+cargo soro-mutants test . --operator AUTH-001 --cache
+
+# Disable reads/writes, or delete stored results before a run.
+cargo soro-mutants test . --no-cache
+cargo soro-mutants test . --cache --clear-cache
+```
+
+The key includes source identity, the full workspace, lockfile and toolchain
+files, the resolved test command, rustc/cargo versions, all selection filters,
+relevant environment variables, timeouts, and concurrency. A baseline always
+runs before cache reuse; timeouts and tampered entries are never reused. See
+[the result-cache documentation](docs/result-cache.md) for the complete key,
+invalidation rules, and examples.
+
 ### Resuming interrupted mutation runs
 
 Long-running mutation suites can be interrupted and safely resumed using `--resume`:
@@ -236,6 +262,41 @@ cargo soro-mutants validate-corpus docs/corpus-example.json
 ```
 
 The validator checks required fields, supported schema versions, unique identifiers, operator format, source snippets, expectations, and provenance without running mutations. Unknown optional fields remain compatible within version 1; breaking changes require a new major version.
+
+### Opt-in benchmark matrix
+
+The [benchmark matrix](docs/benchmark-matrix.md) reproduces documented local
+and public-fixture benchmarks from a [machine-readable manifest](docs/benchmark-matrix.json).
+It is never part of unit CI, and external repositories are fetched only with an
+explicit `--allow-external` flag and a pinned revision:
+
+```bash
+# Safe default: local fixtures only, no network access.
+cargo soro-mutants benchmark-matrix docs/benchmark-matrix.json --local-only
+
+# Opt in to pinned public checkouts and write a structured summary.
+cargo soro-mutants benchmark-matrix docs/benchmark-matrix.json \
+  --allow-external --output /tmp/benchmark-summary.md
+```
+
+Every target's baseline must pass before it is scored; failed baselines are
+reported without mutation results. The summary records commands, exit codes,
+outcomes, timing, and revisions, and is intended for manual review before
+updating `docs/benchmark.md`. It is not a security finding.
+
+### Supported-platform policy
+
+The versioned [v1.0 supported-platform policy](docs/supported-platforms.md)
+defines supported OS/architecture, Rust MSRV 1.85, Cargo compatibility,
+best-effort environments, unsupported environments, limitations, troubleshooting,
+and release-readiness checks. Verify a host with:
+
+```bash
+cargo soro-mutants check-platform --json
+```
+
+The command exits non-zero with a structured report when the environment is
+unsupported.
 
 ### Deterministic mutant ordering
 
@@ -404,6 +465,9 @@ See [docs/benchmark.md](docs/benchmark.md) for exact commands, commit hashes, ex
 - [Architecture](docs/architecture.md)
 - [Operator specification](docs/operators.md)
 - [Benchmark evidence](docs/benchmark.md)
+- [Benchmark matrix runner](docs/benchmark-matrix.md)
+- [Persistent result cache](docs/result-cache.md)
+- [Supported-platform policy](docs/supported-platforms.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [CI integration](docs/ci-integration.md)
 - [Performance tuning](docs/performance-tuning.md)

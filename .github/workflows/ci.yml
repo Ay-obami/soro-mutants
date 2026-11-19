@@ -57,6 +57,16 @@ jobs:
             weak: weak-auth-admin
             strong: strong-auth-admin
             expected: AUTH-005
+          - name: auth-init
+            weak: weak-init-auth
+            strong: strong-init-auth
+            expected: AUTH-006
+            function: initialize
+          - name: auth-upgrade
+            weak: weak-upgrade-auth
+            strong: strong-upgrade-auth
+            expected: AUTH-007
+            function: upgrade
           - name: typed-event
             weak: weak-typed-events
             strong: strong-typed-events

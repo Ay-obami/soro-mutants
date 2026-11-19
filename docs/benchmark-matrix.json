@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "description": "Opt-in benchmark matrix for local semantic fixtures and pinned public checkouts. Results are mutation-testing observations, not security findings.",
+  "targets": [
+    {
+      "id": "local-auth-weak",
+      "kind": "local",
+      "path": "fixtures/weak-auth",
+      "operator": "AUTH-001",
+      "function": "change_admin",
+      "test_command": "cargo test -q --locked",
+      "note": "Functional-only authorization test: the mutant is expected to survive."
+    },
+    {
+      "id": "local-auth-strong",
+      "kind": "local",
+      "path": "fixtures/strong-auth",
+      "operator": "AUTH-001",
+      "function": "change_admin",
+      "test_command": "cargo test -q --locked",
+      "note": "Test asserts env.auths(): the mutant is expected to be killed."
+    },
+    {
+      "id": "local-init-auth-weak",
+      "kind": "local",
+      "path": "fixtures/weak-init-auth",
+      "operator": "AUTH-006",
+      "function": "initialize",
+      "test_command": "cargo test -q --locked",
+      "note": "Initialization authorization, functional-only test."
+    },
+    {
+      "id": "local-init-auth-strong",
+      "kind": "local",
+      "path": "fixtures/strong-init-auth",
+      "operator": "AUTH-006",
+      "function": "initialize",
+      "test_command": "cargo test -q --locked",
+      "note": "Initialization authorization, explicit auth-tree assertion."
+    },
+    {
+      "id": "local-upgrade-auth-weak",
+      "kind": "local",
+      "path": "fixtures/weak-upgrade-auth",
+      "operator": "AUTH-007",
+      "function": "upgrade",
+      "test_command": "cargo test -q --locked",
+      "note": "Upgrade authorization, functional-only test."
+    },
+    {
+      "id": "local-upgrade-auth-strong",
+      "kind": "local",
+      "path": "fixtures/strong-upgrade-auth",
+      "operator": "AUTH-007",
+      "function": "upgrade",
+      "test_command": "cargo test -q --locked",
+      "note": "Upgrade authorization, explicit auth-tree assertion."
+    },
+    {
+      "id": "external-phoenix-pool-propose-admin",
+      "kind": "external",
+      "repository": "https://github.com/Phoenix-Protocol-Group/phoenix-contracts",
+      "revision": "aa9bfc0",
+      "file": "contracts/pool/src/contract.rs",
+      "function": "propose_admin",
+      "operator": "AUTH-001",
+      "test_command": "cargo test -q -p phoenix-pool admin_change",
+      "note": "Public benchmark from docs/benchmark.md; requires --allow-external."
+    },
+    {
+      "id": "external-phoenix-token-mint",
+      "kind": "external",
+      "repository": "https://github.com/Phoenix-Protocol-Group/phoenix-contracts",
+      "revision": "aa9bfc0",
+      "file": "contracts/token/src/contract.rs",
+      "function": "mint",
+      "operator": "AUTH-001",
+      "test_command": "cargo test -q -p soroban-token-contract test",
+      "note": "Public benchmark from docs/benchmark.md; requires --allow-external."
+    },
+    {
+      "id": "external-soroswap-token-transfer",
+      "kind": "external",
+      "repository": "https://github.com/soroswap/core",
+      "revision": "6eade00",
+      "file": "contracts/token/src/contract.rs",
+      "function": "transfer",
+      "operator": "AUTH-001",
+      "test_command": "RUSTUP_TOOLCHAIN=1.95.0 cargo test -q test::test -- --exact",
+      "note": "Focused existing test with an exact env.auths() assertion."
+    },
+    {
+      "id": "external-soroban-examples-single-offer",
+      "kind": "external",
+      "repository": "https://github.com/stellar/soroban-examples",
+      "revision": "03d42aa",
+      "function": "create",
+      "operator": "AUTH-001",
+      "test_command": "RUSTUP_TOOLCHAIN=1.95.0 cargo test -q",
+      "note": "Official SDK example used as an external positive control."
+    },
+    {
+      "id": "external-rwa-token-transfer",
+      "kind": "external",
+      "repository": "https://github.com/RWA-ToolKit/stellar-rwa-contracts",
+      "revision": "a92ad6a",
+      "function": "transfer",
+      "operator": "AUTH-001",
+      "test_command": "RUSTUP_TOOLCHAIN=1.95.0 cargo test -p asset-token test_transfer_requires_only_sender_auth -q",
+      "note": "Mixed authorization/event coverage benchmark; requires --allow-external."
+    }
+  ]
+}

@@ -62,13 +62,14 @@ The clean baseline and mutated runs use separate Cargo target roots so mutant ar
 
 Useful future work includes:
 
-- stronger cache keys and invalidation regression coverage across toolchains/workspaces
 - incremental execution
 - changed-function / changed-file mutation selection
 - parallel workers
 - deterministic sharding
-- result caching keyed by source, operator, test command, toolchain, and dependency state
 - optional `cargo nextest` execution
+
+The opt-in [persistent result cache](result-cache.md) and its invalidation
+regression coverage are implemented; they are not future work.
 
 Any cache optimization must have regression tests proving that artifacts from one mutant cannot contaminate another mutant or the clean baseline.
 
