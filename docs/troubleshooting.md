@@ -103,3 +103,7 @@ Before parsing a Rust file, Soro Mutants applies a structural-depth guard. Sourc
 ## Oversized Rust source files
 
 Soro Mutants intentionally refuses to parse an individual Rust source file larger than **16 MiB**. The limit is checked from filesystem metadata before the file is read into memory. This keeps discovery memory use predictable for generated or adversarial inputs. Split generated source into modules or exclude the generated path from mutation discovery when a file exceeds this limit.
+
+## Non-Unicode filesystem paths
+
+On Unix, the project root may contain bytes that are not valid UTF-8. Soro Mutants passes filesystem paths to child processes as native OS strings and does not replace an unrepresentable project root with another directory. Human diagnostics use the platform's display representation; project-relative report paths must still be serializable by the selected report format.
