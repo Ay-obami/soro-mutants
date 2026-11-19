@@ -1577,12 +1577,9 @@ fn filter_changed_mutants(
             bail!("invalid Git diff base revision");
         }
         let output = Command::new("git")
-            .args([
-                "-C",
-                root.to_str().unwrap_or("."),
-                "rev-parse",
-                "--show-toplevel",
-            ])
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "--show-toplevel"])
             .output()
             .context("cannot locate Git repository")?;
         if !output.status.success() {

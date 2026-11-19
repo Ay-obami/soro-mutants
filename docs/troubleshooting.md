@@ -92,3 +92,7 @@ A useful rule is to separate baseline failures from mutant failures:
 - **Compile or tests exceed the configured timeout:** the mutant is `TIMEOUT`.
 
 When reporting a problem, include the Soro Mutants version, target-project commit, Rust toolchain, exact test command, and whether the clean baseline passes.
+
+## Non-Unicode filesystem paths
+
+On Unix, the project root may contain bytes that are not valid UTF-8. Soro Mutants passes filesystem paths to child processes as native OS strings and does not replace an unrepresentable project root with another directory. Human diagnostics use the platform's display representation; project-relative report paths must still be serializable by the selected report format.
