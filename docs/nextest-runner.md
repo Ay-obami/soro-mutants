@@ -15,7 +15,7 @@ Before any nextest run, Soro Mutants checks that `cargo nextest --version` works
 
 - `--runner nextest` and a custom `--test-command` cannot be combined. Choose `--runner cargo-test --test-command '...'` for custom commands. Extra nextest arguments are not yet exposed by this mode.
 - The nextest executable and its dependencies must be present on the machine and in Cargo's subcommand search path. The default runner does **not** need nextest.
-- This does not add parallel mutant execution; mutant runs remain sequential, though nextest can run tests concurrently within a single mutant.
+- The runner choice is independent of `--jobs`: nextest can run tests concurrently within a single mutant, and `--jobs N` runs up to N mutants concurrently, each with its own isolated worktree and target directory (see [parallel mutant execution](architecture.md#parallel-mutant-execution)).
 - The compile gate uses Cargo's test builder, and the baseline/mutant runs use the same runner and isolated target paths.
 - Output formats, mutation-score rules, and baseline gating are unchanged.
 

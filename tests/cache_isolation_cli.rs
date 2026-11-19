@@ -13,7 +13,10 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("soro-cache-{prefix}-{}-{nonce}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "soro-cache-{prefix}-{}-{nonce}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -30,6 +33,14 @@ impl Drop for TempDir {
 }
 
 fn run_test(root: &Path, args: &[&str]) -> Output {
+    use std::sync::{Mutex, OnceLock};
+
+    static COMMAND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = COMMAND_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("cache isolation command lock");
+
     Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
         .arg("test")
         .arg(root)
@@ -44,20 +55,39 @@ fn cache_creates_identity_file_and_artifact_markers() {
     let target = temp.path().join("target");
     let fixture = Path::new("fixtures/weak-auth");
 
-    let output = run_test(fixture, &[
-        "--target-dir", target.to_str().unwrap(),
-        "--test-command", "true",
-        "--operator", "AUTH-001",
-    ]);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let output = run_test(
+        fixture,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "true",
+            "--operator",
+            "AUTH-001",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let identity_path = target.join("cache-identity.json");
-    assert!(identity_path.exists(), "cache-identity.json should be created");
+    assert!(
+        identity_path.exists(),
+        "cache-identity.json should be created"
+    );
 
     let baseline_marker = target.join("baseline/.soro-baseline-artifact");
     let mutant_marker = target.join("mutants-shared/.soro-mutant-artifact");
-    assert!(baseline_marker.exists(), "baseline artifact marker should exist");
-    assert!(mutant_marker.exists(), "mutant artifact marker should exist");
+    assert!(
+        baseline_marker.exists(),
+        "baseline artifact marker should exist"
+    );
+    assert!(
+        mutant_marker.exists(),
+        "mutant artifact marker should exist"
+    );
 }
 
 #[test]
@@ -66,11 +96,17 @@ fn cache_invalidates_when_test_command_changes() {
     let target = temp.path().join("target");
     let fixture = Path::new("fixtures/weak-auth");
 
-    let out1 = run_test(fixture, &[
-        "--target-dir", target.to_str().unwrap(),
-        "--test-command", "true",
-        "--operator", "AUTH-001",
-    ]);
+    let out1 = run_test(
+        fixture,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "true",
+            "--operator",
+            "AUTH-001",
+        ],
+    );
     assert!(out1.status.success());
 
     // Place a sentinel file in mutants-shared
@@ -79,15 +115,24 @@ fn cache_invalidates_when_test_command_changes() {
     assert!(sentinel.exists());
 
     // Run again with different test-command
-    let out2 = run_test(fixture, &[
-        "--target-dir", target.to_str().unwrap(),
-        "--test-command", "echo custom_test",
-        "--operator", "AUTH-001",
-    ]);
+    let out2 = run_test(
+        fixture,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "echo custom_test",
+            "--operator",
+            "AUTH-001",
+        ],
+    );
     assert!(out2.status.success());
 
     // Sentinel should have been removed due to cache invalidation!
-    assert!(!sentinel.exists(), "stale build artifacts should be invalidated when test command changes");
+    assert!(
+        !sentinel.exists(),
+        "stale build artifacts should be invalidated when test command changes"
+    );
 }
 
 #[test]
@@ -96,11 +141,17 @@ fn cache_invalidates_when_operator_changes() {
     let target = temp.path().join("target");
     let fixture = Path::new("fixtures/weak-auth");
 
-    let out1 = run_test(fixture, &[
-        "--target-dir", target.to_str().unwrap(),
-        "--test-command", "true",
-        "--operator", "AUTH-001",
-    ]);
+    let out1 = run_test(
+        fixture,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "true",
+            "--operator",
+            "AUTH-001",
+        ],
+    );
     assert!(out1.status.success());
 
     let sentinel = target.join("mutants-shared/sentinel.txt");
@@ -108,14 +159,23 @@ fn cache_invalidates_when_operator_changes() {
     assert!(sentinel.exists());
 
     // Run again with different operator
-    let out2 = run_test(fixture, &[
-        "--target-dir", target.to_str().unwrap(),
-        "--test-command", "true",
-        "--operator", "AUTH-002",
-    ]);
+    let out2 = run_test(
+        fixture,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "true",
+            "--operator",
+            "AUTH-002",
+        ],
+    );
     assert!(out2.status.success());
 
-    assert!(!sentinel.exists(), "stale build artifacts should be invalidated when operator changes");
+    assert!(
+        !sentinel.exists(),
+        "stale build artifacts should be invalidated when operator changes"
+    );
 }
 
 #[test]
@@ -125,10 +185,15 @@ fn cache_invalidates_when_workspace_changes() {
     let fixture1 = Path::new("fixtures/weak-auth");
     let fixture2 = Path::new("fixtures/weak-ttl-lifecycle");
 
-    let out1 = run_test(fixture1, &[
-        "--target-dir", target.to_str().unwrap(),
-        "--test-command", "true",
-    ]);
+    let out1 = run_test(
+        fixture1,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "true",
+        ],
+    );
     assert!(out1.status.success());
 
     let sentinel = target.join("mutants-shared/sentinel.txt");
@@ -136,13 +201,21 @@ fn cache_invalidates_when_workspace_changes() {
     assert!(sentinel.exists());
 
     // Run pointing the same target-dir to a different workspace
-    let out2 = run_test(fixture2, &[
-        "--target-dir", target.to_str().unwrap(),
-        "--test-command", "true",
-    ]);
+    let out2 = run_test(
+        fixture2,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "true",
+        ],
+    );
     assert!(out2.status.success());
 
-    assert!(!sentinel.exists(), "stale cache should be invalidated when workspace changes");
+    assert!(
+        !sentinel.exists(),
+        "stale cache should be invalidated when workspace changes"
+    );
 }
 
 #[test]
@@ -151,11 +224,17 @@ fn artifact_marker_contamination_triggers_invalidation() {
     let target = temp.path().join("target");
     let fixture = Path::new("fixtures/weak-auth");
 
-    let out1 = run_test(fixture, &[
-        "--target-dir", target.to_str().unwrap(),
-        "--test-command", "true",
-        "--operator", "AUTH-001",
-    ]);
+    let out1 = run_test(
+        fixture,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "true",
+            "--operator",
+            "AUTH-001",
+        ],
+    );
     assert!(out1.status.success());
 
     // Simulate cross-contamination by dropping a mutant marker in baseline
@@ -165,12 +244,75 @@ fn artifact_marker_contamination_triggers_invalidation() {
     fs::write(&baseline_canary, "canary").unwrap();
 
     // Re-run
-    let out2 = run_test(fixture, &[
-        "--target-dir", target.to_str().unwrap(),
-        "--test-command", "true",
-        "--operator", "AUTH-001",
-    ]);
+    let out2 = run_test(
+        fixture,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "true",
+            "--operator",
+            "AUTH-001",
+        ],
+    );
     assert!(out2.status.success());
 
-    assert!(!baseline_canary.exists(), "contaminated baseline should be purged");
+    assert!(
+        !baseline_canary.exists(),
+        "contaminated baseline should be purged"
+    );
+}
+
+#[test]
+fn cache_invalidates_parallel_worker_artifacts() {
+    let temp = TempDir::new("parallel-invalidation");
+    let target = temp.path().join("target");
+    let fixture = Path::new("fixtures/weak-auth");
+
+    let out1 = run_test(
+        fixture,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "true",
+            "--operator",
+            "AUTH-001",
+            "--jobs",
+            "2",
+        ],
+    );
+    assert!(
+        out1.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+
+    let worker_cache = target.join("mutants-parallel/worker-1");
+    fs::create_dir_all(&worker_cache).unwrap();
+    let sentinel = worker_cache.join("sentinel.txt");
+    fs::write(&sentinel, "stale").unwrap();
+
+    let out2 = run_test(
+        fixture,
+        &[
+            "--target-dir",
+            target.to_str().unwrap(),
+            "--test-command",
+            "echo changed",
+            "--operator",
+            "AUTH-001",
+            "--jobs",
+            "2",
+        ],
+    );
+    assert!(
+        out2.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    assert!(
+        !sentinel.exists(),
+        "parallel worker cache should be invalidated when run identity changes"
+    );
 }

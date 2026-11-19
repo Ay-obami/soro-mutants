@@ -171,3 +171,51 @@ fn clean_removes_progress_and_cache_identity_files() {
     assert!(!identity.exists());
     assert!(!cache.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn clean_refuses_symlinked_managed_cache_root() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let external = temp.path().join("external-cache");
+    fs::create_dir_all(external.join("baseline")).unwrap();
+    fs::write(external.join("baseline/marker"), "must survive").unwrap();
+    symlink(&external, temp.path().join(".soro-mutants-target")).unwrap();
+
+    let output = run(temp.path(), &[]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("refusing to clean symlinked Soro Mutants path"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read_to_string(external.join("baseline/marker")).unwrap(),
+        "must survive"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_refuses_symlinked_scratch_directory() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new();
+    let external = temp.path().join("external-worktree");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("marker"), "must survive").unwrap();
+    symlink(&external, temp.path().join(".soro-mutants-worktree")).unwrap();
+
+    let output = run(temp.path(), &[]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("refusing to clean symlinked Soro Mutants path"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read_to_string(external.join("marker")).unwrap(),
+        "must survive"
+    );
+}
