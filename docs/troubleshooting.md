@@ -38,8 +38,11 @@ By default, Soro Mutants keeps generated build caches under the target project:
 ```text
 .soro-mutants-target/
 ├── baseline/
-└── mutants-shared/
+├── mutants-shared/
+└── mutants-parallel/   # only after runs with --jobs > 1, one cache per worker
 ```
+
+Parallel runs (`--jobs N`) keep a full Cargo cache per worker, so they can use roughly N times the space of `mutants-shared`. See [parallel mutant execution](architecture.md#parallel-mutant-execution).
 
 Temporary source worktrees are removed automatically after each mutant run. The baseline and shared mutant Cargo caches are intentionally retained so later runs can reuse dependencies.
 
