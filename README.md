@@ -358,3 +358,7 @@ See [docs/benchmark.md](docs/benchmark.md) for exact commands, commit hashes, ex
 ## v1.0 release readiness
 
 The objective release gate is documented in [docs/v1-release-checklist.md](docs/v1-release-checklist.md).
+
+## Custom operator extension prototype
+
+A versioned compile-time extension boundary is documented in [docs/extensions.md](docs/extensions.md), with a runnable example in `examples/custom_operator.rs`.
