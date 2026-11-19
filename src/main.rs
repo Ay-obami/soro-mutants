@@ -992,7 +992,9 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             {
                 if self.address_params.contains(&receiver) {
                     let replacement = format!("soroban_sdk::Vec::new(&{})", env_name);
-                    let arguments = node.args.first().expect("one argument checked");
+                    let Some(arguments) = node.args.first() else {
+                        return;
+                    };
                     if let Some((start, end, _)) = span_to_offsets(self.source, arguments.span()) {
                         if self.source[start..end] != replacement {
                             self.push_mutant(
@@ -1641,11 +1643,10 @@ fn filter_changed_mutants(
         return Ok(matching);
     }
 
-    let ranges = changed_line_ranges(
-        &root,
-        git_top.as_deref().unwrap_or(&root),
-        diff_base.unwrap(),
-    )?;
+    let Some(diff_base) = diff_base else {
+        return Ok(matching);
+    };
+    let ranges = changed_line_ranges(&root, git_top.as_deref().unwrap_or(&root), diff_base)?;
     type FunctionSpan = (String, usize, usize);
     let mut touched: BTreeMap<String, Option<Vec<FunctionSpan>>> = BTreeMap::new();
     for mutant in &matching {

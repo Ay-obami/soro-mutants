@@ -23,3 +23,7 @@ Public benchmark notes report mutation-testing behavior only. They must:
 - record the exact test scope used;
 - distinguish `SURVIVED` from a vulnerability finding;
 - exclude results whose environment or baseline is not reproducible.
+
+## Panic-free input handling
+
+Normal user-controlled CLI arguments, project contents, and environment failures should return structured errors rather than trigger `unwrap`/`expect` panics. CI includes an audit guard over production code plus adversarial CLI coverage for invalid diff-base input.
