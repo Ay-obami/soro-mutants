@@ -92,3 +92,7 @@ A useful rule is to separate baseline failures from mutant failures:
 - **Compile or tests exceed the configured timeout:** the mutant is `TIMEOUT`.
 
 When reporting a problem, include the Soro Mutants version, target-project commit, Rust toolchain, exact test command, and whether the clean baseline passes.
+
+## Oversized Rust source files
+
+Soro Mutants intentionally refuses to parse an individual Rust source file larger than **16 MiB**. The limit is checked from filesystem metadata before the file is read into memory. This keeps discovery memory use predictable for generated or adversarial inputs. Split generated source into modules or exclude the generated path from mutation discovery when a file exceeds this limit.
