@@ -1923,6 +1923,7 @@ fn validate_source_nesting(source: &str, path: &Path) -> Result<()> {
         i += 1;
     }
     Ok(())
+}
 
 const MAX_RUST_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 
