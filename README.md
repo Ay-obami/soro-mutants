@@ -25,9 +25,12 @@ Soro Mutants targets those semantics.
 | --- | --- |
 | `AUTH-001` | Remove `require_auth()` |
 | `AUTH-002` | Authenticate a different in-scope `Address` |
+| `AUTH-004` | Skip or redirect authorization performed through a simple local `require_auth()` helper |
+| `AUTH-005` | Authenticate another in-scope `Address` instead of a stored admin/owner authority |
 | `TTL-001` | Remove `extend_ttl()` from recognized Soroban storage accessors |
 | `EVENT-001` | Remove direct `Env.events().publish(...)` publication |
 | `TOKEN-001` | Swap sender and recipient on recognized Soroban token-client transfers |
+| `TOKEN-002` | Swap owner and spender on recognized Soroban token-client allowance calls |
 
 The v0.1 recognizers are intentionally conservative. Generic methods that merely share names such as `require_auth`, `transfer`, `extend_ttl`, or `publish` are ignored unless the surrounding AST matches a supported Soroban pattern. See [the operator specification](docs/operators.md) for exact boundaries.
 
@@ -110,6 +113,16 @@ cargo soro-mutants test /path/to/project \
 ```
 
 The existing `--timeout` option defaults to 120 seconds and remains the fallback for both phases. A phase-specific option overrides it only for that phase. The baseline uses the test timeout; a mutant's separate Cargo `--no-run` compile gate uses the compile timeout; mutant test execution uses the test timeout. Custom commands without a recognizable Cargo compile gate run entirely within the test timeout (including any compilation they perform). A timeout during either mutant phase still produces `TIMEOUT`.
+
+### Parallel mutant execution
+
+Mutants run serially by default. Use `--jobs N` (or `-j N`) to execute up to N mutants concurrently:
+
+```bash
+cargo soro-mutants test /path/to/project --jobs 4
+```
+
+Each worker uses its own scratch worktree and its own Cargo target directory under `.soro-mutants-target/mutants-parallel/`, so mutants cannot leak into each other or into the baseline cache. Results are always reported in mutant ID order, so reports are identical to serial runs. Each worker needs its own full dependency build, which costs extra disk space and makes the first (cold-cache) run more expensive. See [parallel mutant execution](docs/architecture.md#parallel-mutant-execution) for the isolation model and disk/CPU trade-offs.
 
 ### Markdown reports
 
@@ -255,7 +268,7 @@ source or filters can change IDs and shard membership.
 `list`, `test`, text, JSON, and `--output` use the same selected order; `--count-only`
 counts only the selected shard. JSON schema and mutant fields remain unchanged.
 Empty shards succeed with no mutants and do not run a baseline. Each nonempty
-shard runs its own baseline, then executes its mutants serially. Run concurrent
+shard runs its own baseline, then executes its mutants (serially unless `--jobs` is set). Run concurrent
 shards in **separate project checkouts and cache directories** (for example, separate
 CI jobs); the runner's scratch directory is shared within one checkout. Keep the
 same source revision, filters, and total shard count across all jobs. Scores in
@@ -270,7 +283,7 @@ cargo soro-mutants clean /path/to/project
 
 The dry run prints every path the real clean would remove without deleting anything, and succeeds when there is nothing to clean. A normal clean only removes its scratch worktree and its own build-cache directories; it may also remove the empty default cache parent. It never cleans global Cargo caches.
 
-If `--target-dir` was used for mutation runs, pass the same value to both preview and cleanup; only Soro Mutants' `baseline` and `mutants-shared` subdirectories are removed from that target directory:
+If `--target-dir` was used for mutation runs, pass the same value to both preview and cleanup; only Soro Mutants' `baseline`, `mutants-shared`, and `mutants-parallel` subdirectories are removed from that target directory:
 
 ```bash
 cargo soro-mutants clean /path/to/project --target-dir ./custom-cache --dry-run

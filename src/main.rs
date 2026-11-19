@@ -45,6 +45,14 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "AUTH-003",
         "replace require_auth_for_args(...) argument set with an empty Soroban Vec",
     ),
+    (
+        "AUTH-004",
+        "skip or redirect authorization through a simple local require_auth() helper",
+    ),
+    (
+        "AUTH-005",
+        "replace a stored admin/owner authority Address with another Address parameter",
+    ),
     ("CALL-001", "replace direct Env::invoke_contract dependency address with another typed Address parameter"),
     ("CALL-002", "replace a generated contract-client call argument with another compatible typed parameter"),
     ("CALL-003", "remove a supported generated contract-client return mismatch check"),
@@ -75,6 +83,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
     (
         "TOKEN-001",
         "swap the sender and recipient arguments of a token transfer",
+    ),
+    (
+        "TOKEN-002",
+        "swap the owner and spender Address arguments of a token allowance call",
     ),
     (
         "TOKEN-003",
@@ -195,6 +207,10 @@ enum Commands {
         /// Timeout in seconds for baseline and mutant test commands.
         #[arg(long)]
         test_timeout: Option<u64>,
+        /// Number of mutants to execute concurrently (1 keeps serial execution).
+        /// Each worker uses its own scratch worktree and Cargo target directory.
+        #[arg(short = 'j', long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
+        jobs: u16,
         /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
@@ -487,6 +503,16 @@ struct FunctionState {
     storage_accessor_vars: Vec<String>,
     numeric_params: Vec<String>,
     env_params: Vec<String>,
+    local_bindings: std::collections::HashSet<String>,
+}
+
+/// A file-level helper whose whole body is `param.require_auth();` statements
+/// over explicitly typed `Address` parameters (AUTH-004).
+#[derive(Clone, Debug)]
+struct AuthHelper {
+    arity: usize,
+    /// `(argument index, helper parameter name, parameter is a reference)`.
+    sinks: Vec<(usize, String, bool)>,
 }
 
 struct SemanticVisitor<'a> {
@@ -501,6 +527,9 @@ struct SemanticVisitor<'a> {
     env_params: Vec<String>,
     typed_event_structs: std::collections::HashSet<String>,
     typed_event_topic_fields: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    auth_helpers: std::collections::HashMap<String, AuthHelper>,
+    module_depth: usize,
+    local_bindings: std::collections::HashSet<String>,
     mutants: Vec<Mutant>,
 }
 
@@ -518,12 +547,18 @@ impl<'a> SemanticVisitor<'a> {
             env_params: Vec::new(),
             typed_event_structs: std::collections::HashSet::new(),
             typed_event_topic_fields: std::collections::HashMap::new(),
+            auth_helpers: std::collections::HashMap::new(),
+            module_depth: 0,
+            local_bindings: std::collections::HashSet::new(),
             mutants: Vec::new(),
         }
     }
 
-    fn enter_signature(&mut self, sig: &Signature) -> FunctionState {
+    fn enter_signature(&mut self, sig: &Signature, body: &syn::Block) -> FunctionState {
+        let mut bindings = BindingNames::default();
+        bindings.visit_block(body);
         FunctionState {
+            local_bindings: std::mem::replace(&mut self.local_bindings, bindings.0),
             current_function: self.current_function.replace(sig.ident.to_string()),
             address_params: std::mem::replace(&mut self.address_params, address_params(sig)),
             token_client_vars: std::mem::replace(
@@ -545,6 +580,99 @@ impl<'a> SemanticVisitor<'a> {
         self.storage_accessor_vars = previous.storage_accessor_vars;
         self.numeric_params = previous.numeric_params;
         self.env_params = previous.env_params;
+        self.local_bindings = previous.local_bindings;
+    }
+
+    /// AUTH-004: mutate a direct statement call to a simple local auth helper.
+    fn push_auth_helper_mutants(&mut self, call: &syn::ExprCall) {
+        if self.module_depth != 0
+            || self.current_function.is_none()
+            || (self.env_params.is_empty() && self.address_params.is_empty())
+        {
+            return;
+        }
+        let Expr::Path(path) = call.func.as_ref() else {
+            return;
+        };
+        if path.qself.is_some()
+            || path.path.leading_colon.is_some()
+            || path.path.segments.len() != 1
+            || !path.path.segments[0].arguments.is_none()
+        {
+            return;
+        }
+        let helper_name = path.path.segments[0].ident.to_string();
+        if self.local_bindings.contains(&helper_name)
+            || self.address_params.contains(&helper_name)
+            || self.env_params.contains(&helper_name)
+        {
+            return;
+        }
+        let Some(helper) = self.auth_helpers.get(&helper_name).cloned() else {
+            return;
+        };
+        if call.args.len() != helper.arity {
+            return;
+        }
+
+        let args = call.args.iter().collect::<Vec<_>>();
+        let address_params = self.address_params.clone();
+        let caller_address = |arg: &Expr| -> Option<String> {
+            let name = match arg {
+                Expr::Reference(reference) if reference.mutability.is_none() => {
+                    receiver_ident(&reference.expr)
+                }
+                Expr::MethodCall(clone) if clone.method == "clone" && clone.args.is_empty() => {
+                    receiver_ident(&clone.receiver)
+                }
+                Expr::Path(_) => receiver_ident(arg),
+                _ => None,
+            }?;
+            address_params.contains(&name).then_some(name)
+        };
+
+        let sink_names = helper
+            .sinks
+            .iter()
+            .map(|(_, param, _)| format!("{param}.require_auth()"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let authorized = helper
+            .sinks
+            .iter()
+            .map(|(index, _, _)| {
+                caller_address(args[*index]).unwrap_or_else(|| "an argument".to_owned())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.push_mutant(
+            "AUTH-004",
+            call.span(),
+            "()".to_owned(),
+            format!("skip {helper_name}() authorization of {authorized} (sink: {sink_names})"),
+        );
+
+        for (index, param, is_ref) in &helper.sinks {
+            let argument = args[*index];
+            let Some(original) = caller_address(argument) else {
+                continue;
+            };
+            for alternate in address_params.iter().filter(|name| *name != &original) {
+                let replacement = if *is_ref {
+                    format!("&{alternate}")
+                } else {
+                    format!("{alternate}.clone()")
+                };
+                self.push_mutant(
+                    "AUTH-004",
+                    argument.span(),
+                    replacement,
+                    format!(
+                        "authenticate {alternate} instead of {original} via {helper_name}() (sink: {param}.require_auth())"
+                    ),
+                );
+            }
+        }
     }
 
     fn push_mutant(
@@ -574,6 +702,205 @@ impl<'a> SemanticVisitor<'a> {
             end_byte: end,
         });
     }
+
+    /// TOKEN-002: swap the two leading `Address` role arguments of a supported
+    /// allowance-related token-client call (owner/spender or spender/owner).
+    ///
+    /// Both arguments must be `&ident` references to distinct, explicitly typed
+    /// `Address` parameters of the enclosing function. The edit covers the span
+    /// from the first role argument to the second, preserving the separator text.
+    fn push_allowance_role_swap(&mut self, node: &ExprMethodCall, role_a: &str, role_b: &str) {
+        let mut args = node.args.iter();
+        let (Some(first), Some(second)) = (args.next(), args.next()) else {
+            return;
+        };
+        let typed_address_ref = |arg: &Expr| match arg {
+            Expr::Reference(reference) if reference.mutability.is_none() => {
+                receiver_ident(&reference.expr).filter(|name| self.address_params.contains(name))
+            }
+            _ => None,
+        };
+        let (Some(first_name), Some(second_name)) =
+            (typed_address_ref(first), typed_address_ref(second))
+        else {
+            return;
+        };
+        if first_name == second_name {
+            return;
+        }
+        let (
+            Some((first_start, first_end, first_span)),
+            Some((second_start, second_end, second_span)),
+        ) = (
+            span_to_offsets(self.source, first.span()),
+            span_to_offsets(self.source, second.span()),
+        )
+        else {
+            return;
+        };
+        if !(first_start < first_end && first_end <= second_start && second_start < second_end)
+            || second_end > self.source.len()
+        {
+            return;
+        }
+
+        let replacement = format!(
+            "{}{}{}",
+            &self.source[second_start..second_end],
+            &self.source[first_end..second_start],
+            &self.source[first_start..first_end],
+        );
+        let method = node.method.to_string();
+        self.mutants.push(Mutant {
+            id: String::new(),
+            operator: "TOKEN-002".to_owned(),
+            file: self.file.clone(),
+            function: self.current_function.clone(),
+            span: SourceSpan {
+                line: first_span.line,
+                column: first_span.column,
+                end_line: second_span.end_line,
+                end_column: second_span.end_column,
+            },
+            original: self.source[first_start..second_end].to_string(),
+            replacement,
+            description: format!(
+                "swap token {method}() {role_a}/{role_b} arguments ({first_name} <-> {second_name})"
+            ),
+            start_byte: first_start,
+            end_byte: second_end,
+        });
+    }
+
+    /// AUTH-005: substitute a recoverable stored admin/owner authority.
+    ///
+    /// The supported retrieval pattern is a local bound exactly once in the
+    /// enclosing function, explicitly typed `Address` (by annotation or by a
+    /// `get::<_, Address>` turbofish), and initialized directly from
+    /// `<env>.storage().<instance|persistent|temporary>().get(key)` followed by
+    /// `.unwrap()` or `.expect(..)`, where `<env>` is an explicit `Env`
+    /// parameter. The local is treated as a privileged authority only when it
+    /// is the receiver of `require_auth()` / `require_auth_for_args(..)` in the
+    /// same function. The loaded value is replaced with `<alternate>.clone()`
+    /// for each explicit `Address` parameter, in signature order.
+    fn push_stored_authority_mutants(&mut self, body: &syn::Block) {
+        if self.env_params.is_empty() || self.address_params.is_empty() {
+            return;
+        }
+
+        let mut scan = AuthorityScan::default();
+        scan.visit_block(body);
+
+        let mut candidates = Vec::new();
+        for local in &scan.locals {
+            let Some((name, init)) = local_binding_name_and_init(local) else {
+                continue;
+            };
+            if local
+                .init
+                .as_ref()
+                .is_some_and(|init| init.diverge.is_some())
+                || !scan.auth_receivers.contains(&name)
+                || scan.bound_names.get(&name).copied() != Some(1)
+                || self.address_params.contains(&name)
+                || self.env_params.contains(&name)
+            {
+                continue;
+            }
+            let annotated_address =
+                matches!(&local.pat, Pat::Type(typed) if type_is_address(&typed.ty));
+            let Some(turbofish_address) = stored_authority_lookup(init, &self.env_params) else {
+                continue;
+            };
+            if annotated_address || turbofish_address {
+                candidates.push((name, init.span()));
+            }
+        }
+
+        for (name, span) in candidates {
+            for alternate in self.address_params.clone() {
+                self.push_mutant(
+                    "AUTH-005",
+                    span,
+                    format!("{alternate}.clone()"),
+                    format!("use {alternate} instead of stored authority {name}"),
+                );
+            }
+        }
+    }
+}
+
+/// Function-body scan used by AUTH-005. Nested items are skipped because they
+/// form their own scope and are visited separately.
+#[derive(Default)]
+struct AuthorityScan<'ast> {
+    locals: Vec<&'ast Local>,
+    bound_names: std::collections::HashMap<String, usize>,
+    auth_receivers: std::collections::HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for AuthorityScan<'ast> {
+    fn visit_item(&mut self, _node: &'ast Item) {}
+
+    fn visit_local(&mut self, node: &'ast Local) {
+        self.locals.push(node);
+        visit::visit_local(self, node);
+    }
+
+    fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+        *self.bound_names.entry(node.ident.to_string()).or_default() += 1;
+        visit::visit_pat_ident(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let is_auth_sink = (node.method == "require_auth" && node.args.is_empty())
+            || (node.method == "require_auth_for_args" && node.args.len() == 1);
+        if is_auth_sink {
+            if let Some(name) = receiver_ident(&node.receiver) {
+                self.auth_receivers.insert(name);
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Recognizes `<env>.storage().<class>().get(key).unwrap()` or `.expect(..)`
+/// rooted at an explicit `Env` parameter. Returns `Some(true)` when the `get`
+/// call carries an explicit `Address` value type in its turbofish, `Some(false)`
+/// for a supported lookup without one, and `None` for anything else.
+fn stored_authority_lookup(expr: &Expr, env_params: &[String]) -> Option<bool> {
+    let Expr::MethodCall(unwrap) = expr else {
+        return None;
+    };
+    let unwraps = (unwrap.method == "unwrap" && unwrap.args.is_empty())
+        || (unwrap.method == "expect" && unwrap.args.len() == 1);
+    if !unwraps {
+        return None;
+    }
+    let Expr::MethodCall(get) = unwrap.receiver.as_ref() else {
+        return None;
+    };
+    if get.method != "get" || get.args.len() != 1 {
+        return None;
+    }
+    let Expr::MethodCall(class) = get.receiver.as_ref() else {
+        return None;
+    };
+    if !matches!(
+        class.method.to_string().as_str(),
+        "instance" | "persistent" | "temporary"
+    ) || !class.args.is_empty()
+        || !is_direct_env_storage_receiver(&class.receiver, env_params)
+    {
+        return None;
+    }
+    let turbofish_address = get.turbofish.as_ref().is_some_and(|turbofish| {
+        matches!(
+            turbofish.args.last(),
+            Some(syn::GenericArgument::Type(ty)) if type_is_address(ty)
+        )
+    });
+    Some(turbofish_address)
 }
 
 impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
@@ -625,10 +952,29 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 _ => None,
             })
             .collect();
+        self.auth_helpers = node
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Fn(function) => {
+                    auth_helper(function).map(|helper| (function.sig.ident.to_string(), helper))
+                }
+                _ => None,
+            })
+            .collect();
         visit::visit_file(self, node);
     }
 
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        self.module_depth += 1;
+        visit::visit_item_mod(self, node);
+        self.module_depth -= 1;
+    }
+
     fn visit_stmt(&mut self, node: &'ast Stmt) {
+        if let Stmt::Expr(Expr::Call(call), Some(_)) = node {
+            self.push_auth_helper_mutants(call);
+        }
         if let Stmt::Expr(Expr::MethodCall(call), Some(_)) = node {
             if call.method == "publish" && call.args.len() == 1 {
                 let is_typed_event = match call.receiver.as_ref() {
@@ -744,13 +1090,15 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        let previous = self.enter_signature(&node.sig);
+        let previous = self.enter_signature(&node.sig, &node.block);
+        self.push_stored_authority_mutants(&node.block);
         visit::visit_item_fn(self, node);
         self.leave_signature(previous);
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        let previous = self.enter_signature(&node.sig);
+        let previous = self.enter_signature(&node.sig, &node.block);
+        self.push_stored_authority_mutants(&node.block);
         visit::visit_impl_item_fn(self, node);
         self.leave_signature(previous);
     }
@@ -942,6 +1290,14 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                         }
                     }
                 }
+            }
+        }
+
+        if let Some((role_a, role_b)) =
+            allowance_role_labels(&node.method.to_string(), node.args.len())
+        {
+            if is_token_transfer_receiver(&node.receiver, &self.token_client_vars) {
+                self.push_allowance_role_swap(node, role_a, role_b);
             }
         }
 
@@ -1198,6 +1554,7 @@ fn run() -> Result<()> {
             timeout,
             compile_timeout,
             test_timeout,
+            jobs,
             json,
             markdown,
             html,
@@ -1267,12 +1624,7 @@ fn run() -> Result<()> {
                 return Ok(());
             }
 
-            let (baseline_target_dir, mutant_target_root) =
-                target_dirs(&root, target_dir.as_deref());
-            // Keep the clean baseline isolated, but let mutants share a cache.
-            // The scratch path is stable and each source mutation changes file contents,
-            // so Cargo rebuilds the affected crate while reusing dependencies.
-            let shared_target = true;
+            let (baseline_target_dir, _) = target_dirs(&root, target_dir.as_deref());
             let test_cwd = test_dir
                 .as_deref()
                 .map(|dir| root.join(dir))
@@ -1302,30 +1654,37 @@ fn run() -> Result<()> {
                 }
             }
 
-            let mut results = Vec::new();
-            for mutant in mutants {
-                let outcome = execute_mutant(
-                    &root,
-                    &mutant,
-                    test_dir.as_deref(),
-                    &test_command,
+            let text_progress = !json && !markdown && !html && !sarif;
+            let outcomes = execute_mutants(
+                &root,
+                &mutants,
+                &ExecutionSettings {
+                    test_dir: test_dir.as_deref(),
+                    test_command: &test_command,
                     timeouts,
-                    &mutant_target_root,
-                    shared_target,
-                )?;
-                if !json && !markdown && !html && !sarif {
-                    writeln!(
-                        report,
-                        "{:<10} {:<8} {}:{} {}",
-                        outcome_label(&outcome),
-                        mutant.operator,
-                        mutant.file.display(),
-                        mutant.span.line,
-                        mutant.description
-                    )?;
-                }
-                results.push(MutantResult { mutant, outcome });
-            }
+                    target_dir: target_dir.as_deref(),
+                    jobs: usize::from(jobs),
+                },
+                &mut |mutant, outcome| {
+                    if text_progress {
+                        writeln!(
+                            report,
+                            "{:<10} {:<8} {}:{} {}",
+                            outcome_label(outcome),
+                            mutant.operator,
+                            mutant.file.display(),
+                            mutant.span.line,
+                            mutant.description
+                        )?;
+                    }
+                    Ok(())
+                },
+            )?;
+            let results = mutants
+                .into_iter()
+                .zip(outcomes)
+                .map(|(mutant, outcome)| MutantResult { mutant, outcome })
+                .collect::<Vec<_>>();
 
             if json {
                 writeln!(
@@ -1922,6 +2281,77 @@ fn discover_mutants_with_suppressions(
     Ok((mutants, suppressed))
 }
 
+/// Names bound anywhere in a function body (let, closure, match and loop
+/// patterns), excluding nested items. Used so that a local closure or value
+/// shadowing a helper name is never mistaken for the helper (AUTH-004).
+#[derive(Default)]
+struct BindingNames(std::collections::HashSet<String>);
+
+impl<'ast> Visit<'ast> for BindingNames {
+    fn visit_item(&mut self, _node: &'ast Item) {}
+
+    fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+        self.0.insert(node.ident.to_string());
+        visit::visit_pat_ident(self, node);
+    }
+}
+
+/// Recognizes the single supported AUTH-004 helper shape: a non-generic,
+/// non-async, non-variadic free function returning `()` whose body consists
+/// only of `param.require_auth();` statements, where every `param` is a
+/// simple parameter explicitly typed `Address` or `&Address`.
+fn auth_helper(function: &ItemFn) -> Option<AuthHelper> {
+    let sig = &function.sig;
+    if !sig.generics.params.is_empty()
+        || sig.generics.where_clause.is_some()
+        || sig.asyncness.is_some()
+        || sig.constness.is_some()
+        || sig.unsafety.is_some()
+        || sig.abi.is_some()
+        || sig.variadic.is_some()
+        || !matches!(sig.output, syn::ReturnType::Default)
+        || function.block.stmts.is_empty()
+    {
+        return None;
+    }
+
+    let mut address_params = std::collections::HashMap::new();
+    for (index, input) in sig.inputs.iter().enumerate() {
+        let FnArg::Typed(pat_type) = input else {
+            return None;
+        };
+        if let (Pat::Ident(ident), true) = (pat_type.pat.as_ref(), type_is_address(&pat_type.ty)) {
+            if ident.by_ref.is_none() && ident.subpat.is_none() {
+                let is_ref = matches!(pat_type.ty.as_ref(), Type::Reference(_));
+                address_params.insert(ident.ident.to_string(), (index, is_ref));
+            }
+        }
+    }
+
+    let mut sinks: Vec<(usize, String, bool)> = Vec::new();
+    for stmt in &function.block.stmts {
+        let Stmt::Expr(Expr::MethodCall(call), Some(_)) = stmt else {
+            return None;
+        };
+        if call.method != "require_auth" || !call.args.is_empty() || call.turbofish.is_some() {
+            return None;
+        }
+        let Expr::Path(receiver) = call.receiver.as_ref() else {
+            return None;
+        };
+        let name = receiver_ident(&Expr::Path(receiver.clone()))?;
+        let (index, is_ref) = *address_params.get(&name)?;
+        if !sinks.iter().any(|(existing, _, _)| *existing == index) {
+            sinks.push((index, name, is_ref));
+        }
+    }
+
+    Some(AuthHelper {
+        arity: sig.inputs.len(),
+        sinks,
+    })
+}
+
 fn address_params(sig: &Signature) -> Vec<String> {
     sig.inputs
         .iter()
@@ -2115,6 +2545,22 @@ fn is_generated_contract_client_method_call(expr: &Expr, known_clients: &[String
     }
 }
 
+/// Supported allowance-related Soroban token-interface calls for TOKEN-002,
+/// keyed by method name and exact argument count. Returns the labels of the
+/// two leading `Address` role arguments that the operator swaps.
+///
+/// - `approve(from, spender, amount, expiration_ledger)`
+/// - `allowance(from, spender)`
+/// - `transfer_from(spender, from, to, amount)`
+/// - `burn_from(spender, from, amount)`
+fn allowance_role_labels(method: &str, arg_count: usize) -> Option<(&'static str, &'static str)> {
+    match (method, arg_count) {
+        ("approve", 4) | ("allowance", 2) => Some(("owner", "spender")),
+        ("transfer_from", 4) | ("burn_from", 3) => Some(("spender", "owner")),
+        _ => None,
+    }
+}
+
 fn is_token_transfer_receiver(expr: &Expr, known_clients: &[String]) -> bool {
     if is_token_client_constructor(expr) {
         return true;
@@ -2300,10 +2746,36 @@ fn target_dirs(root: &Path, target_dir: Option<&Path>) -> (PathBuf, PathBuf) {
     (base.join("baseline"), base.join("mutants-shared"))
 }
 
+/// Root of the per-worker Cargo caches used by parallel execution (`--jobs` > 1).
+///
+/// It is a sibling of the baseline and serial mutant caches, never a parent or
+/// child of either, so mutant builds cannot write into baseline artifacts.
+fn parallel_target_root(root: &Path, target_dir: Option<&Path>) -> PathBuf {
+    let (baseline, _) = target_dirs(root, target_dir);
+    baseline
+        .parent()
+        .map(|base| base.join("mutants-parallel"))
+        .unwrap_or_else(|| root.join(".soro-mutants-target/mutants-parallel"))
+}
+
+/// Scratch worktree and Cargo target directory for one parallel worker.
+///
+/// Each worker owns both paths for the whole run: no two workers ever share a
+/// source tree or a `CARGO_TARGET_DIR`, while a worker's stable paths still let
+/// Cargo reuse dependency builds between the mutants it executes.
+fn worker_paths(root: &Path, target_dir: Option<&Path>, worker: usize) -> (PathBuf, PathBuf) {
+    let name = format!("worker-{}", worker + 1);
+    (
+        root.join(".soro-mutants-worktree").join(&name),
+        parallel_target_root(root, target_dir).join(name),
+    )
+}
+
 fn managed_cleanup_paths(root: &Path, target_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
     let scratch = root.join(".soro-mutants-worktree");
     let (baseline, mutants) = target_dirs(root, target_dir);
-    let mut paths: Vec<PathBuf> = [scratch, baseline, mutants]
+    let parallel = parallel_target_root(root, target_dir);
+    let mut paths: Vec<PathBuf> = [scratch, baseline, mutants, parallel]
         .into_iter()
         .filter(|path| path.exists())
         .collect();
@@ -2319,7 +2791,7 @@ fn managed_cleanup_paths(root: &Path, target_dir: Option<&Path>) -> Result<Vec<P
             if entries.iter().all(|entry| {
                 matches!(
                     entry.file_name().to_str(),
-                    Some("baseline" | "mutants-shared")
+                    Some("baseline" | "mutants-shared" | "mutants-parallel")
                 ) && paths.iter().any(|path| path == &entry.path())
             }) {
                 paths.push(default_root);
@@ -2350,39 +2822,192 @@ fn clean_generated_state(
     Ok(paths)
 }
 
+struct ExecutionSettings<'a> {
+    test_dir: Option<&'a Path>,
+    test_command: &'a str,
+    timeouts: Timeouts,
+    /// The user's `--target-dir`, if any; Soro Mutants derives its caches from it.
+    target_dir: Option<&'a Path>,
+    jobs: usize,
+}
+
+/// Execute every mutant and return their outcomes in input order.
+///
+/// `on_result` is called on the calling thread, in input order, as soon as the
+/// next outcome in sequence is available. Output is therefore identical for
+/// serial and parallel runs, independent of worker completion order.
+///
+/// With `jobs == 1` the historical serial layout is used: one scratch worktree
+/// at `.soro-mutants-worktree` and the shared `mutants-shared` Cargo cache.
+/// With `jobs > 1`, each worker gets its own scratch worktree under
+/// `.soro-mutants-worktree/worker-N` and its own Cargo target directory under
+/// `mutants-parallel/worker-N`, so concurrent mutants never share source files
+/// or build output, and no worker can write to the baseline cache.
+fn execute_mutants(
+    root: &Path,
+    mutants: &[Mutant],
+    settings: &ExecutionSettings<'_>,
+    on_result: &mut dyn FnMut(&Mutant, &Outcome) -> Result<()>,
+) -> Result<Vec<Outcome>> {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    };
+
+    let (baseline_target, serial_target) = target_dirs(root, settings.target_dir);
+    let ignored = soro_target_base(root, settings.target_dir)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let workers = settings.jobs.max(1).min(mutants.len());
+
+    if workers <= 1 {
+        let scratch = root.join(".soro-mutants-worktree");
+        let mut outcomes = Vec::with_capacity(mutants.len());
+        for mutant in mutants {
+            let outcome = execute_mutant(
+                root,
+                mutant,
+                settings.test_dir,
+                settings.test_command,
+                settings.timeouts,
+                &scratch,
+                &serial_target,
+                &ignored,
+            )?;
+            on_result(mutant, &outcome)?;
+            outcomes.push(outcome);
+        }
+        return Ok(outcomes);
+    }
+
+    let worker_dirs = (0..workers)
+        .map(|worker| worker_paths(root, settings.target_dir, worker))
+        .collect::<Vec<_>>();
+    for (_, target) in &worker_dirs {
+        if target == &baseline_target || target.starts_with(&baseline_target) {
+            bail!(
+                "refusing to share the baseline cache {} with a mutant worker",
+                baseline_target.display()
+            );
+        }
+    }
+
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let mut slots: Vec<Option<Outcome>> = vec![None; mutants.len()];
+    let mut errors: Vec<(usize, anyhow::Error)> = Vec::new();
+
+    std::thread::scope(|scope| {
+        let (sender, receiver) = mpsc::channel::<(usize, Result<Outcome>)>();
+        for (scratch, target) in &worker_dirs {
+            let sender = sender.clone();
+            let (next, stop, ignored) = (&next, &stop, &ignored);
+            scope.spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(mutant) = mutants.get(index) else {
+                        break;
+                    };
+                    let result = execute_mutant(
+                        root,
+                        mutant,
+                        settings.test_dir,
+                        settings.test_command,
+                        settings.timeouts,
+                        scratch,
+                        target,
+                        ignored,
+                    );
+                    let failed = result.is_err();
+                    if failed {
+                        stop.store(true, Ordering::SeqCst);
+                    }
+                    if sender.send((index, result)).is_err() || failed {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sender);
+
+        let mut reported = 0;
+        for (index, result) in receiver {
+            match result {
+                Ok(outcome) => slots[index] = Some(outcome),
+                Err(error) => {
+                    stop.store(true, Ordering::SeqCst);
+                    errors.push((index, error));
+                }
+            }
+            while errors.is_empty() {
+                let Some(Some(outcome)) = slots.get(reported) else {
+                    break;
+                };
+                if let Err(error) = on_result(&mutants[reported], outcome) {
+                    stop.store(true, Ordering::SeqCst);
+                    errors.push((reported, error));
+                    break;
+                }
+                reported += 1;
+            }
+        }
+    });
+
+    let scratch_root = root.join(".soro-mutants-worktree");
+    let cleanup = if scratch_root.exists() {
+        fs::remove_dir_all(&scratch_root).with_context(|| {
+            format!(
+                "failed to clean mutation scratch {}",
+                scratch_root.display()
+            )
+        })
+    } else {
+        Ok(())
+    };
+
+    if let Some((_, error)) = errors.into_iter().min_by_key(|(index, _)| *index) {
+        return Err(error);
+    }
+    cleanup?;
+    slots
+        .into_iter()
+        .map(|slot| slot.context("parallel mutant execution ended without an outcome"))
+        .collect()
+}
+
+/// The Soro Mutants cache base when it lives inside the project root. It is
+/// excluded from scratch copies so that one worker never copies another
+/// worker's (concurrently changing) build output into its own source tree.
+fn soro_target_base(root: &Path, target_dir: Option<&Path>) -> Option<PathBuf> {
+    let (baseline, _) = target_dirs(root, target_dir);
+    let base = baseline.parent()?.to_path_buf();
+    (base != root && base.starts_with(root)).then_some(base)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_mutant(
     root: &Path,
     mutant: &Mutant,
     test_dir: Option<&Path>,
     test_command: &str,
     timeouts: Timeouts,
-    target_root: &Path,
-    shared_target: bool,
+    scratch: &Path,
+    target_dir: &Path,
+    ignored: &[PathBuf],
 ) -> Result<Outcome> {
-    let scratch = root.join(".soro-mutants-worktree");
     if scratch.exists() {
-        fs::remove_dir_all(&scratch)?;
+        fs::remove_dir_all(scratch)?;
     }
-    copy_project(root, &scratch)?;
-    apply_mutant(&scratch, mutant)?;
+    copy_project(root, scratch, ignored)?;
+    apply_mutant(scratch, mutant)?;
 
     let result = (|| -> Result<Outcome> {
-        let target_dir = if shared_target {
-            target_root.to_path_buf()
-        } else {
-            target_root.join(&mutant.id)
-        };
         let scratch_cwd = test_dir
             .map(|dir| scratch.join(dir))
-            .unwrap_or_else(|| scratch.clone());
+            .unwrap_or_else(|| scratch.to_path_buf());
 
         if let Some(compile_command) = compile_command_for(test_command) {
-            match run_process(
-                &scratch_cwd,
-                &compile_command,
-                timeouts.compile,
-                &target_dir,
-            )? {
+            match run_process(&scratch_cwd, &compile_command, timeouts.compile, target_dir)? {
                 ProcessResult::Failed => return Ok(Outcome::Unviable),
                 ProcessResult::Timeout => return Ok(Outcome::Timeout),
                 ProcessResult::Passed => {}
@@ -2390,7 +3015,7 @@ fn execute_mutant(
         }
 
         Ok(
-            match run_process(&scratch_cwd, test_command, timeouts.test, &target_dir)? {
+            match run_process(&scratch_cwd, test_command, timeouts.test, target_dir)? {
                 ProcessResult::Passed => Outcome::Survived,
                 ProcessResult::Failed => Outcome::Killed,
                 ProcessResult::Timeout => Outcome::Timeout,
@@ -2399,7 +3024,7 @@ fn execute_mutant(
     })();
 
     let cleanup_result = if scratch.exists() {
-        fs::remove_dir_all(&scratch)
+        fs::remove_dir_all(scratch)
             .with_context(|| format!("failed to clean mutation scratch {}", scratch.display()))
     } else {
         Ok(())
@@ -2412,13 +3037,12 @@ fn execute_mutant(
     }
 }
 
-fn copy_project(root: &Path, destination: &Path) -> Result<()> {
+fn copy_project(root: &Path, destination: &Path, ignored: &[PathBuf]) -> Result<()> {
     fs::create_dir_all(destination)?;
 
-    for entry in WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|entry| !ignored_entry(entry, root))
-    {
+    for entry in WalkDir::new(root).into_iter().filter_entry(|entry| {
+        !ignored_entry(entry, root) && !ignored.iter().any(|path| entry.path() == path)
+    }) {
         let entry = entry?;
         let relative = entry.path().strip_prefix(root)?;
         if relative.as_os_str().is_empty() {
@@ -2436,12 +3060,21 @@ fn copy_project(root: &Path, destination: &Path) -> Result<()> {
         }
     }
 
-    copy_wasm_fixtures(root, destination)?;
+    copy_wasm_fixtures(root, destination, ignored)?;
     Ok(())
 }
 
-fn copy_wasm_fixtures(root: &Path, destination: &Path) -> Result<()> {
-    for entry in WalkDir::new(root).into_iter() {
+fn copy_wasm_fixtures(root: &Path, destination: &Path, ignored: &[PathBuf]) -> Result<()> {
+    // Prebuilt WASM fixtures may live under `target/`, so that directory is
+    // walked here, but Soro Mutants' own scratch worktrees and caches are not:
+    // another worker may be writing to them concurrently.
+    for entry in WalkDir::new(root).into_iter().filter_entry(|entry| {
+        entry.path() == root
+            || (!matches!(
+                entry.file_name().to_str(),
+                Some(".git" | ".soro-mutants-target" | ".soro-mutants-worktree" | "node_modules")
+            ) && !ignored.iter().any(|path| entry.path() == path))
+    }) {
         let entry = entry?;
         if !entry.file_type().is_file()
             || entry.path().extension().and_then(|ext| ext.to_str()) != Some("wasm")
@@ -3925,6 +4558,351 @@ mod tests {
         assert!(!mutants.iter().any(|m| m.operator == "AUTH-003"));
     }
 
+    fn auth_005(source: &str) -> Vec<(String, String, String)> {
+        mutations_for(source)
+            .into_iter()
+            .filter(|m| m.operator == "AUTH-005")
+            .map(|m| (m.original, m.replacement, m.description))
+            .collect()
+    }
+
+    #[test]
+    fn stored_admin_authority_is_replaced_with_each_address_parameter() {
+        let mutants = auth_005(
+            r#"
+            fn set_admin(env: Env, new_admin: Address, observer: &Address) {
+                let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+                admin.require_auth();
+                env.storage().instance().set(&DataKey::Admin, &new_admin);
+            }
+            "#,
+        );
+        let lookup = "env.storage().instance().get(&DataKey::Admin).unwrap()".to_owned();
+        assert_eq!(
+            mutants,
+            vec![
+                (
+                    lookup.clone(),
+                    "new_admin.clone()".to_owned(),
+                    "use new_admin instead of stored authority admin".to_owned(),
+                ),
+                (
+                    lookup,
+                    "observer.clone()".to_owned(),
+                    "use observer instead of stored authority admin".to_owned(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn stored_authority_supports_turbofish_expect_and_auth_for_args() {
+        let mutants = auth_005(
+            r#"
+            fn rotate(env: &Env, candidate: Address) {
+                let owner = env
+                    .storage()
+                    .persistent()
+                    .get::<_, Address>(&DataKey::Owner)
+                    .expect("owner must be initialized");
+                owner.require_auth_for_args((candidate.clone(),).into_val(env));
+            }
+            "#,
+        );
+        assert_eq!(mutants.len(), 1, "{mutants:#?}");
+        assert_eq!(mutants[0].1, "candidate.clone()");
+        assert!(mutants[0].0.starts_with("env\n"));
+        assert!(mutants[0]
+            .0
+            .ends_with(".expect(\"owner must be initialized\")"));
+    }
+
+    #[test]
+    fn generic_state_lookups_are_not_treated_as_privileged_authorities() {
+        let mutants = auth_005(
+            r#"
+            fn not_authorities(env: Env, user: Address, amount: i128) {
+                // A typed Address loaded from storage but never used as an auth sink.
+                let recipient: Address = env.storage().instance().get(&DataKey::Recipient).unwrap();
+                token.transfer(&user, &recipient, &amount);
+
+                // Non-Address state, even when it is unwrapped.
+                let balance: i128 = env.storage().persistent().get(&user).unwrap();
+                let fee: u32 = env.storage().instance().get(&DataKey::Fee).unwrap_or(0);
+
+                // A name that merely sounds privileged is not enough on its own.
+                let admin_count: u32 = env.storage().instance().get(&DataKey::Admins).unwrap();
+            }
+
+            fn untyped(env: Env, user: Address) {
+                let admin = env.storage().instance().get(&DataKey::Admin).unwrap();
+                admin.require_auth();
+            }
+
+            fn fallback_or_option(env: Env, user: Address) {
+                let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap_or(user.clone());
+                admin.require_auth();
+                let owner: Option<Address> = env.storage().instance().get(&DataKey::Owner);
+                owner.unwrap().require_auth();
+            }
+
+            fn not_env_storage(env: Env, store: Store, user: Address) {
+                let admin: Address = store.storage().instance().get(&DataKey::Admin).unwrap();
+                admin.require_auth();
+                let owner: Address = load_owner(&env);
+                owner.require_auth();
+                let storage = env.storage().instance();
+                let manager: Address = storage.get(&DataKey::Manager).unwrap();
+                manager.require_auth();
+            }
+
+            fn shadowed(env: Env, user: Address) {
+                let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+                let admin = user.clone();
+                admin.require_auth();
+            }
+
+            fn no_alternate(env: Env) {
+                let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+                admin.require_auth();
+            }
+
+            fn no_env(user: Address, storage: Storage) {
+                let admin: Address = storage.instance().get(&DataKey::Admin).unwrap();
+                admin.require_auth();
+            }
+            "#,
+        );
+        assert!(mutants.is_empty(), "{mutants:#?}");
+    }
+
+    #[test]
+    fn stored_authority_scan_does_not_cross_nested_functions() {
+        let mutants = auth_005(
+            r#"
+            fn outer(env: Env, user: Address) {
+                let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+                fn inner(admin: Address) {
+                    admin.require_auth();
+                }
+                inner(admin);
+            }
+            "#,
+        );
+        assert!(mutants.is_empty(), "{mutants:#?}");
+    }
+
+    fn auth_004(source: &str) -> Vec<(Option<String>, String, String, String)> {
+        mutations_for(source)
+            .into_iter()
+            .filter(|m| m.operator == "AUTH-004")
+            .map(|m| (m.function, m.original, m.replacement, m.description))
+            .collect()
+    }
+
+    #[test]
+    fn helper_authorization_is_mutated_at_each_call_site() {
+        let mutants = auth_004(
+            r#"
+            fn require_owner(owner: &Address) {
+                owner.require_auth();
+            }
+
+            fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+                require_owner(&from);
+                move_balance(&env, &from, &to, amount);
+            }
+            "#,
+        );
+        assert_eq!(
+            mutants,
+            vec![
+                (
+                    Some("transfer".to_owned()),
+                    "require_owner(&from)".to_owned(),
+                    "()".to_owned(),
+                    "skip require_owner() authorization of from (sink: owner.require_auth())"
+                        .to_owned(),
+                ),
+                (
+                    Some("transfer".to_owned()),
+                    "&from".to_owned(),
+                    "&to".to_owned(),
+                    "authenticate to instead of from via require_owner() (sink: owner.require_auth())"
+                        .to_owned(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn helper_authorization_supports_by_value_and_multi_sink_helpers() {
+        let mutants = auth_004(
+            r#"
+            fn require_both(env: &Env, first: Address, second: &Address) {
+                first.require_auth();
+                second.require_auth();
+                first.require_auth();
+            }
+
+            impl Contract {
+                pub fn swap(env: Env, buyer: Address, seller: Address, arbiter: Address) {
+                    require_both(&env, buyer.clone(), &seller);
+                }
+            }
+            "#,
+        );
+        let edits = mutants
+            .iter()
+            .map(|(_, original, replacement, _)| (original.as_str(), replacement.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            edits,
+            vec![
+                ("require_both(&env, buyer.clone(), &seller)", "()"),
+                ("buyer.clone()", "seller.clone()"),
+                ("buyer.clone()", "arbiter.clone()"),
+                ("&seller", "&buyer"),
+                ("&seller", "&arbiter"),
+            ]
+        );
+        assert!(mutants[0]
+            .3
+            .contains("of buyer, seller (sink: first.require_auth(), second.require_auth())"));
+    }
+
+    #[test]
+    fn helper_authorization_rejects_unsupported_helper_shapes() {
+        let mutants = auth_004(
+            r#"
+            fn has_side_effects(owner: &Address, env: &Env) {
+                owner.require_auth();
+                env.storage().instance().set(&DataKey::Seen, &true);
+            }
+            fn authorizes_stored_admin(env: &Env) {
+                let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+                admin.require_auth();
+            }
+            fn untyped_param(owner: &Account) {
+                owner.require_auth();
+            }
+            fn conditional(owner: &Address, enabled: bool) {
+                if enabled {
+                    owner.require_auth();
+                }
+            }
+            fn returns_value(owner: &Address) -> bool {
+                owner.require_auth();
+                true
+            }
+            fn generic<A: Auth>(owner: &A) {
+                owner.require_auth();
+            }
+            fn with_args(owner: &Address, env: &Env) {
+                owner.require_auth_for_args(soroban_sdk::Vec::new(env));
+            }
+            fn empty(owner: &Address) {}
+
+            fn caller(env: Env, from: Address, to: Address) {
+                has_side_effects(&from, &env);
+                authorizes_stored_admin(&env);
+                untyped_param(&from);
+                conditional(&from, true);
+                let _ = returns_value(&from);
+                generic(&from);
+                with_args(&from, &env);
+                empty(&from);
+            }
+            "#,
+        );
+        assert!(mutants.is_empty(), "{mutants:#?}");
+    }
+
+    #[test]
+    fn helper_authorization_rejects_unsupported_call_sites() {
+        let mutants = auth_004(
+            r#"
+            fn require_owner(owner: &Address) {
+                owner.require_auth();
+            }
+
+            fn no_soroban_context(count: u32) {
+                require_owner(&OWNER);
+            }
+
+            fn shadowed(env: Env, from: Address) {
+                let require_owner = |owner: &Address| {};
+                require_owner(&from);
+            }
+
+            fn qualified_or_method(env: Env, from: Address, auth: Auth) {
+                Self::require_owner(&from);
+                crate::require_owner(&from);
+                auth.require_owner(&from);
+                other::require_owner(&from);
+                (require_owner)(&from);
+                require_owner(&from, &from);
+            }
+
+            fn embedded(env: Env, from: Address) -> () {
+                require_owner(&from)
+            }
+
+            mod nested {
+                fn caller(env: Env, from: Address, to: Address) {
+                    require_owner(&from);
+                }
+            }
+            "#,
+        );
+        assert!(mutants.is_empty(), "{mutants:#?}");
+    }
+
+    #[test]
+    fn helper_authorization_removes_but_does_not_redirect_untyped_arguments() {
+        let mutants = auth_004(
+            r#"
+            fn require_owner(owner: &Address) {
+                owner.require_auth();
+            }
+
+            fn caller(env: Env, from: Address, to: Address) {
+                let stored = load_owner(&env);
+                require_owner(&stored);
+                require_owner(&from);
+            }
+            "#,
+        );
+        let edits = mutants
+            .iter()
+            .map(|(_, original, replacement, _)| (original.as_str(), replacement.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            edits,
+            vec![
+                ("require_owner(&stored)", "()"),
+                ("require_owner(&from)", "()"),
+                ("&from", "&to"),
+            ]
+        );
+        assert!(mutants[0].3.contains("authorization of an argument"));
+    }
+
+    #[test]
+    fn helper_sink_still_gets_direct_auth_removal() {
+        let mutants = mutations_for(
+            r#"
+            fn require_owner(owner: &Address) {
+                owner.require_auth();
+            }
+            "#,
+        );
+        assert!(mutants
+            .iter()
+            .any(|m| m.operator == "AUTH-001" && m.function.as_deref() == Some("require_owner")));
+        assert!(mutants.iter().all(|m| m.operator != "AUTH-004"));
+    }
+
     #[test]
     fn generic_require_auth_is_not_treated_as_soroban_authorization() {
         let mutants = mutations_for(
@@ -4047,6 +5025,103 @@ mod tests {
             "#,
         );
         assert!(!mutants.iter().any(|m| m.operator == "TOKEN-004"));
+    }
+
+    #[test]
+    fn allowance_role_swaps_cover_supported_token_calls() {
+        let mutants = mutations_for(
+            r#"
+            fn allowances(env: Env, token: Address, owner: Address, spender: Address, to: Address, amount: i128, expiration_ledger: u32) -> i128 {
+                let client = token::Client::new(&env, &token);
+                client.approve(&owner, &spender, &amount, &expiration_ledger);
+                client.transfer_from(&spender, &owner, &to, &amount);
+                client.burn_from(&spender, &owner, &amount);
+                client.allowance(&owner, &spender)
+            }
+            "#,
+        );
+        let swaps = mutants
+            .iter()
+            .filter(|m| m.operator == "TOKEN-002")
+            .map(|m| {
+                (
+                    m.original.as_str(),
+                    m.replacement.as_str(),
+                    m.description.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            swaps,
+            vec![
+                (
+                    "&owner, &spender",
+                    "&spender, &owner",
+                    "swap token approve() owner/spender arguments (owner <-> spender)",
+                ),
+                (
+                    "&spender, &owner",
+                    "&owner, &spender",
+                    "swap token transfer_from() spender/owner arguments (spender <-> owner)",
+                ),
+                (
+                    "&spender, &owner",
+                    "&owner, &spender",
+                    "swap token burn_from() spender/owner arguments (spender <-> owner)",
+                ),
+                (
+                    "&owner, &spender",
+                    "&spender, &owner",
+                    "swap token allowance() owner/spender arguments (owner <-> spender)",
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn allowance_role_swap_preserves_separator_and_other_arguments() {
+        let source = r#"
+            fn approve(env: Env, token: TokenClient, from: Address, spender: Address, amount: i128) {
+                token.approve(&from,   /* role */ &spender, &amount, &200);
+            }
+            "#;
+        let mutants = mutations_for(source);
+        let swap = mutants
+            .iter()
+            .find(|m| m.operator == "TOKEN-002")
+            .expect("typed token-client parameter should be recognized");
+        assert_eq!(swap.original, "&from,   /* role */ &spender");
+        assert_eq!(swap.replacement, "&spender,   /* role */ &from");
+        assert_eq!(&source[swap.start_byte..swap.end_byte], swap.original);
+    }
+
+    #[test]
+    fn allowance_role_swap_ignores_unrelated_receivers_shapes_and_values() {
+        let mutants = mutations_for(
+            r#"
+            fn not_token(env: Env, registry: Registry, owner: Address, spender: Address, amount: i128) {
+                registry.approve(&owner, &spender, &amount, &100);
+                TokenUtils::new(&env).events().approve(&owner, &spender, &amount, &100);
+                env.events().publish((symbol_short!("approve"),), (&owner, &spender));
+            }
+
+            fn unsupported(env: Env, token: Address, owner: Address, spender: Address, amount: i128) {
+                let client = token::Client::new(&env, &token);
+                let alias = owner.clone();
+                client.approve(&alias, &spender, &amount, &100);
+                client.approve(&owner, &owner, &amount, &100);
+                client.approve(&owner.clone(), &spender, &amount, &100);
+                client.approve(&owner, &spender, &amount);
+                client.transfer_from(&spender, &owner, &amount);
+                client.allowance(&owner);
+                client.transfer(&owner, &spender, &amount);
+            }
+            "#,
+        );
+        assert!(
+            mutants.iter().all(|m| m.operator != "TOKEN-002"),
+            "{mutants:#?}"
+        );
     }
 
     #[test]
@@ -4202,8 +5277,9 @@ mod tests {
             None,
             "cargo test -q",
             Timeouts::resolve(30, None, None),
+            &root.join(".soro-mutants-worktree"),
             &target,
-            true,
+            &[],
         )
         .expect("mutant execution should succeed");
 
@@ -4212,6 +5288,227 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn parallel_workers_never_share_scratch_or_cargo_state_with_each_other_or_baseline() {
+        for (root, target_dir) in [
+            (Path::new("/tmp/example-project"), None),
+            (Path::new("/tmp/example-project"), Some(Path::new("custom"))),
+            (
+                Path::new("/tmp/example-project"),
+                Some(Path::new("/tmp/shared-cache")),
+            ),
+        ] {
+            let (baseline, serial) = target_dirs(root, target_dir);
+            let parallel = parallel_target_root(root, target_dir);
+            assert_eq!(parallel.parent(), baseline.parent());
+            assert!(!parallel.starts_with(&baseline) && !baseline.starts_with(&parallel));
+            assert!(!parallel.starts_with(&serial) && !serial.starts_with(&parallel));
+
+            let workers = (0..4)
+                .map(|worker| worker_paths(root, target_dir, worker))
+                .collect::<Vec<_>>();
+            for (index, (scratch, target)) in workers.iter().enumerate() {
+                assert!(scratch.starts_with(root.join(".soro-mutants-worktree")));
+                assert!(target.starts_with(&parallel));
+                assert!(!target.starts_with(&baseline));
+                for (other_scratch, other_target) in &workers[index + 1..] {
+                    assert!(!scratch.starts_with(other_scratch));
+                    assert!(!other_scratch.starts_with(scratch));
+                    assert!(!target.starts_with(other_target));
+                    assert!(!other_target.starts_with(target));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clean_also_removes_parallel_worker_caches() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("soro-mutants-clean-parallel-{nonce}"));
+        let (_, worker_target) = worker_paths(&root, None, 0);
+        fs::create_dir_all(&worker_target).expect("worker cache should be created");
+        fs::create_dir_all(root.join(".soro-mutants-target/baseline"))
+            .expect("baseline directory should be created");
+
+        let removed = clean_generated_state(&root, None, false).expect("cleanup should succeed");
+
+        assert!(removed.contains(&parallel_target_root(&root, None)));
+        assert!(!root.join(".soro-mutants-target").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Three AUTH-001 mutants whose expected outcomes differ. The test suite
+    /// tolerates exactly one missing guard, so if any mutant leaked into another
+    /// mutant's source tree (two guards missing at once) `b` or `c` would be
+    /// KILLED instead of SURVIVED.
+    fn write_leak_detection_fixture(root: &Path) {
+        fs::create_dir_all(root.join("src")).expect("fixture directory should be created");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "parallel-leak-fixture"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+"#,
+        )
+        .expect("fixture manifest should be written");
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+use std::cell::Cell;
+
+thread_local! {
+    static AUTHS: Cell<u32> = const { Cell::new(0) };
+}
+
+pub struct Address;
+
+impl Address {
+    pub fn require_auth(&self) {
+        AUTHS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+pub fn auths() -> u32 {
+    AUTHS.with(Cell::get)
+}
+
+pub fn a(user: Address) {
+    user.require_auth();
+}
+
+pub fn b(user: Address) {
+    user.require_auth();
+}
+
+pub fn c(user: Address) {
+    user.require_auth();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_is_guarded() {
+        a(Address);
+        assert_eq!(auths(), 1);
+    }
+
+    #[test]
+    fn at_most_one_guard_is_missing() {
+        a(Address);
+        b(Address);
+        c(Address);
+        assert!(auths() >= 2);
+    }
+}
+"#,
+        )
+        .expect("fixture source should be written");
+    }
+
+    #[test]
+    fn parallel_execution_isolates_mutants_and_reports_in_input_order() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("soro-mutants-parallel-{nonce}"));
+        let cache = env::temp_dir().join(format!("soro-mutants-parallel-cache-{nonce}"));
+        write_leak_detection_fixture(&root);
+        let original_source = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        let (baseline, _) = target_dirs(&root, Some(&cache));
+        fs::create_dir_all(&baseline).unwrap();
+        fs::write(baseline.join("sentinel"), "baseline").unwrap();
+
+        let mutants = discover_mutants(&root, Some("AUTH-001"), None, None, &GlobSet::empty())
+            .expect("fixture mutation discovery should work");
+        let functions = mutants
+            .iter()
+            .map(|m| m.function.clone().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(functions, ["a", "b", "c"]);
+
+        for jobs in [1, 3, 8] {
+            let mut reported = Vec::new();
+            let outcomes = execute_mutants(
+                &root,
+                &mutants,
+                &ExecutionSettings {
+                    test_dir: None,
+                    test_command: "cargo test -q",
+                    timeouts: Timeouts::resolve(120, None, None),
+                    target_dir: Some(&cache),
+                    jobs,
+                },
+                &mut |mutant, outcome| {
+                    reported.push((mutant.id.clone(), outcome_label(outcome)));
+                    Ok(())
+                },
+            )
+            .expect("mutant execution should succeed");
+
+            let labels = outcomes.iter().map(outcome_label).collect::<Vec<_>>();
+            assert_eq!(labels, ["KILLED", "SURVIVED", "SURVIVED"], "jobs={jobs}");
+            assert_eq!(
+                reported,
+                [
+                    ("M0001".to_owned(), "KILLED"),
+                    ("M0002".to_owned(), "SURVIVED"),
+                    ("M0003".to_owned(), "SURVIVED"),
+                ],
+                "jobs={jobs}: results must be reported in mutant order"
+            );
+            assert!(!root.join(".soro-mutants-worktree").exists(), "jobs={jobs}");
+            assert_eq!(
+                fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+                original_source,
+                "jobs={jobs}: the target repository must never be mutated"
+            );
+        }
+
+        // Mutant builds never touched the baseline cache.
+        let baseline_entries = fs::read_dir(&baseline)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(baseline_entries, ["sentinel"]);
+        for worker in 0..3 {
+            assert!(worker_paths(&root, Some(&cache), worker).1.exists());
+        }
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn jobs_defaults_to_serial_and_rejects_non_positive_values() {
+        let jobs = |args: &[&str]| {
+            Cli::try_parse_from(["cargo-soro-mutants", "test", "."].iter().chain(args)).map(|cli| {
+                match cli.command {
+                    Commands::Test { jobs, .. } => jobs,
+                    _ => unreachable!("test subcommand"),
+                }
+            })
+        };
+        assert_eq!(jobs(&[]).unwrap(), 1);
+        assert_eq!(jobs(&["--jobs", "4"]).unwrap(), 4);
+        assert_eq!(jobs(&["-j", "2"]).unwrap(), 2);
+        for invalid in ["0", "-1", "two"] {
+            assert!(jobs(&["--jobs", invalid]).is_err(), "--jobs {invalid}");
+        }
     }
 
     #[test]
