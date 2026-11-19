@@ -45,6 +45,14 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
         "AUTH-003",
         "replace require_auth_for_args(...) argument set with an empty Soroban Vec",
     ),
+    (
+        "AUTH-004",
+        "skip or redirect authorization through a simple local require_auth() helper",
+    ),
+    (
+        "AUTH-005",
+        "replace a stored admin/owner authority Address with another Address parameter",
+    ),
     ("CALL-001", "replace direct Env::invoke_contract dependency address with another typed Address parameter"),
     ("CALL-002", "replace a generated contract-client call argument with another compatible typed parameter"),
     ("CALL-003", "remove a supported generated contract-client return mismatch check"),
@@ -75,6 +83,10 @@ const BUILTIN_OPERATORS: &[(&str, &str)] = &[
     (
         "TOKEN-001",
         "swap the sender and recipient arguments of a token transfer",
+    ),
+    (
+        "TOKEN-002",
+        "swap the owner and spender Address arguments of a token allowance call",
     ),
     (
         "TOKEN-003",
@@ -195,6 +207,10 @@ enum Commands {
         /// Timeout in seconds for baseline and mutant test commands.
         #[arg(long)]
         test_timeout: Option<u64>,
+        /// Number of mutants to execute concurrently (1 keeps serial execution).
+        /// Each worker uses its own scratch worktree and Cargo target directory.
+        #[arg(short = 'j', long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
+        jobs: u16,
         /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
@@ -487,6 +503,16 @@ struct FunctionState {
     storage_accessor_vars: Vec<String>,
     numeric_params: Vec<String>,
     env_params: Vec<String>,
+    local_bindings: std::collections::HashSet<String>,
+}
+
+/// A file-level helper whose whole body is `param.require_auth();` statements
+/// over explicitly typed `Address` parameters (AUTH-004).
+#[derive(Clone, Debug)]
+struct AuthHelper {
+    arity: usize,
+    /// `(argument index, helper parameter name, parameter is a reference)`.
+    sinks: Vec<(usize, String, bool)>,
 }
 
 struct SemanticVisitor<'a> {
@@ -501,6 +527,9 @@ struct SemanticVisitor<'a> {
     env_params: Vec<String>,
     typed_event_structs: std::collections::HashSet<String>,
     typed_event_topic_fields: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    auth_helpers: std::collections::HashMap<String, AuthHelper>,
+    module_depth: usize,
+    local_bindings: std::collections::HashSet<String>,
     mutants: Vec<Mutant>,
 }
 
@@ -518,12 +547,18 @@ impl<'a> SemanticVisitor<'a> {
             env_params: Vec::new(),
             typed_event_structs: std::collections::HashSet::new(),
             typed_event_topic_fields: std::collections::HashMap::new(),
+            auth_helpers: std::collections::HashMap::new(),
+            module_depth: 0,
+            local_bindings: std::collections::HashSet::new(),
             mutants: Vec::new(),
         }
     }
 
-    fn enter_signature(&mut self, sig: &Signature) -> FunctionState {
+    fn enter_signature(&mut self, sig: &Signature, body: &syn::Block) -> FunctionState {
+        let mut bindings = BindingNames::default();
+        bindings.visit_block(body);
         FunctionState {
+            local_bindings: std::mem::replace(&mut self.local_bindings, bindings.0),
             current_function: self.current_function.replace(sig.ident.to_string()),
             address_params: std::mem::replace(&mut self.address_params, address_params(sig)),
             token_client_vars: std::mem::replace(
@@ -545,6 +580,99 @@ impl<'a> SemanticVisitor<'a> {
         self.storage_accessor_vars = previous.storage_accessor_vars;
         self.numeric_params = previous.numeric_params;
         self.env_params = previous.env_params;
+        self.local_bindings = previous.local_bindings;
+    }
+
+    /// AUTH-004: mutate a direct statement call to a simple local auth helper.
+    fn push_auth_helper_mutants(&mut self, call: &syn::ExprCall) {
+        if self.module_depth != 0
+            || self.current_function.is_none()
+            || (self.env_params.is_empty() && self.address_params.is_empty())
+        {
+            return;
+        }
+        let Expr::Path(path) = call.func.as_ref() else {
+            return;
+        };
+        if path.qself.is_some()
+            || path.path.leading_colon.is_some()
+            || path.path.segments.len() != 1
+            || !path.path.segments[0].arguments.is_none()
+        {
+            return;
+        }
+        let helper_name = path.path.segments[0].ident.to_string();
+        if self.local_bindings.contains(&helper_name)
+            || self.address_params.contains(&helper_name)
+            || self.env_params.contains(&helper_name)
+        {
+            return;
+        }
+        let Some(helper) = self.auth_helpers.get(&helper_name).cloned() else {
+            return;
+        };
+        if call.args.len() != helper.arity {
+            return;
+        }
+
+        let args = call.args.iter().collect::<Vec<_>>();
+        let address_params = self.address_params.clone();
+        let caller_address = |arg: &Expr| -> Option<String> {
+            let name = match arg {
+                Expr::Reference(reference) if reference.mutability.is_none() => {
+                    receiver_ident(&reference.expr)
+                }
+                Expr::MethodCall(clone) if clone.method == "clone" && clone.args.is_empty() => {
+                    receiver_ident(&clone.receiver)
+                }
+                Expr::Path(_) => receiver_ident(arg),
+                _ => None,
+            }?;
+            address_params.contains(&name).then_some(name)
+        };
+
+        let sink_names = helper
+            .sinks
+            .iter()
+            .map(|(_, param, _)| format!("{param}.require_auth()"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let authorized = helper
+            .sinks
+            .iter()
+            .map(|(index, _, _)| {
+                caller_address(args[*index]).unwrap_or_else(|| "an argument".to_owned())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.push_mutant(
+            "AUTH-004",
+            call.span(),
+            "()".to_owned(),
+            format!("skip {helper_name}() authorization of {authorized} (sink: {sink_names})"),
+        );
+
+        for (index, param, is_ref) in &helper.sinks {
+            let argument = args[*index];
+            let Some(original) = caller_address(argument) else {
+                continue;
+            };
+            for alternate in address_params.iter().filter(|name| *name != &original) {
+                let replacement = if *is_ref {
+                    format!("&{alternate}")
+                } else {
+                    format!("{alternate}.clone()")
+                };
+                self.push_mutant(
+                    "AUTH-004",
+                    argument.span(),
+                    replacement,
+                    format!(
+                        "authenticate {alternate} instead of {original} via {helper_name}() (sink: {param}.require_auth())"
+                    ),
+                );
+            }
+        }
     }
 
     fn push_mutant(
@@ -574,6 +702,205 @@ impl<'a> SemanticVisitor<'a> {
             end_byte: end,
         });
     }
+
+    /// TOKEN-002: swap the two leading `Address` role arguments of a supported
+    /// allowance-related token-client call (owner/spender or spender/owner).
+    ///
+    /// Both arguments must be `&ident` references to distinct, explicitly typed
+    /// `Address` parameters of the enclosing function. The edit covers the span
+    /// from the first role argument to the second, preserving the separator text.
+    fn push_allowance_role_swap(&mut self, node: &ExprMethodCall, role_a: &str, role_b: &str) {
+        let mut args = node.args.iter();
+        let (Some(first), Some(second)) = (args.next(), args.next()) else {
+            return;
+        };
+        let typed_address_ref = |arg: &Expr| match arg {
+            Expr::Reference(reference) if reference.mutability.is_none() => {
+                receiver_ident(&reference.expr).filter(|name| self.address_params.contains(name))
+            }
+            _ => None,
+        };
+        let (Some(first_name), Some(second_name)) =
+            (typed_address_ref(first), typed_address_ref(second))
+        else {
+            return;
+        };
+        if first_name == second_name {
+            return;
+        }
+        let (
+            Some((first_start, first_end, first_span)),
+            Some((second_start, second_end, second_span)),
+        ) = (
+            span_to_offsets(self.source, first.span()),
+            span_to_offsets(self.source, second.span()),
+        )
+        else {
+            return;
+        };
+        if !(first_start < first_end && first_end <= second_start && second_start < second_end)
+            || second_end > self.source.len()
+        {
+            return;
+        }
+
+        let replacement = format!(
+            "{}{}{}",
+            &self.source[second_start..second_end],
+            &self.source[first_end..second_start],
+            &self.source[first_start..first_end],
+        );
+        let method = node.method.to_string();
+        self.mutants.push(Mutant {
+            id: String::new(),
+            operator: "TOKEN-002".to_owned(),
+            file: self.file.clone(),
+            function: self.current_function.clone(),
+            span: SourceSpan {
+                line: first_span.line,
+                column: first_span.column,
+                end_line: second_span.end_line,
+                end_column: second_span.end_column,
+            },
+            original: self.source[first_start..second_end].to_string(),
+            replacement,
+            description: format!(
+                "swap token {method}() {role_a}/{role_b} arguments ({first_name} <-> {second_name})"
+            ),
+            start_byte: first_start,
+            end_byte: second_end,
+        });
+    }
+
+    /// AUTH-005: substitute a recoverable stored admin/owner authority.
+    ///
+    /// The supported retrieval pattern is a local bound exactly once in the
+    /// enclosing function, explicitly typed `Address` (by annotation or by a
+    /// `get::<_, Address>` turbofish), and initialized directly from
+    /// `<env>.storage().<instance|persistent|temporary>().get(key)` followed by
+    /// `.unwrap()` or `.expect(..)`, where `<env>` is an explicit `Env`
+    /// parameter. The local is treated as a privileged authority only when it
+    /// is the receiver of `require_auth()` / `require_auth_for_args(..)` in the
+    /// same function. The loaded value is replaced with `<alternate>.clone()`
+    /// for each explicit `Address` parameter, in signature order.
+    fn push_stored_authority_mutants(&mut self, body: &syn::Block) {
+        if self.env_params.is_empty() || self.address_params.is_empty() {
+            return;
+        }
+
+        let mut scan = AuthorityScan::default();
+        scan.visit_block(body);
+
+        let mut candidates = Vec::new();
+        for local in &scan.locals {
+            let Some((name, init)) = local_binding_name_and_init(local) else {
+                continue;
+            };
+            if local
+                .init
+                .as_ref()
+                .is_some_and(|init| init.diverge.is_some())
+                || !scan.auth_receivers.contains(&name)
+                || scan.bound_names.get(&name).copied() != Some(1)
+                || self.address_params.contains(&name)
+                || self.env_params.contains(&name)
+            {
+                continue;
+            }
+            let annotated_address =
+                matches!(&local.pat, Pat::Type(typed) if type_is_address(&typed.ty));
+            let Some(turbofish_address) = stored_authority_lookup(init, &self.env_params) else {
+                continue;
+            };
+            if annotated_address || turbofish_address {
+                candidates.push((name, init.span()));
+            }
+        }
+
+        for (name, span) in candidates {
+            for alternate in self.address_params.clone() {
+                self.push_mutant(
+                    "AUTH-005",
+                    span,
+                    format!("{alternate}.clone()"),
+                    format!("use {alternate} instead of stored authority {name}"),
+                );
+            }
+        }
+    }
+}
+
+/// Function-body scan used by AUTH-005. Nested items are skipped because they
+/// form their own scope and are visited separately.
+#[derive(Default)]
+struct AuthorityScan<'ast> {
+    locals: Vec<&'ast Local>,
+    bound_names: std::collections::HashMap<String, usize>,
+    auth_receivers: std::collections::HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for AuthorityScan<'ast> {
+    fn visit_item(&mut self, _node: &'ast Item) {}
+
+    fn visit_local(&mut self, node: &'ast Local) {
+        self.locals.push(node);
+        visit::visit_local(self, node);
+    }
+
+    fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+        *self.bound_names.entry(node.ident.to_string()).or_default() += 1;
+        visit::visit_pat_ident(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let is_auth_sink = (node.method == "require_auth" && node.args.is_empty())
+            || (node.method == "require_auth_for_args" && node.args.len() == 1);
+        if is_auth_sink {
+            if let Some(name) = receiver_ident(&node.receiver) {
+                self.auth_receivers.insert(name);
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// Recognizes `<env>.storage().<class>().get(key).unwrap()` or `.expect(..)`
+/// rooted at an explicit `Env` parameter. Returns `Some(true)` when the `get`
+/// call carries an explicit `Address` value type in its turbofish, `Some(false)`
+/// for a supported lookup without one, and `None` for anything else.
+fn stored_authority_lookup(expr: &Expr, env_params: &[String]) -> Option<bool> {
+    let Expr::MethodCall(unwrap) = expr else {
+        return None;
+    };
+    let unwraps = (unwrap.method == "unwrap" && unwrap.args.is_empty())
+        || (unwrap.method == "expect" && unwrap.args.len() == 1);
+    if !unwraps {
+        return None;
+    }
+    let Expr::MethodCall(get) = unwrap.receiver.as_ref() else {
+        return None;
+    };
+    if get.method != "get" || get.args.len() != 1 {
+        return None;
+    }
+    let Expr::MethodCall(class) = get.receiver.as_ref() else {
+        return None;
+    };
+    if !matches!(
+        class.method.to_string().as_str(),
+        "instance" | "persistent" | "temporary"
+    ) || !class.args.is_empty()
+        || !is_direct_env_storage_receiver(&class.receiver, env_params)
+    {
+        return None;
+    }
+    let turbofish_address = get.turbofish.as_ref().is_some_and(|turbofish| {
+        matches!(
+            turbofish.args.last(),
+            Some(syn::GenericArgument::Type(ty)) if type_is_address(ty)
+        )
+    });
+    Some(turbofish_address)
 }
 
 impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
@@ -625,10 +952,29 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 _ => None,
             })
             .collect();
+        self.auth_helpers = node
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Fn(function) => {
+                    auth_helper(function).map(|helper| (function.sig.ident.to_string(), helper))
+                }
+                _ => None,
+            })
+            .collect();
         visit::visit_file(self, node);
     }
 
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        self.module_depth += 1;
+        visit::visit_item_mod(self, node);
+        self.module_depth -= 1;
+    }
+
     fn visit_stmt(&mut self, node: &'ast Stmt) {
+        if let Stmt::Expr(Expr::Call(call), Some(_)) = node {
+            self.push_auth_helper_mutants(call);
+        }
         if let Stmt::Expr(Expr::MethodCall(call), Some(_)) = node {
             if call.method == "publish" && call.args.len() == 1 {
                 let is_typed_event = match call.receiver.as_ref() {
@@ -652,3707 +998,3 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                     );
 
                     if let Expr::Struct(event) = call.receiver.as_ref() {
-                        let event_name = event.path.get_ident().map(ToString::to_string);
-                        let topic_fields = event_name
-                            .as_ref()
-                            .and_then(|name| self.typed_event_topic_fields.get(name))
-                            .cloned()
-                            .unwrap_or_default();
-                        for field in &event.fields {
-                            let field_name = match &field.member {
-                                syn::Member::Named(name) => name.to_string(),
-                                syn::Member::Unnamed(_) => continue,
-                            };
-
-                            if let Some(original_actor) = receiver_ident(&field.expr) {
-                                if self.address_params.contains(&original_actor) {
-                                    for alternate in self
-                                        .address_params
-                                        .iter()
-                                        .filter(|name| *name != &original_actor)
-                                        .cloned()
-                                        .collect::<Vec<_>>()
-                                    {
-                                        let replacement = if field.colon_token.is_none() {
-                                            format!("{field_name}: {alternate}")
-                                        } else {
-                                            alternate.clone()
-                                        };
-                                        self.push_mutant(
-                                            "EVENT-003",
-                                            field.expr.span(),
-                                            replacement,
-                                            format!(
-                                                "emit {alternate} instead of {original_actor} in event field {field_name}"
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-
-                            if let Some(original_value) = receiver_ident(&field.expr) {
-                                if self.numeric_params.contains(&original_value) {
-                                    let replacement = if field.colon_token.is_none() {
-                                        format!("{field_name}: 0")
-                                    } else {
-                                        "0".to_owned()
-                                    };
-                                    self.push_mutant(
-                                        "EVENT-004",
-                                        field.expr.span(),
-                                        replacement,
-                                        format!(
-                                            "emit zero instead of {original_value} in event field {field_name}"
-                                        ),
-                                    );
-                                }
-                            }
-
-                            if topic_fields.contains(&field_name) {
-                                if let Some(original_topic) = receiver_ident(&field.expr) {
-                                    if self.address_params.contains(&original_topic) {
-                                        for alternate in self
-                                            .address_params
-                                            .iter()
-                                            .filter(|name| *name != &original_topic)
-                                            .cloned()
-                                            .collect::<Vec<_>>()
-                                        {
-                                            let replacement = if field.colon_token.is_none() {
-                                                format!("{field_name}: {alternate}")
-                                            } else {
-                                                alternate.clone()
-                                            };
-                                            self.push_mutant(
-                                                "EVENT-005",
-                                                field.expr.span(),
-                                                replacement,
-                                                format!(
-                                                    "emit topic {alternate} instead of {original_topic} in event field {field_name}"
-                                                ),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        visit::visit_stmt(self, node);
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        let previous = self.enter_signature(&node.sig);
-        visit::visit_item_fn(self, node);
-        self.leave_signature(previous);
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        let previous = self.enter_signature(&node.sig);
-        visit::visit_impl_item_fn(self, node);
-        self.leave_signature(previous);
-    }
-
-    fn visit_local(&mut self, node: &'ast Local) {
-        if let Some((name, init)) = local_binding_name_and_init(node) {
-            if is_token_client_constructor(init) && !self.token_client_vars.contains(&name) {
-                self.token_client_vars.push(name.clone());
-            }
-
-            if is_generated_contract_client_constructor(init)
-                && !self.contract_client_vars.contains(&name)
-            {
-                self.contract_client_vars.push(name.clone());
-            }
-
-            if is_soroban_storage_accessor(init) && !self.storage_accessor_vars.contains(&name) {
-                self.storage_accessor_vars.push(name);
-            }
-        }
-
-        visit::visit_local(self, node);
-    }
-
-    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
-        if let Expr::Binary(binary) = node.cond.as_ref() {
-            if matches!(binary.op, syn::BinOp::Ne(_))
-                && (is_generated_contract_client_method_call(
-                    &binary.left,
-                    &self.contract_client_vars,
-                ) || is_generated_contract_client_method_call(
-                    &binary.right,
-                    &self.contract_client_vars,
-                ))
-            {
-                self.push_mutant(
-                    "CALL-003",
-                    binary.span(),
-                    "false".to_owned(),
-                    "bypass generated contract-client return mismatch check".to_owned(),
-                );
-            }
-        }
-        visit::visit_expr_if(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        if matches!(
-            node.method.to_string().as_str(),
-            "instance" | "persistent" | "temporary"
-        ) && is_direct_env_storage_receiver(&node.receiver, &self.env_params)
-        {
-            let original = node.method.to_string();
-            if let Some(receiver) = source_for_span(self.source, node.receiver.span()) {
-                for alternate in ["instance", "persistent", "temporary"]
-                    .into_iter()
-                    .filter(|candidate| *candidate != original)
-                {
-                    self.push_mutant(
-                        "STORAGE-001",
-                        node.span(),
-                        format!("{receiver}.{alternate}()"),
-                        format!("use {alternate} storage instead of {original}"),
-                    );
-                }
-            }
-        }
-
-        // Only mutate a direct env.invoke_contract call with a simple typed
-        // Address parameter as its first argument. Avoid arbitrary typed inference.
-        if node.method == "invoke_contract"
-            && node.args.len() == 3
-            && receiver_ident(&node.receiver).is_some_and(|name| self.env_params.contains(&name))
-        {
-            if let Some(Expr::Reference(target_ref)) = node.args.first() {
-                if let Some(original_target) = receiver_ident(&target_ref.expr) {
-                    if self.address_params.contains(&original_target) {
-                        for alternate in self
-                            .address_params
-                            .iter()
-                            .filter(|name| *name != &original_target)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                        {
-                            self.push_mutant(
-                                "CALL-001",
-                                target_ref.span(),
-                                format!("&{alternate}"),
-                                format!(
-                                    "invoke contract at {alternate} instead of {original_target}"
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        if receiver_ident(&node.receiver)
-            .is_some_and(|name| self.contract_client_vars.contains(&name))
-        {
-            for argument in &node.args {
-                if let Expr::Reference(reference) = argument {
-                    if let Some(original) = receiver_ident(&reference.expr) {
-                        let candidates = if self.address_params.contains(&original) {
-                            self.address_params
-                                .iter()
-                                .filter(|name| *name != &original)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                        } else if self.numeric_params.contains(&original) {
-                            self.numeric_params
-                                .iter()
-                                .filter(|name| *name != &original)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                        } else {
-                            Vec::new()
-                        };
-                        for alternate in candidates {
-                            self.push_mutant(
-                                "CALL-002",
-                                argument.span(),
-                                format!("&{alternate}"),
-                                format!(
-                                    "pass {alternate} instead of {original} to generated contract client call"
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        if node.method == "publish" && is_soroban_events_receiver(&node.receiver, &self.env_params)
-        {
-            self.push_mutant(
-                "EVENT-001",
-                node.span(),
-                "()".to_string(),
-                "remove Soroban event publication".to_string(),
-            );
-        }
-
-        if node.method == "transfer"
-            && node.args.len() == 3
-            && is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
-        {
-            if let Some(replacement) = swapped_transfer_replacement(self.source, node) {
-                self.push_mutant(
-                    "TOKEN-001",
-                    node.span(),
-                    replacement,
-                    "swap token transfer sender and recipient".to_string(),
-                );
-            }
-
-            if let Some(original_client) = receiver_ident(&node.receiver) {
-                if self.token_client_vars.contains(&original_client) {
-                    for alternate in self
-                        .token_client_vars
-                        .iter()
-                        .filter(|name| *name != &original_client)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                    {
-                        self.push_mutant(
-                            "TOKEN-004",
-                            node.receiver.span(),
-                            alternate.clone(),
-                            format!("use token client {alternate} instead of {original_client}"),
-                        );
-                    }
-                }
-            }
-
-            if let Some(amount_arg) = node.args.iter().nth(2) {
-                if let Expr::Reference(reference) = amount_arg {
-                    if let Some(amount_name) = receiver_ident(&reference.expr) {
-                        if self.numeric_params.contains(&amount_name) {
-                            for (replacement, label) in [("&0", "zero"), ("&1", "one")] {
-                                self.push_mutant(
-                                    "TOKEN-003",
-                                    amount_arg.span(),
-                                    replacement.to_owned(),
-                                    format!("transfer {label} instead of {amount_name}"),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if node.method == "extend_ttl"
-            && is_ttl_receiver(&node.receiver, &self.storage_accessor_vars)
-        {
-            self.push_mutant(
-                "TTL-001",
-                node.span(),
-                "()".to_string(),
-                "remove extend_ttl()".to_string(),
-            );
-            // Instance has two arguments; persistent/temporary keyed storage has three.
-            // Change only the lifecycle parameters, not the key or receiver.
-            if matches!(node.args.len(), 2 | 3) {
-                let args: Vec<_> = node.args.iter().collect();
-                let threshold = args[args.len() - 2];
-                let target = args[args.len() - 1];
-                if source_for_span(self.source, threshold.span())
-                    .is_some_and(|value| value.trim() != "0")
-                {
-                    self.push_mutant(
-                        "TTL-002",
-                        threshold.span(),
-                        "0".to_owned(),
-                        "set TTL renewal threshold to zero".to_owned(),
-                    );
-                }
-                if let (Some(threshold_text), Some(target_text)) = (
-                    source_for_span(self.source, threshold.span()),
-                    source_for_span(self.source, target.span()),
-                ) {
-                    if threshold_text.trim() != target_text.trim() {
-                        self.push_mutant(
-                            "TTL-003",
-                            target.span(),
-                            threshold_text.to_owned(),
-                            "shorten TTL extension target to renewal threshold".to_owned(),
-                        );
-                    }
-                }
-            }
-        }
-
-        if node.method == "require_auth_for_args" && node.args.len() == 1 {
-            if let (Some(receiver), Some(env_name)) =
-                (receiver_ident(&node.receiver), self.env_params.first())
-            {
-                if self.address_params.contains(&receiver) {
-                    let replacement = format!("soroban_sdk::Vec::new(&{})", env_name);
-                    let Some(arguments) = node.args.first() else {
-                        return;
-                    };
-                    if let Some((start, end, _)) = span_to_offsets(self.source, arguments.span()) {
-                        if self.source[start..end] != replacement {
-                            self.push_mutant(
-                                "AUTH-003",
-                                arguments.span(),
-                                replacement,
-                                format!("authorize an empty argument set for {}", receiver),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        if node.method == "require_auth"
-            && (!self.env_params.is_empty() || !self.address_params.is_empty())
-        {
-            let receiver = receiver_ident(&node.receiver);
-
-            self.push_mutant(
-                "AUTH-001",
-                node.span(),
-                "()".to_string(),
-                match &receiver {
-                    Some(name) => format!("remove {}.require_auth()", name),
-                    None => "remove require_auth()".to_string(),
-                },
-            );
-
-            if let Some(receiver_name) = receiver {
-                for candidate in self
-                    .address_params
-                    .iter()
-                    .filter(|candidate| *candidate != &receiver_name)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                {
-                    self.push_mutant(
-                        "AUTH-002",
-                        node.span(),
-                        format!("{}.require_auth()", candidate),
-                        format!("authenticate {} instead of {}", candidate, receiver_name),
-                    );
-                }
-            }
-        }
-
-        visit::visit_expr_method_call(self, node);
-    }
-}
-
-#[derive(Debug)]
-struct BaselineFailure(&'static str);
-
-impl std::fmt::Display for BaselineFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.0)
-    }
-}
-
-impl std::error::Error for BaselineFailure {}
-
-#[derive(Debug)]
-struct ScoreThresholdFailure {
-    actual: f64,
-    minimum: f64,
-}
-
-impl std::fmt::Display for ScoreThresholdFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "semantic score {:.1}% below minimum {:.1}%",
-            self.actual, self.minimum
-        )
-    }
-}
-
-impl std::error::Error for ScoreThresholdFailure {}
-
-fn parse_min_score(value: &str) -> std::result::Result<f64, String> {
-    let score = value
-        .parse::<f64>()
-        .map_err(|_| "score must be a number from 0 to 100".to_owned())?;
-    if !score.is_finite() || !(0.0..=100.0).contains(&score) {
-        return Err("score must be a finite number from 0 to 100".to_owned());
-    }
-    Ok(score)
-}
-
-fn ensure_min_score(results: &[MutantResult], minimum: Option<f64>) -> Result<()> {
-    if let Some(minimum) = minimum {
-        let killed = results
-            .iter()
-            .filter(|r| matches!(r.outcome, Outcome::Killed))
-            .count();
-        let survived = results
-            .iter()
-            .filter(|r| matches!(r.outcome, Outcome::Survived))
-            .count();
-        let viable = killed + survived;
-        let actual = if viable == 0 {
-            0.0
-        } else {
-            killed as f64 * 100.0 / viable as f64
-        };
-        if actual < minimum {
-            return Err(ScoreThresholdFailure { actual, minimum }.into());
-        }
-    }
-    Ok(())
-}
-
-fn main() -> std::process::ExitCode {
-    match run() {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("Error: {error:#}");
-            if error.downcast_ref::<BaselineFailure>().is_some() {
-                std::process::ExitCode::from(3)
-            } else if error.downcast_ref::<ScoreThresholdFailure>().is_some() {
-                std::process::ExitCode::from(4)
-            } else {
-                std::process::ExitCode::FAILURE
-            }
-        }
-    }
-}
-
-fn run() -> Result<()> {
-    let mut command = Cli::command();
-    if env::var_os("NO_COLOR").is_some() {
-        // Apply before parsing so help and argument errors also honor NO_COLOR.
-        command = command.color(ColorChoice::Never);
-    }
-    let matches = command.get_matches_from(normalized_args());
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-
-    match cli.command {
-        Commands::List {
-            path,
-            operator,
-            exclude_path,
-            shard,
-            file,
-            function,
-            changed_file,
-            diff_base,
-            changed_functions,
-            json,
-            count_only,
-            output,
-        } => {
-            let (mutants, suppressed) = discover_mutants_with_suppressions(
-                &path,
-                operator.as_deref(),
-                file.as_deref(),
-                function.as_deref(),
-                &exclusion_set(exclude_path)?,
-            )?;
-            let mutants = filter_changed_mutants(
-                &path,
-                mutants,
-                &changed_file,
-                diff_base.as_deref(),
-                changed_functions,
-            )?;
-            let mutants = select_shard(mutants, shard);
-            let mut report = report_writer(output.as_deref())?;
-            if count_only {
-                writeln!(report, "{}", mutants.len())?;
-            } else if json {
-                writeln!(
-                    report,
-                    "{}",
-                    serde_json::to_string_pretty(&ListReport {
-                        suppression: (!suppressed.is_empty()).then_some(SuppressionSummary {
-                            count: suppressed.len(),
-                            details: &suppressed,
-                        }),
-                        ..list_report(&mutants)
-                    })?
-                )?;
-            } else {
-                print_mutants(&mut report, &mutants)?;
-                print_suppression_summary(&mut report, &suppressed)?;
-            }
-        }
-        Commands::Test {
-            path,
-            operator,
-            exclude_path,
-            shard,
-            file,
-            function,
-            changed_file,
-            diff_base,
-            changed_functions,
-            test_dir,
-            target_dir,
-            test_command,
-            runner,
-            timeout,
-            compile_timeout,
-            test_timeout,
-            json,
-            markdown,
-            html,
-            sarif,
-            github_annotations,
-            github_summary,
-            min_score,
-            output,
-        } => {
-            let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
-            let test_command = resolve_runner_command(runner, &test_command)?;
-            let metadata = RunMetadata::capture(&test_command, timeouts);
-            let root = path
-                .canonicalize()
-                .with_context(|| format!("cannot resolve {}", path.display()))?;
-            let (mutants, suppressed) = discover_mutants_with_suppressions(
-                &root,
-                operator.as_deref(),
-                file.as_deref(),
-                function.as_deref(),
-                &exclusion_set(exclude_path)?,
-            )?;
-            let mutants = filter_changed_mutants(
-                &root,
-                mutants,
-                &changed_file,
-                diff_base.as_deref(),
-                changed_functions,
-            )?;
-            let mutants = select_shard(mutants, shard);
-            if !mutants.is_empty() && runner == Runner::Nextest {
-                ensure_nextest_available()?;
-            }
-            let mut report = report_writer(output.as_deref())?;
-            if mutants.is_empty() {
-                if json {
-                    writeln!(
-                        report,
-                        "{}",
-                        serde_json::to_string_pretty(&TestReport {
-                            suppression: (!suppressed.is_empty()).then_some(SuppressionSummary {
-                                count: suppressed.len(),
-                                details: &suppressed,
-                            }),
-                            ..test_report_with_metadata(&[], &metadata)
-                        })?
-                    )?;
-                } else if markdown {
-                    print_markdown_report(&mut report, &[])?;
-                } else if html {
-                    print_html_report(&mut report, &[])?;
-                } else if sarif {
-                    print_sarif_report(&mut report, &[])?;
-                } else {
-                    writeln!(report, "No matching Soroban semantic mutants found.")?;
-                }
-                if !suppressed.is_empty() && !json {
-                    print_suppression_summary(&mut std::io::stderr(), &suppressed)?;
-                }
-                if github_annotations {
-                    print_github_annotations(&mut std::io::stderr(), &[])?;
-                }
-                if github_summary {
-                    append_github_summary(&[])?;
-                }
-                ensure_min_score(&[], min_score)?;
-                return Ok(());
-            }
-
-            let (baseline_target_dir, mutant_target_root) =
-                target_dirs(&root, target_dir.as_deref());
-            // Keep the clean baseline isolated, but let mutants share a cache.
-            // The scratch path is stable and each source mutation changes file contents,
-            // so Cargo rebuilds the affected crate while reusing dependencies.
-            let shared_target = true;
-            let test_cwd = test_dir
-                .as_deref()
-                .map(|dir| root.join(dir))
-                .unwrap_or_else(|| root.clone());
-            if !json && !markdown && !html && !sarif {
-                writeln!(report, "Baseline: {}", test_command)?;
-            }
-            match run_process(
-                &test_cwd,
-                &test_command,
-                timeouts.test,
-                &baseline_target_dir,
-            )? {
-                ProcessResult::Passed => {
-                    if !json && !markdown && !html && !sarif {
-                        writeln!(report, "Baseline PASS\n")?;
-                    }
-                }
-                ProcessResult::Failed => {
-                    return Err(BaselineFailure(
-                        "baseline tests failed; mutation results would be invalid",
-                    )
-                    .into());
-                }
-                ProcessResult::Timeout => {
-                    return Err(BaselineFailure("baseline tests timed out").into())
-                }
-            }
-
-            let mut results = Vec::new();
-            for mutant in mutants {
-                let outcome = execute_mutant(
-                    &root,
-                    &mutant,
-                    test_dir.as_deref(),
-                    &test_command,
-                    timeouts,
-                    &mutant_target_root,
-                    shared_target,
-                )?;
-                if !json && !markdown && !html && !sarif {
-                    writeln!(
-                        report,
-                        "{:<10} {:<8} {}:{} {}",
-                        outcome_label(&outcome),
-                        mutant.operator,
-                        mutant.file.display(),
-                        mutant.span.line,
-                        mutant.description
-                    )?;
-                }
-                results.push(MutantResult { mutant, outcome });
-            }
-
-            if json {
-                writeln!(
-                    report,
-                    "{}",
-                    serde_json::to_string_pretty(&TestReport {
-                        suppression: (!suppressed.is_empty()).then_some(SuppressionSummary {
-                            count: suppressed.len(),
-                            details: &suppressed,
-                        }),
-                        ..test_report_with_metadata(&results, &metadata)
-                    })?
-                )?;
-            } else if markdown {
-                print_markdown_report(&mut report, &results)?;
-            } else if html {
-                print_html_report(&mut report, &results)?;
-            } else if sarif {
-                print_sarif_report(&mut report, &results)?;
-            } else {
-                print_summary(&mut report, &results)?;
-                print_suppression_summary(&mut report, &suppressed)?;
-            }
-            if !suppressed.is_empty() && (markdown || html || sarif) {
-                print_suppression_summary(&mut std::io::stderr(), &suppressed)?;
-            }
-            if github_annotations {
-                print_github_annotations(&mut std::io::stderr(), &results)?;
-            }
-            if github_summary {
-                append_github_summary(&results)?;
-            }
-            ensure_min_score(&results, min_score)?;
-        }
-        Commands::Clean {
-            path,
-            target_dir,
-            dry_run,
-        } => {
-            let root = path
-                .canonicalize()
-                .with_context(|| format!("cannot resolve {}", path.display()))?;
-            let paths = clean_generated_state(&root, target_dir.as_deref(), dry_run)?;
-            if paths.is_empty() {
-                println!("No Soro Mutants generated state found.");
-            } else {
-                for path in paths {
-                    println!(
-                        "{} {}",
-                        if dry_run { "Would remove" } else { "Removed" },
-                        path.display()
-                    );
-                }
-            }
-        }
-        Commands::ValidateCorpus { path } => {
-            let count = validate_corpus(&path)?;
-            println!("Validated {count} corpus entries (schema version 1).");
-        }
-        Commands::Operators => {
-            print_operators(&mut io::stdout())?;
-        }
-        Commands::Completions { shell } => {
-            let mut cmd = Cli::command();
-            generate(
-                Shell::from(shell),
-                &mut cmd,
-                "cargo-soro-mutants",
-                &mut io::stdout(),
-            );
-        }
-    }
-
-    Ok(())
-}
-
-const CORPUS_SCHEMA_VERSION: u32 = 1;
-
-#[derive(Deserialize)]
-struct CorpusManifest {
-    schema_version: u32,
-    entries: Vec<CorpusEntry>,
-}
-
-#[derive(Deserialize)]
-struct CorpusEntry {
-    id: String,
-    operator: String,
-    source_pattern: CorpusSourcePattern,
-    mutation: CorpusMutation,
-    expectations: CorpusExpectations,
-    provenance: CorpusProvenance,
-}
-
-#[derive(Deserialize)]
-struct CorpusSourcePattern {
-    language: String,
-    code: String,
-}
-
-#[derive(Deserialize)]
-struct CorpusMutation {
-    original: String,
-    replacement: String,
-}
-
-#[derive(Deserialize)]
-struct CorpusExpectations {
-    weak: String,
-    strong: String,
-}
-
-#[derive(Deserialize)]
-struct CorpusProvenance {
-    kind: String,
-    reference: String,
-}
-
-fn validate_corpus(path: &Path) -> Result<usize> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("cannot read corpus manifest {}", path.display()))?;
-    let manifest: CorpusManifest = serde_json::from_str(&content)
-        .with_context(|| format!("invalid corpus manifest JSON at {}", path.display()))?;
-    if manifest.schema_version != CORPUS_SCHEMA_VERSION {
-        bail!(
-            "unsupported corpus schema_version {}; expected {}",
-            manifest.schema_version,
-            CORPUS_SCHEMA_VERSION
-        );
-    }
-    if manifest.entries.is_empty() {
-        bail!("corpus manifest entries must not be empty");
-    }
-    let mut seen = std::collections::HashSet::new();
-    for (index, entry) in manifest.entries.iter().enumerate() {
-        let location = format!("entries[{index}]");
-        if entry.id.trim().is_empty() {
-            bail!("{location}.id must not be empty");
-        }
-        if !seen.insert(entry.id.as_str()) {
-            bail!("{location}.id is duplicate: {}", entry.id);
-        }
-        let valid_operator = entry
-            .operator
-            .split_once('-')
-            .is_some_and(|(name, number)| {
-                !name.is_empty()
-                    && name.bytes().all(|byte| byte.is_ascii_uppercase())
-                    && number.len() == 3
-                    && number.bytes().all(|byte| byte.is_ascii_digit())
-            });
-        if !valid_operator {
-            bail!("{location}.operator must match NAME-000 (uppercase family, three digits)");
-        }
-        if entry.source_pattern.language != "rust" {
-            bail!("{location}.source_pattern.language must be rust");
-        }
-        for (field, value) in [
-            ("source_pattern.code", entry.source_pattern.code.as_str()),
-            ("mutation.original", entry.mutation.original.as_str()),
-            ("mutation.replacement", entry.mutation.replacement.as_str()),
-            ("provenance.kind", entry.provenance.kind.as_str()),
-            ("provenance.reference", entry.provenance.reference.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                bail!("{location}.{field} must not be empty");
-            }
-        }
-        if entry.mutation.original == entry.mutation.replacement {
-            bail!("{location}.mutation replacement must differ from original");
-        }
-        for (field, value) in [
-            ("expectations.weak", entry.expectations.weak.as_str()),
-            ("expectations.strong", entry.expectations.strong.as_str()),
-        ] {
-            if !matches!(value, "KILLED" | "SURVIVED" | "UNVIABLE" | "TIMEOUT") {
-                bail!("{location}.{field} must be a known mutation outcome");
-            }
-        }
-    }
-    Ok(manifest.entries.len())
-}
-
-fn append_github_summary(results: &[MutantResult]) -> Result<()> {
-    let Some(path) = env::var_os("GITHUB_STEP_SUMMARY").filter(|value| !value.is_empty()) else {
-        // An explicit opt-in remains safe for local runs and non-GitHub CI.
-        return Ok(());
-    };
-    let path = PathBuf::from(path);
-    let mut summary = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("cannot append GitHub job summary at {}", path.display()))?;
-    print_markdown_report(&mut summary, results)?;
-    Ok(())
-}
-
-fn report_writer(output: Option<&Path>) -> Result<Box<dyn Write>> {
-    match output {
-        Some(path) => {
-            let file = fs::File::create(path)
-                .with_context(|| format!("cannot create report at {}", path.display()))?;
-            Ok(Box::new(file))
-        }
-        None => Ok(Box::new(io::stdout())),
-    }
-}
-
-fn normalized_args() -> Vec<OsString> {
-    let mut args: Vec<OsString> = env::args_os().collect();
-    if args
-        .get(1)
-        .map(|arg| arg.to_string_lossy() == "soro-mutants")
-        .unwrap_or(false)
-    {
-        args.remove(1);
-    }
-    args
-}
-
-fn filter_changed_mutants(
-    root: &Path,
-    mutants: Vec<Mutant>,
-    changed_files: &[PathBuf],
-    diff_base: Option<&str>,
-    functions_only: bool,
-) -> Result<Vec<Mutant>> {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    if changed_files.is_empty() && diff_base.is_none() {
-        return Ok(mutants);
-    }
-    let root = root.canonicalize()?;
-    let mut selected = BTreeSet::new();
-    let mut git_top = None;
-
-    if let Some(base) = diff_base {
-        if base.starts_with('-') || base.is_empty() {
-            bail!("invalid Git diff base revision");
-        }
-        let output = Command::new("git")
-            .args([
-                "-C",
-                root.to_str().unwrap_or("."),
-                "rev-parse",
-                "--show-toplevel",
-            ])
-            .output()
-            .context("cannot locate Git repository")?;
-        if !output.status.success() {
-            bail!("Git repository metadata is unavailable for --diff-base");
-        }
-        let top = PathBuf::from(String::from_utf8(output.stdout)?.trim()).canonicalize()?;
-        let diff = Command::new("git")
-            .arg("-C")
-            .arg(&top)
-            .args([
-                "diff",
-                "--no-ext-diff",
-                "--find-renames",
-                "--diff-filter=ACMR",
-                "--name-only",
-                "-z",
-            ])
-            .arg(base)
-            .arg("--")
-            .output()
-            .context("cannot execute git diff")?;
-        if !diff.status.success() {
-            bail!(
-                "git diff failed for base {base}: {}",
-                String::from_utf8_lossy(&diff.stderr).trim()
-            );
-        }
-        for file in diff
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|value| !value.is_empty())
-        {
-            let full = top.join(String::from_utf8_lossy(file).as_ref());
-            if let Ok(relative) = full.strip_prefix(&root) {
-                selected.insert(relative.to_string_lossy().replace('\\', "/"));
-            }
-        }
-        git_top = Some(top);
-    } else {
-        for file in changed_files {
-            let absolute = root.join(file);
-            let relative = absolute.strip_prefix(&root).unwrap_or(file);
-            if relative.components().any(|part| {
-                matches!(
-                    part,
-                    std::path::Component::ParentDir
-                        | std::path::Component::RootDir
-                        | std::path::Component::Prefix(_)
-                )
-            }) {
-                bail!(
-                    "--changed-file must be a project-relative path without ..: {}",
-                    file.display()
-                );
-            }
-            selected.insert(relative.to_string_lossy().replace('\\', "/"));
-        }
-    }
-
-    let mut matching: Vec<Mutant> = mutants
-        .into_iter()
-        .filter(|mutant| selected.contains(&mutant.file.to_string_lossy().replace('\\', "/")))
-        .collect();
-    if !functions_only || matching.is_empty() {
-        return Ok(matching);
-    }
-
-    let Some(diff_base) = diff_base else {
-        return Ok(matching);
-    };
-    let ranges = changed_line_ranges(&root, git_top.as_deref().unwrap_or(&root), diff_base)?;
-    type FunctionSpan = (String, usize, usize);
-    let mut touched: BTreeMap<String, Option<Vec<FunctionSpan>>> = BTreeMap::new();
-    for mutant in &matching {
-        let path = mutant.file.to_string_lossy().replace('\\', "/");
-        if touched.contains_key(&path) {
-            continue;
-        }
-        let Some(changes) = ranges.get(&path) else {
-            touched.insert(path, None);
-            continue;
-        };
-        let source_path = root.join(&mutant.file);
-        let source = read_rust_source(&source_path)?;
-        validate_source_nesting(&source, &source_path)?;
-        let syntax = match syn::parse_file(&source) {
-            Ok(syntax) => syntax,
-            Err(_) => {
-                touched.insert(path, None);
-                continue;
-            }
-        };
-        let mut collector = ChangedFunctionCollector { spans: Vec::new() };
-        collector.visit_file(&syntax);
-        let matching_functions: Vec<_> = collector
-            .spans
-            .into_iter()
-            .filter(|(_, first, last)| {
-                changes
-                    .iter()
-                    .any(|(from, to)| *first <= *to && *last >= *from)
-            })
-            .collect();
-        touched.insert(
-            path,
-            if matching_functions.is_empty() {
-                None
-            } else {
-                Some(matching_functions)
-            },
-        );
-    }
-    matching.retain(|mutant| {
-        let path = mutant.file.to_string_lossy().replace('\\', "/");
-        match touched.get(&path).and_then(|functions| functions.as_ref()) {
-            // When the diff cannot be mapped to a function, retain file-level selection.
-            None => true,
-            Some(functions) => {
-                let Some(name) = mutant.function.as_deref() else {
-                    return true;
-                };
-                functions.iter().any(|(function, from, to)| {
-                    function == name && *from <= mutant.span.line && mutant.span.line <= *to
-                })
-            }
-        }
-    });
-    Ok(matching)
-}
-
-struct ChangedFunctionCollector {
-    spans: Vec<(String, usize, usize)>,
-}
-
-impl<'ast> Visit<'ast> for ChangedFunctionCollector {
-    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        let span = node.span();
-        self.spans.push((
-            node.sig.ident.to_string(),
-            span.start().line,
-            span.end().line,
-        ));
-        visit::visit_item_fn(self, node);
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast ImplItemFn) {
-        let span = node.span();
-        self.spans.push((
-            node.sig.ident.to_string(),
-            span.start().line,
-            span.end().line,
-        ));
-        visit::visit_impl_item_fn(self, node);
-    }
-}
-
-fn changed_line_ranges(
-    root: &Path,
-    git_top: &Path,
-    base: &str,
-) -> Result<std::collections::BTreeMap<String, Vec<(usize, usize)>>> {
-    use std::collections::BTreeMap;
-    let diff = Command::new("git")
-        .args(["-c", "core.quotePath=false", "-C"])
-        .arg(git_top)
-        .args([
-            "diff",
-            "--no-ext-diff",
-            "--no-color",
-            "--no-renames",
-            "--unified=0",
-        ])
-        .arg(base)
-        .arg("--")
-        .output()
-        .context("cannot execute git diff for changed functions")?;
-    if !diff.status.success() {
-        bail!(
-            "git diff failed for base {base}: {}",
-            String::from_utf8_lossy(&diff.stderr).trim()
-        );
-    }
-    let mut ranges: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
-    let mut current = None;
-    for line in String::from_utf8_lossy(&diff.stdout).lines() {
-        if let Some(name) = line.strip_prefix("+++ b/") {
-            current = git_top
-                .join(name)
-                .strip_prefix(root)
-                .ok()
-                .map(|path| path.to_string_lossy().replace('\\', "/"));
-        } else if let Some(hunk) = line.strip_prefix("@@ ") {
-            let Some(path) = current.as_ref() else {
-                continue;
-            };
-            let Some(new_lines) = hunk.split_whitespace().find(|part| part.starts_with('+')) else {
-                continue;
-            };
-            let mut parts = new_lines.trim_start_matches('+').split(',');
-            let Ok(start) = parts.next().unwrap_or("").parse::<usize>() else {
-                continue;
-            };
-            let count = parts
-                .next()
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(1);
-            let end = start.saturating_add(count.saturating_sub(1));
-            ranges.entry(path.clone()).or_default().push((start, end));
-        }
-    }
-    Ok(ranges)
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct SuppressedMutant {
-    operator: String,
-    reason: &'static str,
-}
-
-fn suppress_equivalent_mutants(mutants: Vec<Mutant>) -> (Vec<Mutant>, Vec<SuppressedMutant>) {
-    use std::collections::HashSet;
-
-    let mut seen = HashSet::new();
-    let mut retained = Vec::with_capacity(mutants.len());
-    let mut suppressed = Vec::new();
-    for mutant in mutants {
-        let reason = if mutant.original == mutant.replacement {
-            Some("unchanged replacement")
-        } else if !seen.insert((
-            mutant.file.clone(),
-            mutant.start_byte,
-            mutant.end_byte,
-            mutant.original.clone(),
-            mutant.replacement.clone(),
-        )) {
-            Some("duplicate source edit")
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            suppressed.push(SuppressedMutant {
-                operator: mutant.operator,
-                reason,
-            });
-        } else {
-            retained.push(mutant);
-        }
-    }
-    (retained, suppressed)
-}
-
-#[cfg(test)]
-fn discover_mutants(
-    root: &Path,
-    operator: Option<&str>,
-    file_filter: Option<&str>,
-    function_filter: Option<&str>,
-    exclusions: &GlobSet,
-) -> Result<Vec<Mutant>> {
-    Ok(discover_mutants_with_suppressions(
-        root,
-        operator,
-        file_filter,
-        function_filter,
-        exclusions,
-    )?
-    .0)
-}
-
-const MAX_RUST_SYNTAX_NESTING: usize = 256;
-
-fn validate_source_nesting(source: &str, path: &Path) -> Result<()> {
-    let bytes = source.as_bytes();
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut line_comment = false;
-    let mut block_comment = 0usize;
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        if line_comment {
-            if bytes[i] == b'\n' {
-                line_comment = false;
-            }
-            i += 1;
-            continue;
-        }
-        if block_comment > 0 {
-            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-                block_comment += 1;
-                i += 2;
-                continue;
-            }
-            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
-                block_comment -= 1;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if bytes[i] == b'\\' {
-                escaped = true;
-            } else if bytes[i] == b'"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            line_comment = true;
-            i += 2;
-            continue;
-        }
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            block_comment = 1;
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'"' {
-            in_string = true;
-            i += 1;
-            continue;
-        }
-
-        match bytes[i] {
-            b'(' | b'[' | b'{' => {
-                depth += 1;
-                if depth > MAX_RUST_SYNTAX_NESTING {
-                    bail!(
-                        "Rust source nesting in {} exceeds supported depth {}",
-                        path.display(),
-                        MAX_RUST_SYNTAX_NESTING
-                    );
-                }
-            }
-            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        i += 1;
-    }
-    Ok(())
-}
-
-const MAX_RUST_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
-
-fn read_rust_source(path: &Path) -> Result<String> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("cannot inspect {}", path.display()))?;
-    if metadata.len() > MAX_RUST_SOURCE_BYTES {
-        bail!(
-            "Rust source file {} is {} bytes; maximum supported size is {} bytes",
-            path.display(),
-            metadata.len(),
-            MAX_RUST_SOURCE_BYTES
-        );
-    }
-    fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))
-}
-
-fn discover_mutants_with_suppressions(
-    root: &Path,
-    operator: Option<&str>,
-    file_filter: Option<&str>,
-    function_filter: Option<&str>,
-    exclusions: &GlobSet,
-) -> Result<(Vec<Mutant>, Vec<SuppressedMutant>)> {
-    let root = root
-        .canonicalize()
-        .with_context(|| format!("cannot resolve {}", root.display()))?;
-    let mut mutants = Vec::new();
-
-    for entry in WalkDir::new(&root).into_iter().filter_entry(|entry| {
-        !ignored_entry(entry, &root)
-            && (entry.path() == root
-                || !exclusions.is_match(entry.path().strip_prefix(&root).unwrap_or(entry.path())))
-    }) {
-        let entry = entry?;
-        if !entry.file_type().is_file()
-            || entry.path().extension().and_then(|s| s.to_str()) != Some("rs")
-        {
-            continue;
-        }
-
-        let source = read_rust_source(entry.path())?;
-        validate_source_nesting(&source, entry.path())?;
-        let syntax = match syn::parse_file(&source) {
-            Ok(file) => file,
-            Err(_) => continue,
-        };
-        let relative = entry
-            .path()
-            .strip_prefix(&root)
-            .unwrap_or(entry.path())
-            .to_path_buf();
-
-        let mut visitor = SemanticVisitor::new(&source, relative);
-        visitor.visit_file(&syntax);
-        mutants.extend(visitor.mutants);
-    }
-
-    if let Some(operator) = operator {
-        mutants.retain(|m| m.operator == operator);
-    }
-    if let Some(file_filter) = file_filter {
-        let normalized = file_filter.replace('\\', "/");
-        mutants.retain(|m| {
-            m.file
-                .to_string_lossy()
-                .replace('\\', "/")
-                .ends_with(&normalized)
-        });
-    }
-    if let Some(function_filter) = function_filter {
-        mutants.retain(|m| m.function.as_deref() == Some(function_filter));
-    }
-
-    let (mut mutants, suppressed) = suppress_equivalent_mutants(mutants);
-
-    // Total ordering must never inherit WalkDir's filesystem-dependent traversal order.
-    // Keep the first four keys stable: IDs and shard assignments depend on them.
-    mutants.sort_by(|a, b| {
-        a.file
-            .cmp(&b.file)
-            .then(a.start_byte.cmp(&b.start_byte))
-            .then(a.operator.cmp(&b.operator))
-            .then(a.replacement.cmp(&b.replacement))
-            .then(a.end_byte.cmp(&b.end_byte))
-            .then(a.original.cmp(&b.original))
-            .then(a.function.cmp(&b.function))
-            .then(a.description.cmp(&b.description))
-    });
-
-    for (index, mutant) in mutants.iter_mut().enumerate() {
-        mutant.id = format!("M{:04}", index + 1);
-    }
-
-    Ok((mutants, suppressed))
-}
-
-fn address_params(sig: &Signature) -> Vec<String> {
-    sig.inputs
-        .iter()
-        .filter_map(|input| match input {
-            FnArg::Typed(pat_type) if type_is_address(&pat_type.ty) => {
-                match pat_type.pat.as_ref() {
-                    Pat::Ident(ident) => Some(ident.ident.to_string()),
-                    _ => None,
-                }
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn type_is_address(ty: &Type) -> bool {
-    match ty {
-        Type::Path(path) => path
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident == "Address")
-            .unwrap_or(false),
-        Type::Reference(reference) => type_is_address(&reference.elem),
-        _ => false,
-    }
-}
-
-fn numeric_params(sig: &Signature) -> Vec<String> {
-    sig.inputs
-        .iter()
-        .filter_map(|input| match input {
-            FnArg::Typed(pat_type) if type_is_numeric_primitive(&pat_type.ty) => {
-                match pat_type.pat.as_ref() {
-                    Pat::Ident(ident) => Some(ident.ident.to_string()),
-                    _ => None,
-                }
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn type_is_numeric_primitive(ty: &Type) -> bool {
-    match ty {
-        Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
-            matches!(
-                path.path.segments[0].ident.to_string().as_str(),
-                "i8" | "i16"
-                    | "i32"
-                    | "i64"
-                    | "i128"
-                    | "isize"
-                    | "u8"
-                    | "u16"
-                    | "u32"
-                    | "u64"
-                    | "u128"
-                    | "usize"
-            )
-        }
-        Type::Reference(reference) => type_is_numeric_primitive(&reference.elem),
-        _ => false,
-    }
-}
-
-fn env_params(sig: &Signature) -> Vec<String> {
-    sig.inputs
-        .iter()
-        .filter_map(|input| match input {
-            FnArg::Typed(pat_type) if type_is_env(&pat_type.ty) => match pat_type.pat.as_ref() {
-                Pat::Ident(ident) => Some(ident.ident.to_string()),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
-}
-
-fn type_is_env(ty: &Type) -> bool {
-    match ty {
-        Type::Path(path) => path
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident == "Env")
-            .unwrap_or(false),
-        Type::Reference(reference) => type_is_env(&reference.elem),
-        _ => false,
-    }
-}
-
-fn token_client_params(sig: &Signature) -> Vec<String> {
-    sig.inputs
-        .iter()
-        .filter_map(|input| match input {
-            FnArg::Typed(pat_type) if type_is_token_client(&pat_type.ty) => {
-                match pat_type.pat.as_ref() {
-                    Pat::Ident(ident) => Some(ident.ident.to_string()),
-                    _ => None,
-                }
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn type_is_token_client(ty: &Type) -> bool {
-    match ty {
-        Type::Path(type_path) => path_is_token_client(&type_path.path),
-        Type::Reference(reference) => type_is_token_client(&reference.elem),
-        _ => false,
-    }
-}
-
-fn path_is_token_client(path: &syn::Path) -> bool {
-    let names = path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string().to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    let Some(last) = names.last() else {
-        return false;
-    };
-
-    last.contains("tokenclient")
-        || (last == "client"
-            && names[..names.len().saturating_sub(1)]
-                .iter()
-                .any(|name| name.contains("token")))
-}
-
-fn is_token_client_constructor(expr: &Expr) -> bool {
-    match expr {
-        Expr::Call(call) => match call.func.as_ref() {
-            Expr::Path(path) => {
-                let names = path
-                    .path
-                    .segments
-                    .iter()
-                    .map(|segment| segment.ident.to_string().to_ascii_lowercase())
-                    .collect::<Vec<_>>();
-                names.last().map(|name| name == "new").unwrap_or(false)
-                    && names[..names.len().saturating_sub(1)]
-                        .iter()
-                        .any(|name| name.contains("token"))
-                    && names[..names.len().saturating_sub(1)]
-                        .last()
-                        .map(|name| name.contains("client"))
-                        .unwrap_or(false)
-            }
-            _ => false,
-        },
-        Expr::Paren(paren) => is_token_client_constructor(&paren.expr),
-        Expr::Reference(reference) => is_token_client_constructor(&reference.expr),
-        _ => false,
-    }
-}
-
-fn is_generated_contract_client_constructor(expr: &Expr) -> bool {
-    match expr {
-        Expr::Call(call) => match call.func.as_ref() {
-            Expr::Path(path) => {
-                let names = path
-                    .path
-                    .segments
-                    .iter()
-                    .map(|segment| segment.ident.to_string())
-                    .collect::<Vec<_>>();
-                names.last().is_some_and(|name| name == "new")
-                    && names.len() >= 2
-                    && names[names.len() - 2].ends_with("Client")
-                    && !names[..names.len() - 1]
-                        .iter()
-                        .any(|name| name.to_ascii_lowercase().contains("token"))
-            }
-            _ => false,
-        },
-        Expr::Paren(paren) => is_generated_contract_client_constructor(&paren.expr),
-        Expr::Reference(reference) => is_generated_contract_client_constructor(&reference.expr),
-        _ => false,
-    }
-}
-
-fn is_generated_contract_client_method_call(expr: &Expr, known_clients: &[String]) -> bool {
-    match expr {
-        Expr::MethodCall(call) => receiver_ident(&call.receiver)
-            .is_some_and(|name| known_clients.iter().any(|candidate| candidate == &name)),
-        Expr::Paren(paren) => is_generated_contract_client_method_call(&paren.expr, known_clients),
-        _ => false,
-    }
-}
-
-fn is_token_transfer_receiver(expr: &Expr, known_clients: &[String]) -> bool {
-    if is_token_client_constructor(expr) {
-        return true;
-    }
-
-    receiver_ident(expr)
-        .map(|name| known_clients.iter().any(|candidate| candidate == &name))
-        .unwrap_or(false)
-}
-
-fn local_binding_name_and_init(local: &Local) -> Option<(String, &Expr)> {
-    let init = local.init.as_ref()?;
-    let ident = match &local.pat {
-        Pat::Ident(ident) => ident,
-        Pat::Type(typed) => match typed.pat.as_ref() {
-            Pat::Ident(ident) => ident,
-            _ => return None,
-        },
-        _ => return None,
-    };
-    Some((ident.ident.to_string(), init.expr.as_ref()))
-}
-
-fn is_direct_env_storage_receiver(expr: &Expr, env_params: &[String]) -> bool {
-    match expr {
-        Expr::MethodCall(call) if call.method == "storage" && call.args.is_empty() => {
-            receiver_ident(&call.receiver)
-                .is_some_and(|name| env_params.iter().any(|candidate| candidate == &name))
-        }
-        Expr::Paren(paren) => is_direct_env_storage_receiver(&paren.expr, env_params),
-        Expr::Reference(reference) => is_direct_env_storage_receiver(&reference.expr, env_params),
-        _ => false,
-    }
-}
-
-fn is_soroban_storage_accessor(expr: &Expr) -> bool {
-    match expr {
-        Expr::MethodCall(call)
-            if matches!(
-                call.method.to_string().as_str(),
-                "instance" | "persistent" | "temporary"
-            ) =>
-        {
-            storage_chain_contains_storage(&call.receiver)
-        }
-        Expr::Paren(paren) => is_soroban_storage_accessor(&paren.expr),
-        Expr::Reference(reference) => is_soroban_storage_accessor(&reference.expr),
-        _ => false,
-    }
-}
-
-fn storage_chain_contains_storage(expr: &Expr) -> bool {
-    match expr {
-        Expr::MethodCall(call) => {
-            call.method == "storage" || storage_chain_contains_storage(&call.receiver)
-        }
-        Expr::Paren(paren) => storage_chain_contains_storage(&paren.expr),
-        Expr::Reference(reference) => storage_chain_contains_storage(&reference.expr),
-        _ => false,
-    }
-}
-
-fn is_ttl_receiver(expr: &Expr, known_accessors: &[String]) -> bool {
-    if is_soroban_storage_accessor(expr) {
-        return true;
-    }
-
-    receiver_ident(expr)
-        .map(|name| known_accessors.iter().any(|candidate| candidate == &name))
-        .unwrap_or(false)
-}
-
-fn is_soroban_events_receiver(expr: &Expr, env_params: &[String]) -> bool {
-    match expr {
-        Expr::MethodCall(call) if call.method == "events" => receiver_ident(&call.receiver)
-            .map(|name| env_params.iter().any(|candidate| candidate == &name))
-            .unwrap_or(false),
-        Expr::Reference(reference) => is_soroban_events_receiver(&reference.expr, env_params),
-        Expr::Paren(paren) => is_soroban_events_receiver(&paren.expr, env_params),
-        _ => false,
-    }
-}
-
-fn source_for_span(source: &str, span: Span) -> Option<&str> {
-    let (start, end, _) = span_to_offsets(source, span)?;
-    source.get(start..end)
-}
-
-fn swapped_transfer_replacement(source: &str, node: &ExprMethodCall) -> Option<String> {
-    let receiver = source_for_span(source, node.receiver.span())?;
-    let mut args = node.args.iter();
-    let first = source_for_span(source, args.next()?.span())?;
-    let second = source_for_span(source, args.next()?.span())?;
-    let third = source_for_span(source, args.next()?.span())?;
-
-    if first.trim() == second.trim() {
-        return None;
-    }
-
-    Some(format!(
-        "{}.transfer({}, {}, {})",
-        receiver, second, first, third
-    ))
-}
-
-fn receiver_ident(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => path
-            .path
-            .segments
-            .first()
-            .map(|segment| segment.ident.to_string()),
-        Expr::Reference(reference) => receiver_ident(&reference.expr),
-        Expr::Paren(paren) => receiver_ident(&paren.expr),
-        _ => None,
-    }
-}
-
-fn span_to_offsets(source: &str, span: Span) -> Option<(usize, usize, SourceSpan)> {
-    let start = span.start();
-    let end = span.end();
-    let start_byte = line_column_to_offset(source, start.line, start.column)?;
-    let end_byte = line_column_to_offset(source, end.line, end.column)?;
-
-    Some((
-        start_byte,
-        end_byte,
-        SourceSpan {
-            line: start.line,
-            column: start.column + 1,
-            end_line: end.line,
-            end_column: end.column + 1,
-        },
-    ))
-}
-
-fn line_column_to_offset(source: &str, target_line: usize, target_column: usize) -> Option<usize> {
-    if target_line == 0 {
-        return None;
-    }
-
-    let mut offset = 0usize;
-    for (index, line) in source.split_inclusive('\n').enumerate() {
-        let line_number = index + 1;
-        if line_number == target_line {
-            return (target_column <= line.len()).then_some(offset + target_column);
-        }
-        offset += line.len();
-    }
-
-    if target_line == source.lines().count() + 1 && target_column == 0 {
-        Some(source.len())
-    } else {
-        None
-    }
-}
-
-fn ignored_entry(entry: &DirEntry, root: &Path) -> bool {
-    if entry.path() == root {
-        return false;
-    }
-
-    matches!(
-        entry.file_name().to_str(),
-        Some(
-            ".git"
-                | "target"
-                | ".soro-mutants-target"
-                | ".soro-mutants-worktree"
-                | "mutants.out"
-                | "node_modules"
-        )
-    )
-}
-
-fn target_dirs(root: &Path, target_dir: Option<&Path>) -> (PathBuf, PathBuf) {
-    let base = match target_dir {
-        Some(path) if path.is_absolute() => path.to_path_buf(),
-        Some(path) => root.join(path),
-        None => root.join(".soro-mutants-target"),
-    };
-
-    (base.join("baseline"), base.join("mutants-shared"))
-}
-
-fn reject_cleanup_symlink(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            bail!(
-                "refusing to clean symlinked Soro Mutants path {}",
-                path.display()
-            )
-        }
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
-    }
-}
-
-fn managed_cleanup_paths(root: &Path, target_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
-    let scratch = root.join(".soro-mutants-worktree");
-    let (baseline, mutants) = target_dirs(root, target_dir);
-    let target_root = baseline.parent().unwrap_or(root);
-    reject_cleanup_symlink(&scratch)?;
-    reject_cleanup_symlink(target_root)?;
-    reject_cleanup_symlink(&baseline)?;
-    reject_cleanup_symlink(&mutants)?;
-    let mut paths: Vec<PathBuf> = [scratch, baseline, mutants]
-        .into_iter()
-        .filter(|path| path.exists())
-        .collect();
-
-    // The default cache root is also removed when no unrelated content remains.
-    // Determine this without mutating anything, so a dry run is accurate.
-    if target_dir.is_none() {
-        let default_root = root.join(".soro-mutants-target");
-        if default_root.is_dir() {
-            let entries = fs::read_dir(&default_root)
-                .with_context(|| format!("failed to inspect {}", default_root.display()))?
-                .collect::<std::io::Result<Vec<_>>>()?;
-            if entries.iter().all(|entry| {
-                matches!(
-                    entry.file_name().to_str(),
-                    Some("baseline" | "mutants-shared")
-                ) && paths.iter().any(|path| path == &entry.path())
-            }) {
-                paths.push(default_root);
-            }
-        }
-    }
-
-    Ok(paths)
-}
-
-fn clean_generated_state(
-    root: &Path,
-    target_dir: Option<&Path>,
-    dry_run: bool,
-) -> Result<Vec<PathBuf>> {
-    let paths = managed_cleanup_paths(root, target_dir)?;
-    if !dry_run {
-        for path in &paths {
-            if target_dir.is_none() && path == &root.join(".soro-mutants-target") {
-                fs::remove_dir(path)
-                    .with_context(|| format!("failed to remove {}", path.display()))?;
-            } else {
-                fs::remove_dir_all(path)
-                    .with_context(|| format!("failed to remove {}", path.display()))?;
-            }
-        }
-    }
-    Ok(paths)
-}
-
-fn execute_mutant(
-    root: &Path,
-    mutant: &Mutant,
-    test_dir: Option<&Path>,
-    test_command: &str,
-    timeouts: Timeouts,
-    target_root: &Path,
-    shared_target: bool,
-) -> Result<Outcome> {
-    let scratch = root.join(".soro-mutants-worktree");
-    if scratch.exists() {
-        fs::remove_dir_all(&scratch)?;
-    }
-    copy_project(root, &scratch)?;
-    apply_mutant(&scratch, mutant)?;
-
-    let result = (|| -> Result<Outcome> {
-        let target_dir = if shared_target {
-            target_root.to_path_buf()
-        } else {
-            target_root.join(&mutant.id)
-        };
-        let scratch_cwd = test_dir
-            .map(|dir| scratch.join(dir))
-            .unwrap_or_else(|| scratch.clone());
-
-        if let Some(compile_command) = compile_command_for(test_command) {
-            match run_process(
-                &scratch_cwd,
-                &compile_command,
-                timeouts.compile,
-                &target_dir,
-            )? {
-                ProcessResult::Failed => return Ok(Outcome::Unviable),
-                ProcessResult::Timeout => return Ok(Outcome::Timeout),
-                ProcessResult::Passed => {}
-            }
-        }
-
-        Ok(
-            match run_process(&scratch_cwd, test_command, timeouts.test, &target_dir)? {
-                ProcessResult::Passed => Outcome::Survived,
-                ProcessResult::Failed => Outcome::Killed,
-                ProcessResult::Timeout => Outcome::Timeout,
-            },
-        )
-    })();
-
-    let cleanup_result = if scratch.exists() {
-        fs::remove_dir_all(&scratch)
-            .with_context(|| format!("failed to clean mutation scratch {}", scratch.display()))
-    } else {
-        Ok(())
-    };
-
-    match (result, cleanup_result) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-        (Ok(outcome), Ok(())) => Ok(outcome),
-    }
-}
-
-fn copy_project(root: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)?;
-
-    for entry in WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|entry| !ignored_entry(entry, root))
-    {
-        let entry = entry?;
-        let relative = entry.path().strip_prefix(root)?;
-        if relative.as_os_str().is_empty() {
-            continue;
-        }
-
-        let target = destination.join(relative);
-        if entry.file_type().is_dir() {
-            fs::create_dir_all(&target)?;
-        } else if entry.file_type().is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(entry.path(), &target)?;
-        }
-    }
-
-    copy_wasm_fixtures(root, destination)?;
-    Ok(())
-}
-
-fn copy_wasm_fixtures(root: &Path, destination: &Path) -> Result<()> {
-    for entry in WalkDir::new(root).into_iter() {
-        let entry = entry?;
-        if !entry.file_type().is_file()
-            || entry.path().extension().and_then(|ext| ext.to_str()) != Some("wasm")
-        {
-            continue;
-        }
-
-        let relative = entry.path().strip_prefix(root)?;
-        let normalized = relative.to_string_lossy().replace('\\', "/");
-        let is_fixture = normalized.contains("/target/wasm32-unknown-unknown/release/")
-            || normalized.contains("/target/wasm32v1-none/release/")
-            || normalized.contains("/target/wasm32-unknown-unknown/optimized/")
-            || normalized.contains("/target/wasm32v1-none/optimized/")
-            || normalized.starts_with("target/wasm32-unknown-unknown/release/")
-            || normalized.starts_with("target/wasm32v1-none/release/")
-            || normalized.starts_with("target/wasm32-unknown-unknown/optimized/")
-            || normalized.starts_with("target/wasm32v1-none/optimized/");
-
-        if !is_fixture {
-            continue;
-        }
-
-        let target = destination.join(relative);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(entry.path(), target)?;
-    }
-    Ok(())
-}
-
-fn resolve_runner_command(runner: Runner, test_command: &str) -> Result<String> {
-    match runner {
-        Runner::CargoTest => Ok(test_command.to_owned()),
-        Runner::Nextest if test_command == "cargo test -q" => Ok("cargo nextest run".to_owned()),
-        Runner::Nextest => bail!(
-            "cannot combine --runner nextest with --test-command; choose one execution method"
-        ),
-    }
-}
-
-fn ensure_nextest_available() -> Result<()> {
-    let available = Command::new("cargo")
-        .args(["nextest", "--version"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !available {
-        bail!(
-            "cargo-nextest is not installed or cannot be executed; install it from https://nexte.st/ and retry --runner nextest"
-        );
-    }
-    Ok(())
-}
-
-fn compile_command_for(test_command: &str) -> Option<String> {
-    if test_command == "cargo nextest run" {
-        return Some("cargo test --no-run".to_string());
-    }
-    if test_command.contains("--no-run") {
-        return Some(test_command.to_string());
-    }
-
-    let cargo_index = test_command.find("cargo ")?;
-    let after_cargo = cargo_index + "cargo ".len();
-    let tail = &test_command[after_cargo..];
-
-    let test_offset = if tail.starts_with("test") {
-        0
-    } else if tail.starts_with('+') {
-        let toolchain_end = tail.find(' ')?;
-        let after_toolchain = &tail[toolchain_end + 1..];
-        if after_toolchain.starts_with("test") {
-            toolchain_end + 1
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-
-    let test_start = after_cargo + test_offset;
-    let test_end = test_start + "test".len();
-
-    Some(format!(
-        "{}test --no-run{}",
-        &test_command[..test_start],
-        &test_command[test_end..]
-    ))
-}
-
-fn apply_mutant(root: &Path, mutant: &Mutant) -> Result<()> {
-    let path = root.join(&mutant.file);
-    let source = read_rust_source(&path)?;
-    if mutant.end_byte > source.len() || mutant.start_byte >= mutant.end_byte {
-        bail!("invalid source span for {}", mutant.id);
-    }
-
-    if source[mutant.start_byte..mutant.end_byte] != mutant.original {
-        bail!(
-            "source changed before applying {} at {}",
-            mutant.id,
-            mutant.file.display()
-        );
-    }
-
-    let mut mutated = String::with_capacity(source.len() + mutant.replacement.len());
-    mutated.push_str(&source[..mutant.start_byte]);
-    mutated.push_str(&mutant.replacement);
-    mutated.push_str(&source[mutant.end_byte..]);
-    fs::write(path, mutated)?;
-    Ok(())
-}
-
-fn run_process(
-    cwd: &Path,
-    command: &str,
-    timeout_seconds: u64,
-    target_dir: &Path,
-) -> Result<ProcessResult> {
-    fs::create_dir_all(target_dir)?;
-
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg(command)
-        .current_dir(cwd)
-        .env("CARGO_TARGET_DIR", target_dir)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("failed to execute: {}", command))?;
-
-    match child.wait_timeout(Duration::from_secs(timeout_seconds))? {
-        Some(status) if status.success() => Ok(ProcessResult::Passed),
-        Some(_) => Ok(ProcessResult::Failed),
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            Ok(ProcessResult::Timeout)
-        }
-    }
-}
-
-fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
-    writeln!(report, "Discovered {} semantic mutants\n", mutants.len())?;
-    for mutant in mutants {
-        writeln!(
-            report,
-            "{} {:<8} {}:{} {}",
-            mutant.id,
-            mutant.operator,
-            mutant.file.display(),
-            mutant.span.line,
-            mutant.description
-        )?;
-        writeln!(report, "    - {}", mutant.original.trim())?;
-        writeln!(report, "    + {}\n", mutant.replacement.trim())?;
-    }
-    Ok(())
-}
-
-fn print_operators(report: &mut dyn Write) -> Result<()> {
-    for (id, description) in BUILTIN_OPERATORS {
-        writeln!(report, "{:<10}  {}", id, description)?;
-    }
-    writeln!(report, "\n{} built-in operators", BUILTIN_OPERATORS.len())?;
-    Ok(())
-}
-
-fn print_suppression_summary(
-    report: &mut dyn Write,
-    suppressed: &[SuppressedMutant],
-) -> Result<()> {
-    use std::collections::BTreeMap;
-    let mut reasons: BTreeMap<&str, usize> = BTreeMap::new();
-    for item in suppressed {
-        *reasons.entry(item.reason).or_default() += 1;
-    }
-    writeln!(report, "Suppressed: {}", suppressed.len())?;
-    for (reason, count) in reasons {
-        writeln!(report, "  {reason}: {count}")?;
-    }
-    Ok(())
-}
-
-fn print_summary(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
-    let killed = results
-        .iter()
-        .filter(|result| matches!(result.outcome, Outcome::Killed))
-        .count();
-    let survived = results
-        .iter()
-        .filter(|result| matches!(result.outcome, Outcome::Survived))
-        .count();
-    let unviable = results
-        .iter()
-        .filter(|result| matches!(result.outcome, Outcome::Unviable))
-        .count();
-    let timeout = results
-        .iter()
-        .filter(|result| matches!(result.outcome, Outcome::Timeout))
-        .count();
-    let viable = killed + survived;
-    let score = if viable == 0 {
-        0.0
-    } else {
-        killed as f64 * 100.0 / viable as f64
-    };
-
-    writeln!(report, "\nSummary")?;
-    writeln!(report, "  Generated : {}", results.len())?;
-    writeln!(report, "  Killed    : {}", killed)?;
-    writeln!(report, "  Survived  : {}", survived)?;
-    writeln!(report, "  Unviable  : {}", unviable)?;
-    writeln!(report, "  Timeout   : {}", timeout)?;
-    writeln!(report, "  Score     : {:.1}%", score)?;
-    Ok(())
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-fn print_html_report(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
-    use std::collections::BTreeMap;
-
-    let mut counts = [0usize; 4];
-    let mut by_operator: BTreeMap<&str, [usize; 4]> = BTreeMap::new();
-    for result in results {
-        let index = match result.outcome {
-            Outcome::Killed => 0,
-            Outcome::Survived => 1,
-            Outcome::Unviable => 2,
-            Outcome::Timeout => 3,
-        };
-        counts[index] += 1;
-        by_operator.entry(&result.mutant.operator).or_default()[index] += 1;
-    }
-    let viable = counts[0] + counts[1];
-    let score = if viable == 0 {
-        0.0
-    } else {
-        counts[0] as f64 * 100.0 / viable as f64
-    };
-    report.write_all(r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Soro Mutants Report</title>
-<style>
-:root { color-scheme: light; font: 16px/1.5 system-ui, sans-serif; background: #f5f7f9; color: #182b38; }
-body { max-width: 1040px; margin: 2rem auto; padding: 0 1.5rem; }
-h1, h2 { line-height: 1.25; }
-section { padding: 1rem 1.5rem; margin: 1rem 0; background: white; border: 1px solid #dce4e9; border-radius: 10px; }
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: .55rem; border-bottom: 1px solid #dce4e9; text-align: left; }
-th { background: #edf2f5; }
-article { border-top: 1px solid #dce4e9; padding: 1rem 0; }
-pre { overflow-x: auto; padding: .75rem; background: #f1f4f5; border-radius: 6px; }
-small { color: #516577; }
-</style>
-</head>
-<body>
-<h1>Soro Mutants Report</h1>
-<section><h2>Summary</h2>
-<table><thead><tr><th>Metric</th><th>Count</th></tr></thead><tbody>
-"#.as_bytes())?;
-    for (name, count) in [
-        ("Generated", results.len()),
-        ("Killed", counts[0]),
-        ("Survived", counts[1]),
-        ("Unviable", counts[2]),
-        ("Timeout", counts[3]),
-    ] {
-        writeln!(report, "<tr><td>{name}</td><td>{count}</td></tr>")?;
-    }
-    writeln!(
-        report,
-        "</tbody></table><p><strong>Semantic score: {score:.1}%</strong> ({}/{viable} viable mutants killed).</p></section>",
-        counts[0]
-    )?;
-    writeln!(report, "<section><h2>By operator</h2><table><thead><tr><th>Operator</th><th>Killed</th><th>Survived</th><th>Unviable</th><th>Timeout</th></tr></thead><tbody>")?;
-    for (operator, values) in by_operator {
-        writeln!(
-            report,
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            escape_html(operator),
-            values[0],
-            values[1],
-            values[2],
-            values[3]
-        )?;
-    }
-    writeln!(
-        report,
-        "</tbody></table></section><section><h2>Mutant details</h2>"
-    )?;
-    if results.is_empty() {
-        writeln!(report, "<p>No matching mutants.</p>")?;
-    }
-    for result in results {
-        let mutant = &result.mutant;
-        writeln!(
-            report,
-            "<article><h3>{} — {} — {}</h3><small>{}:{} (function: {})</small><p>{}</p><p>Original</p><pre><code>{}</code></pre><p>Replacement</p><pre><code>{}</code></pre></article>",
-            escape_html(&mutant.id),
-            escape_html(&mutant.operator),
-            outcome_label(&result.outcome),
-            escape_html(&mutant.file.to_string_lossy()),
-            mutant.span.line,
-            escape_html(mutant.function.as_deref().unwrap_or("unknown")),
-            escape_html(&mutant.description),
-            escape_html(&mutant.original),
-            escape_html(&mutant.replacement)
-        )?;
-    }
-    writeln!(report, "</section></body></html>")?;
-    Ok(())
-}
-
-fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
-    let killed = results
-        .iter()
-        .filter(|r| matches!(r.outcome, Outcome::Killed))
-        .count();
-    let survived = results
-        .iter()
-        .filter(|r| matches!(r.outcome, Outcome::Survived))
-        .count();
-    let unviable = results
-        .iter()
-        .filter(|r| matches!(r.outcome, Outcome::Unviable))
-        .count();
-    let timeout = results
-        .iter()
-        .filter(|r| matches!(r.outcome, Outcome::Timeout))
-        .count();
-    let viable = killed + survived;
-    let score = if viable == 0 {
-        0.0
-    } else {
-        100.0 * killed as f64 / viable as f64
-    };
-
-    writeln!(report, "# Soro Mutants Report\n")?;
-    writeln!(report, "| Metric | Count |")?;
-    writeln!(report, "| --- | ---: |")?;
-    for (name, count) in [
-        ("Generated", results.len()),
-        ("Killed", killed),
-        ("Survived", survived),
-        ("Unviable", unviable),
-        ("Timeout", timeout),
-    ] {
-        writeln!(report, "| {name} | {count} |")?;
-    }
-    writeln!(
-        report,
-        "\n**Semantic score: {score:.1}%** ({killed}/{viable} viable mutants killed).\n"
-    )?;
-
-    for (heading, label, count) in [
-        ("Survived", "SURVIVED", survived),
-        ("Killed", "KILLED", killed),
-        ("Unviable", "UNVIABLE", unviable),
-        ("Timeout", "TIMEOUT", timeout),
-    ] {
-        writeln!(report, "## {heading} ({count})\n")?;
-        if count == 0 {
-            writeln!(report, "_None._\n")?;
-            continue;
-        }
-        for result in results
-            .iter()
-            .filter(|r| outcome_label(&r.outcome) == label)
-        {
-            let mutant = &result.mutant;
-            let path = mutant.file.to_string_lossy().replace('\\', "/");
-            let target = path
-                .replace('%', "%25")
-                .replace(' ', "%20")
-                .replace('(', "%28")
-                .replace(')', "%29")
-                .replace('#', "%23");
-            let link_label = path.replace('[', "\\[").replace(']', "\\]");
-            let description = mutant
-                .description
-                .replace(['\n', '\r'], " ")
-                .replace('`', "\\`");
-            writeln!(
-                report,
-                "- `{}` **{}** [{}:{}]({}#L{}) — {}",
-                mutant.id,
-                mutant.operator,
-                link_label,
-                mutant.span.line,
-                target,
-                mutant.span.line,
-                description
-            )?;
-        }
-        writeln!(report)?;
-    }
-    Ok(())
-}
-
-fn escape_github_annotation_property(value: &str) -> String {
-    value
-        .replace('%', "%25")
-        .replace('\r', "%0D")
-        .replace('\n', "%0A")
-        .replace(':', "%3A")
-        .replace(',', "%2C")
-}
-
-fn escape_github_annotation_message(value: &str) -> String {
-    value
-        .replace('%', "%25")
-        .replace('\r', "%0D")
-        .replace('\n', "%0A")
-}
-
-fn print_github_annotations(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
-    use std::collections::BTreeSet;
-
-    let mut seen = BTreeSet::new();
-    for result in results {
-        if !matches!(result.outcome, Outcome::Survived) {
-            continue;
-        }
-        let mutant = &result.mutant;
-        let path = mutant.file.to_string_lossy().replace('\\', "/");
-        let key = (
-            mutant.id.clone(),
-            path.clone(),
-            mutant.span.line,
-            mutant.span.column,
-        );
-        if !seen.insert(key) {
-            continue;
-        }
-        let message = format!(
-            "{} ({}) in {}: tests did not detect {} (test-quality signal, not a confirmed security issue)",
-            mutant.id,
-            mutant.operator,
-            mutant.function.as_deref().unwrap_or("<unknown function>"),
-            mutant.description
-        );
-        writeln!(
-            report,
-            "::warning file={},line={},col={},title={}::{}",
-            escape_github_annotation_property(&path),
-            mutant.span.line,
-            mutant.span.column,
-            escape_github_annotation_property(&format!("Surviving mutant {}", mutant.operator)),
-            escape_github_annotation_message(&message)
-        )?;
-    }
-    Ok(())
-}
-
-fn print_sarif_report(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
-    use std::collections::BTreeMap;
-
-    // Surviving mutants expose test gaps, not confirmed security vulnerabilities.
-    let survivors: Vec<&MutantResult> = results
-        .iter()
-        .filter(|result| matches!(result.outcome, Outcome::Survived))
-        .collect();
-    let mut rules = BTreeMap::new();
-    for result in &survivors {
-        let operator = result.mutant.operator.as_str();
-        let description = BUILTIN_OPERATORS
-            .iter()
-            .find(|(id, _)| *id == operator)
-            .map(|(_, description)| *description)
-            .unwrap_or(result.mutant.description.as_str());
-        rules.insert(
-            operator,
-            serde_json::json!({
-                "id": operator,
-                "name": operator,
-                "shortDescription": {"text": description},
-                "properties": {"tags": ["mutation-testing", "test-quality"]}
-            }),
-        );
-    }
-
-    let findings: Vec<serde_json::Value> = survivors
-        .iter()
-        .map(|result| {
-            let mutant = &result.mutant;
-            let path = mutant.file.to_string_lossy().replace('\\', "/");
-            serde_json::json!({
-                "ruleId": mutant.operator,
-                "level": "warning",
-                "message": {
-                    "text": format!(
-                        "Surviving mutant {} ({}): tests did not detect {}. This is a test-quality signal; it does not establish a security flaw.",
-                        mutant.id, mutant.operator, mutant.description
-                    )
-                },
-                "locations": [{
-                    "physicalLocation": {
-                        "artifactLocation": {"uri": path},
-                        "region": {
-                            "startLine": mutant.span.line,
-                            "startColumn": mutant.span.column
-                        }
-                    }
-                }],
-                "properties": {
-                    "mutantId": mutant.id,
-                    "function": mutant.function,
-                    "operator": mutant.operator,
-                    "outcome": outcome_label(&result.outcome),
-                    "description": mutant.description,
-                    "original": mutant.original,
-                    "replacement": mutant.replacement
-                }
-            })
-        })
-        .collect();
-
-    let sarif = serde_json::json!({
-        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {
-                "driver": {
-                    "name": "Soro Mutants",
-                    "informationUri": "https://github.com/Ay-obami/soro-mutants",
-                    "rules": rules.into_values().collect::<Vec<_>>()
-                }
-            },
-            "results": findings
-        }]
-    });
-    writeln!(report, "{}", serde_json::to_string_pretty(&sarif)?)?;
-    Ok(())
-}
-
-fn outcome_label(outcome: &Outcome) -> &'static str {
-    match outcome {
-        Outcome::Killed => "KILLED",
-        Outcome::Survived => "SURVIVED",
-        Outcome::Unviable => "UNVIABLE",
-        Outcome::Timeout => "TIMEOUT",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn equivalent_suppression_recognizes_no_change_and_repeated_edit() {
-        let mut candidates = discover_mutants(
-            Path::new("fixtures/weak-auth"),
-            None,
-            None,
-            None,
-            &exclusion_set(Vec::new()).unwrap(),
-        )
-        .unwrap();
-        let meaningful = candidates[0].clone();
-        let mut unchanged = meaningful.clone();
-        unchanged.replacement = unchanged.original.clone();
-        let duplicate = meaningful.clone();
-        let mut distinct = meaningful.clone();
-        distinct.replacement = "some_other_edit()".to_owned();
-        candidates = vec![meaningful.clone(), unchanged, duplicate, distinct];
-
-        let (retained, reasons) = suppress_equivalent_mutants(candidates);
-        assert_eq!(retained.len(), 2);
-        assert!(retained
-            .iter()
-            .any(|m| m.replacement == "some_other_edit()"));
-        assert!(retained
-            .iter()
-            .any(|m| m.replacement == meaningful.replacement));
-        assert_eq!(
-            reasons
-                .iter()
-                .filter(|r| r.reason == "unchanged replacement")
-                .count(),
-            1
-        );
-        assert_eq!(
-            reasons
-                .iter()
-                .filter(|r| r.reason == "duplicate source edit")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn suppression_summary_reports_total_and_reason_counts() {
-        let suppressed = vec![
-            SuppressedMutant {
-                operator: "AUTH-001".to_owned(),
-                reason: "unchanged replacement",
-            },
-            SuppressedMutant {
-                operator: "AUTH-002".to_owned(),
-                reason: "duplicate source edit",
-            },
-            SuppressedMutant {
-                operator: "AUTH-003".to_owned(),
-                reason: "duplicate source edit",
-            },
-        ];
-        let mut output = Vec::new();
-        print_suppression_summary(&mut output, &suppressed).unwrap();
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("Suppressed: 3"));
-        assert!(output.contains("duplicate source edit: 2"));
-        assert!(output.contains("unchanged replacement: 1"));
-    }
-
-    #[test]
-    fn equivalent_suppression_does_not_merge_edits_in_different_files_or_spans() {
-        let mut candidates = discover_mutants(
-            Path::new("fixtures/weak-auth"),
-            None,
-            None,
-            None,
-            &exclusion_set(Vec::new()).unwrap(),
-        )
-        .unwrap();
-        let first = candidates.remove(0);
-        let mut second = first.clone();
-        second.file = PathBuf::from("other/src/lib.rs");
-        let mut third = first.clone();
-        third.start_byte += 1;
-        let (retained, reasons) = suppress_equivalent_mutants(vec![first, second, third]);
-        assert_eq!(retained.len(), 3);
-        assert!(reasons.is_empty());
-    }
-
-    #[test]
-    fn github_annotations_deduplicate_and_handle_files_outside_pr_diff() {
-        let mutants = discover_mutants(
-            Path::new("fixtures/weak-auth"),
-            Some("AUTH-001"),
-            None,
-            None,
-            &exclusion_set(Vec::new()).unwrap(),
-        )
-        .unwrap();
-        let mut mutant = mutants.into_iter().next().unwrap();
-        mutant.file = PathBuf::from("outside-pr-diff/src/lib.rs");
-        let survived = MutantResult {
-            mutant: mutant.clone(),
-            outcome: Outcome::Survived,
-        };
-        let killed = MutantResult {
-            mutant,
-            outcome: Outcome::Killed,
-        };
-        let mut output = Vec::new();
-        print_github_annotations(&mut output, &[survived.clone(), survived, killed]).unwrap();
-        let text = String::from_utf8(output).unwrap();
-        assert_eq!(text.lines().count(), 1);
-        assert!(text.contains("file=outside-pr-diff/src/lib.rs,line=11,col=9"));
-        assert!(text.contains("AUTH-001"));
-    }
-
-    #[test]
-    fn github_annotation_escaping_prevents_workflow_command_injection() {
-        assert_eq!(
-            escape_github_annotation_property("a,b:c%\\n"),
-            "a%2Cb%3Ac%25\\n"
-        );
-        assert_eq!(escape_github_annotation_message("a%\nb"), "a%25%0Ab");
-    }
-
-    #[test]
-    fn nextest_runner_builds_its_command_and_compilation_gate() {
-        let command = resolve_runner_command(Runner::Nextest, "cargo test -q").unwrap();
-        assert_eq!(command, "cargo nextest run");
-        assert_eq!(
-            compile_command_for(&command).as_deref(),
-            Some("cargo test --no-run")
-        );
-        assert_eq!(
-            resolve_runner_command(Runner::CargoTest, "cargo test -q").unwrap(),
-            "cargo test -q"
-        );
-    }
-
-    #[test]
-    fn nextest_runner_rejects_an_ambiguous_custom_command() {
-        assert!(
-            resolve_runner_command(Runner::Nextest, "cargo test --workspace")
-                .unwrap_err()
-                .to_string()
-                .contains("cannot combine")
-        );
-    }
-
-    #[test]
-    fn builtin_operators_are_sorted_by_id() {
-        let ids: Vec<&str> = BUILTIN_OPERATORS.iter().map(|(id, _)| *id).collect();
-        let mut sorted = ids.clone();
-        sorted.sort_unstable();
-        assert_eq!(
-            ids, sorted,
-            "BUILTIN_OPERATORS must be in ascending lexicographic order"
-        );
-    }
-
-    #[test]
-    fn builtin_operator_ids_are_unique() {
-        let ids: Vec<&str> = BUILTIN_OPERATORS.iter().map(|(id, _)| *id).collect();
-        let mut seen = std::collections::HashSet::new();
-        for id in &ids {
-            assert!(seen.insert(*id), "duplicate operator ID: {id}");
-        }
-    }
-
-    #[test]
-    fn builtin_operator_descriptions_are_non_empty() {
-        for (id, desc) in BUILTIN_OPERATORS {
-            assert!(!desc.is_empty(), "operator {id} has an empty description");
-        }
-    }
-
-    #[test]
-    fn print_operators_emits_every_id_with_count() {
-        let mut buf = Vec::new();
-        print_operators(&mut buf).expect("print_operators should succeed");
-        let output = String::from_utf8(buf).unwrap();
-        for (id, _desc) in BUILTIN_OPERATORS {
-            assert!(
-                output.contains(id),
-                "output should contain operator id {id}"
-            );
-        }
-        let count_line = format!("{} built-in operators", BUILTIN_OPERATORS.len());
-        assert!(
-            output.contains(&count_line),
-            "output should contain operator count; got:\n{output}"
-        );
-    }
-
-    fn report_mutant() -> Mutant {
-        Mutant {
-            id: "M0001".into(),
-            operator: "AUTH-001".into(),
-            file: PathBuf::from("src/lib.rs"),
-            function: Some("guarded".into()),
-            span: SourceSpan {
-                line: 2,
-                column: 4,
-                end_line: 2,
-                end_column: 23,
-            },
-            original: "user.require_auth()".into(),
-            replacement: "()".into(),
-            description: "remove user.require_auth()".into(),
-            start_byte: 35,
-            end_byte: 54,
-        }
-    }
-
-    #[test]
-    fn html_report_escapes_untrusted_mutant_source_and_description() {
-        let mut mutant = report_mutant();
-        mutant.original = "<script>alert('x' & \"y\")</script>".into();
-        mutant.description = "<img src=x onerror=alert(1)>".into();
-        let results = [MutantResult {
-            mutant,
-            outcome: Outcome::Survived,
-        }];
-        let mut output = Vec::new();
-        print_html_report(&mut output, &results).unwrap();
-        let html = String::from_utf8(output).unwrap();
-        assert!(!html.contains("<script>"));
-        assert!(!html.contains("<img"));
-        assert!(
-            html.contains("&lt;script&gt;alert(&#39;x&#39; &amp; &quot;y&quot;)&lt;/script&gt;")
-        );
-        assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
-    }
-
-    #[test]
-    fn json_list_preserves_mutant_fields() {
-        let mutants = [report_mutant()];
-        let report = serde_json::to_value(list_report(&mutants)).unwrap();
-        assert_eq!(
-            report,
-            serde_json::json!({
-                "schema_version": 1,
-                "mutants": [{
-                "id": "M0001", "operator": "AUTH-001",
-                    "file": "src/lib.rs", "function": "guarded",
-                "span": {"line": 2, "column": 4, "end_line": 2, "end_column": 23},
-                "original": "user.require_auth()", "replacement": "()",
-                "description": "remove user.require_auth()"
-                }]
-            })
-        );
-        let mut mutant = report_mutant();
-        mutant.function = None;
-        let report = serde_json::to_value(list_report(&[mutant])).unwrap();
-        assert!(report["mutants"][0]["function"].is_null());
-    }
-
-    #[test]
-    fn semantic_threshold_excludes_unviable_and_timeout_and_passes_exact_boundary() {
-        let results = [
-            Outcome::Killed,
-            Outcome::Survived,
-            Outcome::Unviable,
-            Outcome::Timeout,
-        ]
-        .into_iter()
-        .map(|outcome| MutantResult {
-            mutant: report_mutant(),
-            outcome,
-        })
-        .collect::<Vec<_>>();
-        assert!(ensure_min_score(&results, Some(50.0)).is_ok());
-        let failure = ensure_min_score(&results, Some(50.01)).unwrap_err();
-        assert!(failure.downcast_ref::<ScoreThresholdFailure>().is_some());
-        assert!(ensure_min_score(&results, None).is_ok());
-    }
-
-    #[test]
-    fn json_test_preserves_results_and_outcome_labels() {
-        for (outcome, label) in [
-            (Outcome::Killed, "KILLED"),
-            (Outcome::Survived, "SURVIVED"),
-            (Outcome::Unviable, "UNVIABLE"),
-            (Outcome::Timeout, "TIMEOUT"),
-        ] {
-            let results = [MutantResult {
-                mutant: report_mutant(),
-                outcome,
-            }];
-            let report = serde_json::to_value(test_report(&results)).unwrap();
-            let example: serde_json::Value =
-                serde_json::from_str(include_str!("../docs/json-report-example.json")).unwrap();
-            let mut expected = example;
-            expected["results"][0]["outcome"] = label.into();
-            assert_eq!(report, expected);
-        }
-    }
-
-    #[test]
-    fn empty_json_reports_are_versioned() {
-        assert_eq!(
-            serde_json::to_value(list_report(&[])).unwrap(),
-            serde_json::json!({"schema_version": 1, "mutants": []})
-        );
-        assert_eq!(
-            serde_json::to_value(test_report(&[])).unwrap(),
-            serde_json::json!({"schema_version": 1, "results": []})
-        );
-    }
-
-    fn mutations_for(source: &str) -> Vec<Mutant> {
-        let syntax = syn::parse_file(source).expect("test source should parse");
-        let mut visitor = SemanticVisitor::new(source, PathBuf::from("src/lib.rs"));
-        visitor.visit_file(&syntax);
-        visitor.mutants
-    }
-
-    #[test]
-    fn clean_removes_only_generated_state() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be after epoch")
-            .as_nanos();
-        let root = env::temp_dir().join(format!("soro-mutants-clean-{nonce}"));
-        fs::create_dir_all(root.join(".soro-mutants-worktree"))
-            .expect("scratch directory should be created");
-        fs::create_dir_all(root.join(".soro-mutants-target/baseline"))
-            .expect("baseline directory should be created");
-        fs::create_dir_all(root.join(".soro-mutants-target/mutants-shared"))
-            .expect("mutant cache should be created");
-        fs::write(root.join("keep.txt"), "source").expect("source sentinel should be written");
-
-        let removed = clean_generated_state(&root, None, false).expect("cleanup should succeed");
-
-        assert_eq!(removed.len(), 4);
-        assert!(!root.join(".soro-mutants-worktree").exists());
-        assert!(!root.join(".soro-mutants-target").exists());
-        assert_eq!(
-            fs::read_to_string(root.join("keep.txt")).expect("source sentinel should remain"),
-            "source"
-        );
-
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn baseline_and_mutant_targets_are_always_separate() {
-        let root = Path::new("/tmp/example-project");
-
-        let (baseline, mutants) = target_dirs(root, None);
-        assert_eq!(baseline, root.join(".soro-mutants-target/baseline"));
-        assert_eq!(mutants, root.join(".soro-mutants-target/mutants-shared"));
-        assert_ne!(baseline, mutants);
-
-        let (baseline, mutants) = target_dirs(root, Some(Path::new("custom-target")));
-        assert_eq!(baseline, root.join("custom-target/baseline"));
-        assert_eq!(mutants, root.join("custom-target/mutants-shared"));
-        assert_ne!(baseline, mutants);
-
-        let (baseline, mutants) = target_dirs(root, Some(Path::new("/tmp/shared-cache")));
-        assert_eq!(baseline, PathBuf::from("/tmp/shared-cache/baseline"));
-        assert_eq!(mutants, PathBuf::from("/tmp/shared-cache/mutants-shared"));
-        assert_ne!(baseline, mutants);
-    }
-
-    #[test]
-    fn discovers_auth_removal_and_wrong_address_mutants() {
-        let mutants = mutations_for(
-            r#"
-            use soroban_sdk::{Address, Env};
-
-            fn transfer(env: Env, from: Address, to: Address) {
-                from.require_auth();
-            }
-            "#,
-        );
-
-        assert!(mutants.iter().any(|m| m.operator == "AUTH-001"));
-        assert!(mutants
-            .iter()
-            .any(|m| { m.operator == "AUTH-002" && m.replacement.contains("to.require_auth()") }));
-    }
-
-    #[test]
-    fn event_transfer_helper_is_not_treated_as_token_transfer() {
-        let mutants = mutations_for(
-            r#"
-            fn transfer_event(e: Env, from: Address, to: Address, amount: i128) {
-                TokenUtils::new(&e).events().transfer(from, to, amount);
-            }
-            "#,
-        );
-
-        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
-    }
-
-    #[test]
-    fn generic_three_argument_transfer_is_not_treated_as_token_transfer() {
-        let mutants = mutations_for(
-            r#"
-            fn move_data(bus: MessageBus, from: Address, to: Address, amount: i128) {
-                bus.transfer(&from, &to, &amount);
-            }
-            "#,
-        );
-
-        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
-    }
-
-    #[test]
-    fn local_token_client_binding_gets_token_direction_mutant() {
-        let mutants = mutations_for(
-            r#"
-            fn pay(env: Env, token: Address, from: Address, to: Address, amount: i128) {
-                let token_client = token::Client::new(&env, &token);
-                token_client.transfer(&from, &to, &amount);
-            }
-            "#,
-        );
-
-        assert!(mutants.iter().any(|m| m.operator == "TOKEN-001"));
-    }
-
-    #[test]
-    fn direct_token_client_constructor_gets_token_direction_mutant() {
-        let mutants = mutations_for(
-            r#"
-            fn pay(env: Env, token: Address, from: Address, to: Address, amount: i128) {
-                token_contract::Client::new(&env, &token).transfer(&from, &to, &amount);
-            }
-            "#,
-        );
-
-        assert!(mutants.iter().any(|m| m.operator == "TOKEN-001"));
-    }
-
-    #[test]
-    fn generated_contract_client_arguments_substitute_only_compatible_params() {
-        let mutants = mutations_for(
-            r#"
-            fn route(env: Env, dep: Address, actor: Address, alternate: Address, amount: i128, other: i128) {
-                let client = RecorderClient::new(&env, &dep);
-                client.record(&actor, &amount);
-            }
-            "#,
-        );
-        let calls: Vec<_> = mutants
-            .iter()
-            .filter(|m| m.operator == "CALL-002")
-            .collect();
-        assert_eq!(calls.len(), 3);
-        assert!(calls
-            .iter()
-            .any(|m| m.original == "&actor" && m.replacement == "&dep"));
-        assert!(calls
-            .iter()
-            .any(|m| m.original == "&actor" && m.replacement == "&alternate"));
-        assert!(calls
-            .iter()
-            .any(|m| m.original == "&amount" && m.replacement == "&other"));
-    }
-
-    #[test]
-    fn call_argument_substitution_ignores_unrecognized_clients_and_expressions() {
-        let mutants = mutations_for(
-            r#"
-            fn route(env: Env, dep: Address, actor: Address, alternate: Address, amount: i128) {
-                helper.record(&actor, &amount);
-                let client = RecorderClient::new(&env, &dep);
-                client.record(&actor.clone(), &(amount + 1));
-            }
-            "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "CALL-002"));
-    }
-
-    #[test]
-    fn direct_transfer_call_gets_token_direction_mutant() {
-        let mutants = mutations_for(
-            r#"
-            fn pay(token: TokenClient, from: Address, to: Address, amount: i128) {
-                token.transfer(&from, &to, &amount);
-            }
-            "#,
-        );
-
-        let mutant = mutants
-            .iter()
-            .find(|m| m.operator == "TOKEN-001")
-            .expect("TOKEN-001 should be generated");
-
-        assert!(mutant.replacement.contains("transfer(&to, &from, &amount)"));
-    }
-
-    #[test]
-    fn generated_client_return_mismatch_check_can_be_bypassed() {
-        let mutants = mutations_for(
-            r#"
-            fn verify(env: Env, dep: Address, expected: u32) -> bool {
-                let client = OracleClient::new(&env, &dep);
-                if client.value() != expected { panic!("mismatch"); }
-                true
-            }
-            "#,
-        );
-        let calls: Vec<_> = mutants
-            .iter()
-            .filter(|m| m.operator == "CALL-003")
-            .collect();
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].original.contains("client.value() != expected"));
-        assert_eq!(calls[0].replacement, "false");
-    }
-
-    #[test]
-    fn call_return_check_ignores_ordinary_local_results() {
-        let mutants = mutations_for(
-            r#"
-            fn verify(expected: u32) -> bool {
-                if local_value() != expected { panic!("mismatch"); }
-                true
-            }
-            "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "CALL-003"));
-    }
-
-    #[test]
-    fn call_target_mutates_only_typed_dependency_address() {
-        let source = r#"
-            fn route(env: Env, primary: Address, alternate: Address) -> u32 {
-                env.invoke_contract::<u32>(&primary, &Symbol::new(&env, "ping"), Vec::new(&env))
-            }
-        "#;
-        let mutants = mutations_for(source);
-        let found: Vec<_> = mutants
-            .iter()
-            .filter(|m| m.operator == "CALL-001")
-            .collect();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].original, "&primary");
-        assert_eq!(found[0].replacement, "&alternate");
-        assert!(found[0]
-            .description
-            .contains("alternate instead of primary"));
-    }
-
-    #[test]
-    fn call_target_ignores_untyped_or_dynamic_receivers() {
-        let mutants = mutations_for(
-            r#"
-            fn route(env: Env, primary: Address, alternate: Address, helper: Helper) {
-                helper.invoke_contract(&primary, &alternate, ());
-                env.invoke_contract::<u32>(&get_target(), &Symbol::new(&env, "ping"), Vec::new(&env));
-                env.invoke_contract::<u32>(&some_addr, &Symbol::new(&env, "ping"), Vec::new(&env));
-            }
-        "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "CALL-001"));
-    }
-
-    #[test]
-    fn storage_class_substitution_targets_only_direct_env_storage_accessors() {
-        let mutants = mutations_for(
-            r#"
-            fn write(env: Env, key: u32, value: u32) {
-                env.storage().persistent().set(&key, &value);
-            }
-            "#,
-        );
-        let storage: Vec<_> = mutants
-            .iter()
-            .filter(|m| m.operator == "STORAGE-001")
-            .collect();
-        assert_eq!(storage.len(), 2);
-        assert!(storage
-            .iter()
-            .any(|m| m.replacement.ends_with(".instance()")));
-        assert!(storage
-            .iter()
-            .any(|m| m.replacement.ends_with(".temporary()")));
-    }
-
-    #[test]
-    fn storage_class_substitution_ignores_unrelated_storage_chains() {
-        let mutants = mutations_for(
-            r#"
-            fn write(env: Env, cache: Cache, key: u32, value: u32) {
-                cache.storage().persistent().set(&key, &value);
-            }
-            "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "STORAGE-001"));
-    }
-
-    #[test]
-    fn discovers_ttl_removal_mutant() {
-        let mutants = mutations_for(
-            r#"
-            fn keep_alive(env: Env) {
-                env.storage().instance().extend_ttl(100, 1000);
-            }
-            "#,
-        );
-
-        assert!(mutants.iter().any(|m| m.operator == "TTL-001"));
-    }
-
-    #[test]
-    fn ttl_lifecycle_mutants_keep_call_and_key() {
-        let mutants = mutations_for(
-            r#"
-            fn keep_alive(env: Env, key: DataKey) {
-                env.storage().instance().extend_ttl(100, 1000);
-                env.storage().persistent().extend_ttl(&key, 100, 1000);
-            }
-        "#,
-        );
-        assert_eq!(
-            mutants.iter().filter(|m| m.operator == "TTL-002").count(),
-            2
-        );
-        assert_eq!(
-            mutants.iter().filter(|m| m.operator == "TTL-003").count(),
-            2
-        );
-        assert!(mutants
-            .iter()
-            .filter(|m| m.operator == "TTL-002")
-            .all(|m| m.original == "100" && m.replacement == "0"));
-        assert!(mutants
-            .iter()
-            .filter(|m| m.operator == "TTL-003")
-            .all(|m| m.original == "1000" && m.replacement == "100"));
-    }
-
-    #[test]
-    fn ttl_lifecycle_skips_noop_and_non_storage_calls() {
-        let mutants = mutations_for(
-            r#"
-            fn work(env: Env, cache: Cache) {
-                env.storage().instance().extend_ttl(0, 0);
-                cache.extend_ttl(100, 1000);
-            }
-        "#,
-        );
-        assert!(!mutants
-            .iter()
-            .any(|m| matches!(m.operator.as_str(), "TTL-002" | "TTL-003")));
-    }
-
-    #[test]
-    fn generic_extend_ttl_method_is_not_treated_as_soroban_storage() {
-        let mutants = mutations_for(
-            r#"
-            fn keep_alive(cache: Cache) {
-                cache.extend_ttl(100, 1000);
-            }
-            "#,
-        );
-
-        assert!(!mutants.iter().any(|m| m.operator == "TTL-001"));
-    }
-
-    #[test]
-    fn local_storage_accessor_gets_ttl_mutant() {
-        let mutants = mutations_for(
-            r#"
-            fn keep_alive(env: Env, key: DataKey) {
-                let persistent = env.storage().persistent();
-                persistent.extend_ttl(&key, 100, 1000);
-            }
-            "#,
-        );
-
-        assert!(mutants.iter().any(|m| m.operator == "TTL-001"));
-    }
-
-    #[test]
-    fn typed_local_storage_accessor_gets_ttl_mutants_without_following_aliases() {
-        let mutants = mutations_for(
-            r#"
-            fn keep_alive(env: Env, key: DataKey) {
-                let persistent: soroban_sdk::storage::Persistent = env.storage().persistent();
-                persistent.extend_ttl(&key, 100, 1000);
-                let alias = persistent;
-                alias.extend_ttl(&key, 100, 1000);
-            }
-            "#,
-        );
-
-        assert_eq!(
-            mutants.iter().filter(|m| m.operator == "TTL-001").count(),
-            1
-        );
-        assert_eq!(
-            mutants.iter().filter(|m| m.operator == "TTL-002").count(),
-            1
-        );
-        assert_eq!(
-            mutants.iter().filter(|m| m.operator == "TTL-003").count(),
-            1
-        );
-        assert!(mutants
-            .iter()
-            .all(|m| !m.original.contains("alias.extend_ttl")));
-    }
-
-    #[test]
-    fn typed_event_publish_statement_yields_only_event_deletion() {
-        let source = r#"
-            #[contractevent]
-            struct TransferNotice { from: Address, amount: i128 }
-            fn record(env: Env, from: Address, amount: i128) {
-                TransferNotice { from, amount }.publish(&env);
-            }
-        "#;
-        let mutants = mutations_for(source);
-        let typed: Vec<_> = mutants
-            .iter()
-            .filter(|m| m.operator == "EVENT-002")
-            .collect();
-        assert_eq!(typed.len(), 1);
-        assert_eq!(typed[0].replacement, "()");
-        assert!(typed[0]
-            .original
-            .contains("TransferNotice { from, amount }.publish(&env)"));
-        let mutant = typed[0];
-        let transformed = format!(
-            "{}{}{}",
-            &source[..mutant.start_byte],
-            mutant.replacement,
-            &source[mutant.end_byte..]
-        );
-        assert!(transformed.contains("();"));
-        assert!(syn::parse_file(&transformed).is_ok());
-    }
-
-    #[test]
-    fn typed_event_actor_substitution_uses_only_explicit_address_parameters() {
-        let mutants = mutations_for(
-            r#"
-            #[contractevent]
-            struct TransferNotice { actor: Address, amount: i128 }
-            fn record(env: Env, actor: Address, alternate: Address, amount: i128) {
-                TransferNotice { actor, amount }.publish(&env);
-            }
-            "#,
-        );
-        let actor = mutants
-            .iter()
-            .find(|m| m.operator == "EVENT-003")
-            .expect("EVENT-003 mutant");
-        assert_eq!(actor.original, "actor");
-        assert_eq!(actor.replacement, "actor: alternate");
-        assert!(actor.description.contains("alternate instead of actor"));
-    }
-
-    #[test]
-    fn event_actor_substitution_ignores_untyped_and_non_event_structs() {
-        let mutants = mutations_for(
-            r#"
-            struct FakeEvent { actor: Address }
-            #[contractevent]
-            struct RealEvent { actor: Address }
-            fn record(env: Env, actor: Address, alternate: String) {
-                FakeEvent { actor }.publish(&env);
-                RealEvent { actor }.publish(&env);
-            }
-            "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "EVENT-003"));
-    }
-
-    #[test]
-    fn typed_event_numeric_value_substitution_targets_primitive_numeric_params() {
-        let mutants = mutations_for(
-            r#"
-            #[contractevent]
-            struct TransferNotice { recipient: Address, amount: i128 }
-            fn record(env: Env, recipient: Address, amount: i128) {
-                TransferNotice { recipient, amount }.publish(&env);
-            }
-            "#,
-        );
-        let value = mutants
-            .iter()
-            .find(|m| m.operator == "EVENT-004")
-            .expect("EVENT-004 mutant");
-        assert_eq!(value.original, "amount");
-        assert_eq!(value.replacement, "amount: 0");
-    }
-
-    #[test]
-    fn event_value_substitution_ignores_non_numeric_and_non_event_fields() {
-        let mutants = mutations_for(
-            r#"
-            struct FakeEvent { amount: i128 }
-            #[contractevent]
-            struct RealEvent { label: String }
-            fn record(env: Env, amount: i128, label: String) {
-                FakeEvent { amount }.publish(&env);
-                RealEvent { label }.publish(&env);
-            }
-            "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "EVENT-004"));
-    }
-
-    #[test]
-    fn typed_event_topic_substitution_requires_topic_attribute_and_address_params() {
-        let mutants = mutations_for(
-            r#"
-            #[contractevent]
-            struct TransferNotice { #[topic] actor: Address, recipient: Address }
-            fn record(env: Env, actor: Address, alternate: Address, recipient: Address) {
-                TransferNotice { actor, recipient }.publish(&env);
-            }
-            "#,
-        );
-        let topics: Vec<_> = mutants
-            .iter()
-            .filter(|m| m.operator == "EVENT-005")
-            .collect();
-        assert_eq!(topics.len(), 2);
-        assert!(topics.iter().all(|m| m.original == "actor"));
-        assert!(topics.iter().any(|m| m.replacement == "actor: alternate"));
-        assert!(topics.iter().any(|m| m.replacement == "actor: recipient"));
-    }
-
-    #[test]
-    fn event_topic_substitution_ignores_non_topic_fields_and_arbitrary_structs() {
-        let mutants = mutations_for(
-            r#"
-            struct FakeEvent { actor: Address }
-            #[contractevent]
-            struct RealEvent { actor: Address }
-            fn record(env: Env, actor: Address, alternate: Address) {
-                FakeEvent { actor }.publish(&env);
-                RealEvent { actor }.publish(&env);
-            }
-            "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "EVENT-005"));
-    }
-
-    #[test]
-    fn typed_event_matcher_rejects_non_event_publish_and_non_statement() {
-        let source = r#"
-            struct FakeEvent { value: u32 }
-            #[contractevent]
-            struct ValidEvent { value: u32 }
-            fn dispatch(env: Env, other: Logger) {
-                FakeEvent { value: 1 }.publish(&env);
-                ValidEvent { value: 2 }.publish(&other);
-                let ignored = ValidEvent { value: 3 }.publish(&env);
-                TokenHelper::new(&env).events().transfer(1, 2, 3);
-            }
-        "#;
-        let mutants = mutations_for(source);
-        assert!(!mutants.iter().any(|m| m.operator == "EVENT-002"));
-        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
-    }
-
-    #[test]
-    fn discovers_event_publication_removal_mutant() {
-        let mutants = mutations_for(
-            r#"
-            fn emit(env: Env) {
-                env.events().publish(("admin", "changed"), ());
-            }
-            "#,
-        );
-
-        assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
-    }
-
-    #[test]
-    fn auth_args_mutation_changes_only_argument_expression() {
-        let source = r#"
-            use soroban_sdk::{Address, Env, IntoVal};
-            fn transfer(env: Env, admin: Address, recipient: Address) {
-                admin.require_auth_for_args((recipient.clone(),).into_val(&env));
-            }
-        "#;
-        let mutants = mutations_for(source);
-        let mutant = mutants
-            .iter()
-            .find(|m| m.operator == "AUTH-003")
-            .expect("AUTH-003 mutant");
-        assert_eq!(mutant.function.as_deref(), Some("transfer"));
-        assert_eq!(mutant.original, "(recipient.clone(),).into_val(&env)");
-        assert_eq!(mutant.replacement, "soroban_sdk::Vec::new(&env)");
-        let transformed = format!(
-            "{}{}{}",
-            &source[..mutant.start_byte],
-            mutant.replacement,
-            &source[mutant.end_byte..]
-        );
-        assert!(transformed.contains("admin.require_auth_for_args(soroban_sdk::Vec::new(&env));"));
-        assert!(transformed.contains("use soroban_sdk::{Address, Env, IntoVal};"));
-    }
-
-    #[test]
-    fn auth_args_ignores_unrelated_methods_and_unsupported_receiver_patterns() {
-        let mutants = mutations_for(
-            r#"
-            fn unrelated(env: Env, session: Session, owner: Address) {
-                session.require_auth_for_args(soroban_sdk::Vec::new(&env));
-                owner.clone().require_auth_for_args(soroban_sdk::Vec::new(&env));
-            }
-            fn no_env(owner: Address, args: Args) {
-                owner.require_auth_for_args(args);
-            }
-        "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "AUTH-003"));
-    }
-
-    #[test]
-    fn generic_require_auth_is_not_treated_as_soroban_authorization() {
-        let mutants = mutations_for(
-            r#"
-            fn authenticate(session: Session) {
-                session.require_auth();
-            }
-            "#,
-        );
-
-        assert!(!mutants.iter().any(|m| m.operator == "AUTH-001"));
-        assert!(!mutants.iter().any(|m| m.operator == "AUTH-002"));
-    }
-
-    #[test]
-    fn auth_wrong_address_ignores_non_address_parameters() {
-        let mutants = mutations_for(
-            r#"
-            use soroban_sdk::Address;
-
-            fn update(admin: Address, label: String, amount: i128) {
-                admin.require_auth();
-            }
-            "#,
-        );
-
-        assert!(mutants.iter().any(|m| m.operator == "AUTH-001"));
-        assert!(!mutants.iter().any(|m| m.operator == "AUTH-002"));
-    }
-
-    #[test]
-    fn auth_wrong_address_requires_a_distinct_address_parameter() {
-        let mutants = mutations_for(
-            r#"
-            use soroban_sdk::Address;
-
-            fn update(admin: Address) {
-                admin.require_auth();
-            }
-            "#,
-        );
-
-        assert_eq!(
-            mutants.iter().filter(|m| m.operator == "AUTH-001").count(),
-            1
-        );
-        assert_eq!(
-            mutants.iter().filter(|m| m.operator == "AUTH-002").count(),
-            0
-        );
-    }
-
-    #[test]
-    fn generic_publish_is_not_treated_as_soroban_event_publication() {
-        let mutants = mutations_for(
-            r#"
-            fn log(logger: Logger) {
-                logger.publish("hello");
-            }
-            "#,
-        );
-
-        assert!(!mutants.iter().any(|m| m.operator == "EVENT-001"));
-    }
-
-    #[test]
-    fn generic_events_publish_chain_is_not_treated_as_soroban_event_publication() {
-        let mutants = mutations_for(
-            r#"
-            fn log(logger: Logger) {
-                logger.events().publish("hello");
-            }
-            "#,
-        );
-
-        assert!(!mutants.iter().any(|m| m.operator == "EVENT-001"));
-    }
-
-    #[test]
-    fn borrowed_env_event_publication_is_detected() {
-        let mutants = mutations_for(
-            r#"
-            fn emit(env: &Env) {
-                env.events().publish(("admin", "changed"), ());
-            }
-            "#,
-        );
-
-        assert!(mutants.iter().any(|m| m.operator == "EVENT-001"));
-    }
-
-    #[test]
-    fn token_client_substitution_uses_other_recognized_clients_in_order() {
-        let mutants = mutations_for(
-            r#"
-            fn pay(env: Env, a: Address, b: Address, from: Address, to: Address, amount: i128) {
-                let primary = token::Client::new(&env, &a);
-                let secondary = token::Client::new(&env, &b);
-                primary.transfer(&from, &to, &amount);
-            }
-            "#,
-        );
-        let clients: Vec<_> = mutants
-            .iter()
-            .filter(|m| m.operator == "TOKEN-004")
-            .collect();
-        assert_eq!(clients.len(), 1);
-        assert_eq!(clients[0].original, "primary");
-        assert_eq!(clients[0].replacement, "secondary");
-    }
-
-    #[test]
-    fn token_client_substitution_ignores_constructor_and_unrecognized_receivers() {
-        let mutants = mutations_for(
-            r#"
-            fn pay(env: Env, a: Address, from: Address, to: Address, amount: i128) {
-                token::Client::new(&env, &a).transfer(&from, &to, &amount);
-                helper.transfer(&from, &to, &amount);
-            }
-            "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-004"));
-    }
-
-    #[test]
-    fn token_amount_mutants_use_zero_and_one_for_typed_numeric_reference() {
-        let mutants = mutations_for(
-            r#"
-            fn pay(token: TokenClient, from: Address, to: Address, amount: i128) {
-                token.transfer(&from, &to, &amount);
-            }
-            "#,
-        );
-        let amounts: Vec<_> = mutants
-            .iter()
-            .filter(|m| m.operator == "TOKEN-003")
-            .collect();
-        assert_eq!(amounts.len(), 2);
-        assert_eq!(amounts[0].original, "&amount");
-        assert!(amounts.iter().any(|m| m.replacement == "&0"));
-        assert!(amounts.iter().any(|m| m.replacement == "&1"));
-    }
-
-    #[test]
-    fn token_amount_mutation_rejects_untyped_or_computed_amounts() {
-        let mutants = mutations_for(
-            r#"
-            fn pay(token: TokenClient, from: Address, to: Address, amount: Amount, count: i128) {
-                token.transfer(&from, &to, &amount);
-                token.transfer(&from, &to, &(count + 1));
-            }
-            "#,
-        );
-        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-003"));
-    }
-
-    #[test]
-    fn token_direction_mutant_preserves_complex_amount_expression() {
-        let mutants = mutations_for(
-            r#"
-            fn pay(token: TokenClient, from: Address, to: Address, amount: i128) {
-                token.transfer(&from, &to, &(amount - 1));
-            }
-            "#,
-        );
-
-        let mutant = mutants
-            .iter()
-            .find(|m| m.operator == "TOKEN-001")
-            .expect("TOKEN-001 should be generated");
-
-        assert!(mutant
-            .replacement
-            .contains("transfer(&to, &from, &(amount - 1))"));
-    }
-
-    #[test]
-    fn token_direction_skips_identical_sender_and_recipient() {
-        let mutants = mutations_for(
-            r#"
-            fn pay(token: TokenClient, owner: Address, amount: i128) {
-                token.transfer(&owner, &owner, &amount);
-            }
-            "#,
-        );
-
-        assert!(!mutants.iter().any(|m| m.operator == "TOKEN-001"));
-    }
-
-    #[test]
-    fn separate_timeout_overrides_do_not_change_other_phase() {
-        assert_eq!(
-            Timeouts::resolve(120, None, None),
-            Timeouts {
-                compile: 120,
-                test: 120
-            }
-        );
-        assert_eq!(
-            Timeouts::resolve(120, Some(10), None),
-            Timeouts {
-                compile: 10,
-                test: 120
-            }
-        );
-        assert_eq!(
-            Timeouts::resolve(120, None, Some(20)),
-            Timeouts {
-                compile: 120,
-                test: 20
-            }
-        );
-        assert_eq!(
-            Timeouts::resolve(120, Some(10), Some(20)),
-            Timeouts {
-                compile: 10,
-                test: 20
-            }
-        );
-    }
-
-    #[test]
-    fn execute_mutant_cleans_scratch_worktree() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be after epoch")
-            .as_nanos();
-        let root = env::temp_dir().join(format!("soro-mutants-runner-{nonce}"));
-        let target = env::temp_dir().join(format!("soro-mutants-runner-target-{nonce}"));
-        fs::create_dir_all(root.join("src")).expect("fixture directory should be created");
-        fs::write(
-            root.join("Cargo.toml"),
-            r#"[package]
-name = "runner-fixture"
-version = "0.1.0"
-edition = "2021"
-"#,
-        )
-        .expect("fixture manifest should be written");
-        fs::write(
-            root.join("src/lib.rs"),
-            r#"
-pub struct Address;
-
-impl Address {
-    pub fn require_auth(&self) {}
-}
-
-pub fn guarded(user: Address) {
-    user.require_auth();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn functional_only() {
-        guarded(Address);
-    }
-}
-"#,
-        )
-        .expect("fixture source should be written");
-
-        let mutants = discover_mutants(&root, Some("AUTH-001"), None, None, &GlobSet::empty())
-            .expect("fixture mutation discovery should work");
-        let mutant = mutants.first().expect("AUTH-001 should be discovered");
-
-        let outcome = execute_mutant(
-            &root,
-            mutant,
-            None,
-            "cargo test -q",
-            Timeouts::resolve(30, None, None),
-            &target,
-            true,
-        )
-        .expect("mutant execution should succeed");
-
-        assert!(matches!(outcome, Outcome::Survived));
-        assert!(!root.join(".soro-mutants-worktree").exists());
-
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&target);
-    }
-
-    #[test]
-    fn compile_gate_preserves_test_prefix_and_arguments() {
-        assert_eq!(
-            compile_command_for("RUSTFLAGS='-Dwarnings' cargo test -q -p pool auth").as_deref(),
-            Some("RUSTFLAGS='-Dwarnings' cargo test --no-run -q -p pool auth")
-        );
-        assert_eq!(
-            compile_command_for("cargo test --no-run -q").as_deref(),
-            Some("cargo test --no-run -q")
-        );
-        assert_eq!(
-            compile_command_for("cargo +1.91.0 test -q -p pool").as_deref(),
-            Some("cargo +1.91.0 test --no-run -q -p pool")
-        );
-        assert_eq!(
-            compile_command_for("cd contracts && cargo +stable test auth").as_deref(),
-            Some("cd contracts && cargo +stable test --no-run auth")
-        );
-        assert_eq!(
-            compile_command_for("cargo nextest run").as_deref(),
-            Some("cargo test --no-run")
-        );
-    }
-}

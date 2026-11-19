@@ -23,14 +23,30 @@ fn invalid_diff_base_is_an_error_not_a_panic() {
 
 #[test]
 fn production_code_has_no_direct_unwrap_or_expect_calls() {
+    use syn::visit::Visit;
+
+    struct PanicCallVisitor {
+        calls: Vec<String>,
+    }
+
+    impl<'ast> Visit<'ast> for PanicCallVisitor {
+        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            let method = node.method.to_string();
+            if method == "unwrap" || method == "expect" {
+                self.calls.push(method);
+            }
+            syn::visit::visit_expr_method_call(self, node);
+        }
+    }
+
     let source = include_str!("../src/main.rs");
     let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+    let syntax = syn::parse_file(production).expect("production source parses");
+    let mut visitor = PanicCallVisitor { calls: Vec::new() };
+    visitor.visit_file(&syntax);
     assert!(
-        !production.contains(".unwrap()"),
-        "production .unwrap() found"
-    );
-    assert!(
-        !production.contains(".expect("),
-        "production .expect(...) found"
+        visitor.calls.is_empty(),
+        "production unwrap/expect calls found: {:?}",
+        visitor.calls
     );
 }

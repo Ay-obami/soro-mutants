@@ -49,6 +49,14 @@ jobs:
             weak: weak-auth-args
             strong: strong-auth-args
             expected: AUTH-003
+          - name: auth-helper
+            weak: weak-auth-helper
+            strong: strong-auth-helper
+            expected: AUTH-004
+          - name: auth-admin
+            weak: weak-auth-admin
+            strong: strong-auth-admin
+            expected: AUTH-005
           - name: typed-event
             weak: weak-typed-events
             strong: strong-typed-events
@@ -77,6 +85,10 @@ jobs:
             weak: weak-token-amount
             strong: strong-token-amount
             expected: TOKEN-003
+          - name: token-allowance
+            weak: weak-token-allowance
+            strong: strong-token-allowance
+            expected: TOKEN-002
           - name: token-client
             weak: weak-token-client
             strong: strong-token-client

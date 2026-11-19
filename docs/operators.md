@@ -68,6 +68,122 @@ The mutation asks whether the tests enforce the exact signed argument set. A fun
 
 This intentionally does **not** recognize unrelated same-named methods on arbitrary receivers, chained receiver expressions, calls outside a function with an explicit `Env` and `Address` parameter, or helper-mediated authorization. It does not attempt to prove the semantic type of arbitrary locals.
 
+## AUTH-004 — helper-aware authorization
+
+`AUTH-001`/`AUTH-002` only see authorization calls written directly in the current function. Real Soroban contracts often delegate authorization to a small local helper, so the entry point that *needs* authorization contains no `require_auth()` of its own. `AUTH-004` follows exactly one documented helper shape from the call site to its `require_auth()` sink. It is not a general interprocedural analyzer.
+
+### Supported helper shape
+
+The helper must be a free function declared at the **top level of the same source file** and must be:
+
+- non-generic, non-`async`, non-`const`, non-`unsafe`, not `extern`, not variadic, and return `()`;
+- a body made **only** of one or more `param.require_auth();` statements, where each `param` is a simple parameter explicitly typed `Address` or `&Address`.
+
+```rust
+fn require_owner(owner: &Address) {
+    owner.require_auth();
+}
+```
+
+Helpers with any other statement (storage writes, conditionals, `let` bindings, stored-admin lookups, `require_auth_for_args`, return values) are ignored, so a mutation at the call site changes authorization and nothing else.
+
+### Supported call site
+
+A standalone statement `helper(args...);` that:
+
+- uses a plain, single-segment path (`require_owner(...)`), with the same number of arguments as the helper;
+- appears in a function with explicit Soroban context (an `Env` / `&Env` or `Address` / `&Address` parameter);
+- is in a function declared at the top level of the file or in a top-level `impl` block (not inside a nested `mod`);
+- is not shadowed by a local binding or parameter of the same name.
+
+### Mutations
+
+The mutants are generated at the call site, because that is where the authorization sink is reached for *this* entry point; mutating the sink itself would change every caller at once (and `AUTH-001` already removes the sink directly). Descriptions name the sink they reach.
+
+1. **Skip the helper authorization** — the call is replaced with `()`:
+
+   ```rust
+   require_owner(&from);   // becomes: ();
+   ```
+
+2. **Authenticate another address through the helper** — for each authorized argument that is an explicit `Address` parameter of the caller (written `&param`, `param`, or `param.clone()`), it is replaced with each other explicit `Address` parameter in signature order. A `&Address` helper parameter receives `&alternate`; an `Address` helper parameter receives `alternate.clone()`:
+
+   ```rust
+   require_owner(&from);   // becomes: require_owner(&to);
+   ```
+
+   Arguments that are not explicit caller `Address` parameters (locals, fields, computed values) are never redirected; only the skip mutant is generated for them.
+
+### Out of scope / limitations
+
+- crossing crate or module boundaries: helpers must be defined in the same file, and qualified paths (`Self::helper`, `crate::helper`, `module::helper`) are ignored;
+- method calls, trait methods, closures, function pointers, and any other form of dynamic dispatch;
+- helpers that call other helpers (only one hop is followed), macros, and macro expansion;
+- helper calls embedded in larger expressions rather than written as statements;
+- whole-program dataflow analysis.
+
+A survivor means the configured tests did not distinguish removing or redirecting the authorization performed through the helper. As with `AUTH-001`/`AUTH-002`, tests that assert `env.auths()` for the expected `AuthorizedInvocation` should kill both mutants, while functional-only tests with `mock_all_auths()` may let them survive. A survivor is not by itself a vulnerability claim. Equivalent behavior is possible when the same address is authorized elsewhere in the invocation, or when tests pass the same address for both parameters.
+## AUTH-005 — substitute a stored admin/owner authority
+
+A contract can authenticate an address and still authenticate the **wrong privileged actor**. `AUTH-005` targets the authority value a function loads from contract state, rather than the authorization call itself.
+
+### Supported retrieval pattern
+
+All of the following must hold, inside one function:
+
+1. The function has an explicit `Env` / `&Env` parameter and at least one explicit `Address` / `&Address` parameter.
+2. A local is initialized **directly** from a storage lookup rooted at that `Env` parameter, unwrapped with `.unwrap()` or `.expect(..)`:
+
+   ```rust
+   env.storage().instance().get(&key).unwrap()
+   env.storage().persistent().get(&key).expect("...")
+   env.storage().temporary().get(&key).unwrap()
+   ```
+
+3. The local is explicitly typed `Address`, either by annotation (`let admin: Address = ...`) or by the lookup turbofish (`.get::<_, Address>(&key)`).
+4. The local is the receiver of `require_auth()` or `require_auth_for_args(..)` in the same function. **This use as an authorization sink is what marks it as a privileged authority** — names such as `admin` or `owner` are never used as evidence.
+5. The local name is bound exactly once in the function and does not shadow a parameter.
+
+For each explicit `Address` parameter (in signature order), the loaded value is replaced with `<parameter>.clone()`:
+
+```rust
+pub fn set_admin(env: Env, new_admin: Address) {
+    let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+    admin.require_auth();
+    env.storage().instance().set(&DataKey::Admin, &new_admin);
+}
+```
+
+becomes:
+
+```rust
+    let admin: Address = new_admin.clone();
+```
+
+Because the substitution happens at the load, every later use of the authority (the authorization sink, events, comparisons) observes the wrong actor. `.clone()` keeps the mutant type-compatible for both `Address` and `&Address` parameters without moving the parameter.
+
+### Not treated as privileged authorities
+
+- storage lookups whose result is never used as a `require_auth*` receiver (for example a stored `recipient` or treasury address);
+- non-`Address` state (`i128`, `u32`, `Option<Address>` without unwrapping, and so on);
+- `unwrap_or(..)`, `unwrap_or_else(..)`, `?`, `let ... else`, and other fallback forms;
+- untyped locals, where the value type is not explicit;
+- lookups not rooted directly at an explicit `Env` parameter: storage handles held in locals, helper functions such as `load_owner(&env)`, struct fields, or arbitrary `storage()` methods on non-`Env` receivers;
+- shadowed or re-bound names, and authorization sinks in nested functions;
+- functions without an alternate explicit `Address` parameter.
+
+Role inference from names and whole-program authorization analysis are out of scope.
+
+### Equivalent-mutant risks
+
+A survivor means the tests did not distinguish the stored authority from another in-scope address. It is not a vulnerability claim, and some survivors are equivalent:
+
+- a test passes the stored admin itself as the alternate parameter, so both values are equal;
+- the authority is only used for the authorization sink and tests mock all authorizations without checking `env.auths()` (the weak fixture demonstrates this);
+- `AUTH-002` may already substitute the `require_auth()` receiver at the same sink. When the stored local has no other use, the `AUTH-002` and `AUTH-005` mutants for that sink can be behaviorally equivalent to each other, although they edit different source spans.
+
+Tests that assert the exact authorizing address — for example by comparing `env.auths()` with the expected `AuthorizedInvocation`, or by mocking authorization only for the stored admin — should kill it.
+
 ## STORAGE-001 — substitute a direct Soroban storage class
 
 For a direct accessor rooted at an explicit `Env` parameter, `env.storage().persistent()`, `env.storage().temporary()`, or `env.storage().instance()` is replaced with each other storage class in deterministic `instance`, `persistent`, `temporary` order. The operation performed on the accessor (`set`, `get`, `remove`, `extend_ttl`, and so on) is left unchanged.
@@ -146,6 +262,49 @@ token.transfer(&to, &from, &amount)
 ```
 
 The recognizer is deliberately conservative: arbitrary three-argument `.transfer(...)` methods and event helper transfers are ignored. This reduces false positives at the cost of not yet following token clients through struct fields, aliases, or helper-returned values.
+
+## TOKEN-002 — swap allowance owner and spender
+
+Token allowances separate *who owns the value* from *who may move it*. Confusing the two roles is still valid Rust, but it changes who controls value movement. `TOKEN-002` swaps the two leading `Address` role arguments of the following Soroban token-interface calls, and **only** these calls, matched by exact method name and argument count:
+
+| Call | Swapped arguments |
+| --- | --- |
+| `approve(&from, &spender, &amount, &expiration_ledger)` | owner `from` ↔ `spender` |
+| `allowance(&from, &spender)` | owner `from` ↔ `spender` |
+| `transfer_from(&spender, &from, &to, &amount)` | `spender` ↔ owner `from` |
+| `burn_from(&spender, &from, &amount)` | `spender` ↔ owner `from` |
+
+Example:
+
+```rust
+fn grant(env: Env, token_id: Address, owner: Address, spender: Address, amount: i128, expiration_ledger: u32) {
+    let client = token::Client::new(&env, &token_id);
+    client.approve(&owner, &spender, &amount, &expiration_ledger);
+}
+```
+
+becomes:
+
+```rust
+    client.approve(&spender, &owner, &amount, &expiration_ledger);
+```
+
+The receiver must be a recognized Soroban token client, using exactly the same recognizer as `TOKEN-001`: an explicit `TokenClient` / `token::Client` parameter, a local variable initialized directly from a token-client constructor, or a direct constructor chain. Both role arguments must be `&ident` references to **distinct** function parameters explicitly typed `Address` (or `&Address`). The edit covers only the text from the first role argument to the second; the separator (including comments), the receiver, and all later arguments (amount, recipient, expiration ledger) are preserved byte-for-byte.
+
+Compile viability: because both swapped values are references to explicitly typed `Address` parameters, the swap is type-preserving for every supported call. Any mutant that still fails to compile is classified `UNVIABLE` by the normal compile gate.
+
+False-positive boundaries — the following are intentionally ignored:
+
+- same-named methods on receivers that are not recognized token clients (for example `registry.approve(...)`);
+- event helpers such as `TokenUtils::new(&env).events().approve(...)` and `env.events().publish(...)`;
+- calls with a different argument count than the supported signatures above;
+- role arguments that are locals, aliases, clones, field accesses, or other computed expressions (no dataflow or type inference is attempted);
+- identical role arguments (`approve(&owner, &owner, ...)`), where a swap would be a no-op;
+- `transfer` and every other token method (`transfer` direction is `TOKEN-001`).
+
+This is not generic method-argument permutation: only the owner/spender roles of the calls listed above are swapped.
+
+A survivor means the configured tests did not distinguish *which* address owns the allowance from *which* address may spend it — for example, a test that only checks a function's return value. Tests that assert `allowance(&owner, &spender)` state, or that the spender can actually `transfer_from` the owner's balance, should kill it. A survivor is not by itself a vulnerability claim. Equivalent behavior is possible, for example when a test passes the same address as owner and spender, or when the mutated allowance is never read or spent.
 
 ## Classification
 
