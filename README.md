@@ -354,3 +354,7 @@ See [docs/benchmark.md](docs/benchmark.md) for exact commands, commit hashes, ex
 ## Status
 
 [`v0.1.0`](https://github.com/Ay-obami/soro-mutants/releases/tag/v0.1.0) is the first public pre-release. The core hypothesis has been validated against controlled fixtures and multiple public Soroban codebases; the current focus is keeping the five initial semantic operators narrow, reproducible, and low-noise before expanding the operator set.
+
+## v1.0 release readiness
+
+The objective release gate is documented in [docs/v1-release-checklist.md](docs/v1-release-checklist.md).

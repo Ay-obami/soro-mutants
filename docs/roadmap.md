@@ -106,3 +106,7 @@ Soro Mutants should not become:
 - a statement that every surviving mutant is exploitable.
 
 Those tools answer different questions and should remain complementary.
+
+## v1.0 release gate
+
+The roadmap is broader than the release blocker set. The objective criteria for declaring v1.0 ready are maintained in [the v1.0 release acceptance checklist](v1-release-checklist.md).
