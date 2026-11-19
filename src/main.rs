@@ -1886,6 +1886,15 @@ fn append_github_summary(results: &[MutantResult]) -> Result<()> {
 fn report_writer(output: Option<&Path>) -> Result<Box<dyn Write>> {
     match output {
         Some(path) => {
+            if fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                bail!(
+                    "refusing to write report through symbolic link {}",
+                    path.display()
+                );
+            }
             let file = fs::File::create(path)
                 .with_context(|| format!("cannot create report at {}", path.display()))?;
             Ok(Box::new(file))
@@ -1927,12 +1936,9 @@ fn filter_changed_mutants(
             bail!("invalid Git diff base revision");
         }
         let output = Command::new("git")
-            .args([
-                "-C",
-                root.to_str().unwrap_or("."),
-                "rev-parse",
-                "--show-toplevel",
-            ])
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "--show-toplevel"])
             .output()
             .context("cannot locate Git repository")?;
         if !output.status.success() {

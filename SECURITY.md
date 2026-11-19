@@ -23,3 +23,7 @@ Public benchmark notes report mutation-testing behavior only. They must:
 - record the exact test scope used;
 - distinguish `SURVIVED` from a vulnerability finding;
 - exclude results whose environment or baseline is not reproducible.
+
+## Report output boundary
+
+Soro Mutants refuses to open a report destination when the destination itself is a symbolic link. This prevents `--output` from silently following a pre-existing link and overwriting its target. Parent-directory topology remains under the caller's control; use a trusted report directory in hostile multi-user environments.
