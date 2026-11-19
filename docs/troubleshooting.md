@@ -96,3 +96,7 @@ When reporting a problem, include the Soro Mutants version, target-project commi
 ## Deeply nested Rust syntax
 
 Before parsing a Rust file, Soro Mutants applies a structural-depth guard. Source with more than **256** nested delimiters is rejected with an actionable error. Delimiters in ordinary strings and comments do not count. This is a denial-of-service safety boundary for pathological source, not a normal contract restriction.
+
+## Oversized Rust source files
+
+Soro Mutants intentionally refuses to parse an individual Rust source file larger than **16 MiB**. The limit is checked from filesystem metadata before the file is read into memory. This keeps discovery memory use predictable for generated or adversarial inputs. Split generated source into modules or exclude the generated path from mutation discovery when a file exceeds this limit.

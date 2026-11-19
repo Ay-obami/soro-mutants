@@ -1659,7 +1659,7 @@ fn filter_changed_mutants(
             continue;
         };
         let source_path = root.join(&mutant.file);
-        let source = fs::read_to_string(&source_path)?;
+        let source = read_rust_source(&source_path)?;
         validate_source_nesting(&source, &source_path)?;
         let syntax = match syn::parse_file(&source) {
             Ok(syntax) => syntax,
@@ -1923,6 +1923,21 @@ fn validate_source_nesting(source: &str, path: &Path) -> Result<()> {
         i += 1;
     }
     Ok(())
+
+const MAX_RUST_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+
+fn read_rust_source(path: &Path) -> Result<String> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("cannot inspect {}", path.display()))?;
+    if metadata.len() > MAX_RUST_SOURCE_BYTES {
+        bail!(
+            "Rust source file {} is {} bytes; maximum supported size is {} bytes",
+            path.display(),
+            metadata.len(),
+            MAX_RUST_SOURCE_BYTES
+        );
+    }
+    fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))
 }
 
 fn discover_mutants_with_suppressions(
@@ -1949,8 +1964,7 @@ fn discover_mutants_with_suppressions(
             continue;
         }
 
-        let source = fs::read_to_string(entry.path())
-            .with_context(|| format!("cannot read {}", entry.path().display()))?;
+        let source = read_rust_source(entry.path())?;
         validate_source_nesting(&source, entry.path())?;
         let syntax = match syn::parse_file(&source) {
             Ok(file) => file,
@@ -2640,7 +2654,7 @@ fn compile_command_for(test_command: &str) -> Option<String> {
 
 fn apply_mutant(root: &Path, mutant: &Mutant) -> Result<()> {
     let path = root.join(&mutant.file);
-    let source = fs::read_to_string(&path)?;
+    let source = read_rust_source(&path)?;
     if mutant.end_byte > source.len() || mutant.start_byte >= mutant.end_byte {
         bail!("invalid source span for {}", mutant.id);
     }
