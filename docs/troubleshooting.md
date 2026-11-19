@@ -1,6 +1,33 @@
-# Troubleshooting
+# Soro Mutants v1.0 troubleshooting
 
-This guide covers operational problems that can appear while running Soro Mutants against Rust and Soroban projects. It focuses on Soro Mutants-managed build state and target-project dependency/toolchain behavior rather than general Rust installation.
+## Diagnose by symptom
+
+Start with the command's exit status and its stderr. Run these checks from
+the target project root. If your invocation uses `--test-dir`, reproduce the
+underlying test command from that project subdirectory.
+
+| Symptom | Check | Next step |
+| --- | --- | --- |
+| Invalid argument (exit 2) | Run `cargo soro-mutants test --help`. | Check operator IDs, glob syntax, mutually exclusive output modes, and one-based shard numbers. |
+| Project path cannot be resolved (exit 1) | Check the path from the shell's working directory and confirm it points to the intended Cargo project or workspace. | Use an absolute path if the caller's working directory varies. Check that the project and test subdirectory are readable. |
+| No matching mutants (usually exit 0) | Run `cargo soro-mutants list . --count-only`, then add your filters one at a time. | Check the project-relative paths, function names, exclusions, suppressions, and shard. An empty selection skips the baseline. A positive score threshold on an empty selection exits 4. |
+| Baseline failed or timed out (exit 3) | Run the exact configured test command on the clean project under the same toolchain. | Fix dependency, setup, or test failures first. If the clean run passes slowly, increase `--test-timeout` to cover cold compilation and tests. |
+| A mutant is `UNVIABLE` | Check whether the clean baseline passed and the separate mutant compile gate failed. | Review compiler diagnostics and the mutation location. Unviable outcomes are excluded from the score. With a custom command that lacks a compile gate, a compiler failure can be classified as `KILLED`. |
+| A mutant is `TIMEOUT` | Compare cold-build and test timings against the two configured budgets. | Increase the budget for the affected phase and rerun with the same filters. Custom commands without a separate compile gate use the test budget. |
+| Report is missing, empty, or unwritable | Check the exit status, output parent, write permissions, and free disk space. For a job summary, also check `GITHUB_STEP_SUMMARY`. | Create the output parent and retry. A failed baseline can leave an empty report. Exit 4 means the threshold failed after the report was written. |
+| Score threshold failed (exit 4) | Read the report's killed and survived counts and confirm which shard or filters were used. | Inspect survivors and check for a zero viable count. See the [score calculation](report-consumer.md#reproduce-the-cli-score). |
+
+For example, compare discovery and execution with the same operator filter,
+then save the report to a directory that already exists.
+
+```bash
+cargo soro-mutants list . --operator AUTH-001 --count-only
+cargo test -q
+mkdir -p reports
+cargo soro-mutants test . --operator AUTH-001 \
+  --compile-timeout 300 --test-timeout 180 \
+  --json --output reports/mutations.json
+```
 
 ## Disk usage
 
