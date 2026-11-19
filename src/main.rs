@@ -2300,9 +2300,28 @@ fn target_dirs(root: &Path, target_dir: Option<&Path>) -> (PathBuf, PathBuf) {
     (base.join("baseline"), base.join("mutants-shared"))
 }
 
+fn reject_cleanup_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "refusing to clean symlinked Soro Mutants path {}",
+                path.display()
+            )
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
+    }
+}
+
 fn managed_cleanup_paths(root: &Path, target_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
     let scratch = root.join(".soro-mutants-worktree");
     let (baseline, mutants) = target_dirs(root, target_dir);
+    let target_root = baseline.parent().unwrap_or(root);
+    reject_cleanup_symlink(&scratch)?;
+    reject_cleanup_symlink(target_root)?;
+    reject_cleanup_symlink(&baseline)?;
+    reject_cleanup_symlink(&mutants)?;
     let mut paths: Vec<PathBuf> = [scratch, baseline, mutants]
         .into_iter()
         .filter(|path| path.exists())

@@ -23,3 +23,7 @@ Public benchmark notes report mutation-testing behavior only. They must:
 - record the exact test scope used;
 - distinguish `SURVIVED` from a vulnerability finding;
 - exclude results whose environment or baseline is not reproducible.
+
+## Filesystem cleanup boundary
+
+The `clean` command removes only Soro Mutants-managed scratch and build-cache paths. It refuses to clean when the managed scratch path, cache root, or managed cache directories are symbolic links. This prevents an attacker-controlled link from redirecting cleanup into an unrelated directory. The command does not attempt to clean arbitrary user directories or global Cargo caches.
