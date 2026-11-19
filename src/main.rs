@@ -1658,7 +1658,9 @@ fn filter_changed_mutants(
             touched.insert(path, None);
             continue;
         };
-        let source = fs::read_to_string(root.join(&mutant.file))?;
+        let source_path = root.join(&mutant.file);
+        let source = fs::read_to_string(&source_path)?;
+        validate_source_nesting(&source, &source_path)?;
         let syntax = match syn::parse_file(&source) {
             Ok(syntax) => syntax,
             Err(_) => {
@@ -1843,6 +1845,86 @@ fn discover_mutants(
     .0)
 }
 
+const MAX_RUST_SYNTAX_NESTING: usize = 256;
+
+fn validate_source_nesting(source: &str, path: &Path) -> Result<()> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = 0usize;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if line_comment {
+            if bytes[i] == b'\n' {
+                line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if block_comment > 0 {
+            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                block_comment += 1;
+                i += 2;
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                block_comment -= 1;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if bytes[i] == b'\\' {
+                escaped = true;
+            } else if bytes[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            line_comment = true;
+            i += 2;
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            block_comment = 1;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+
+        match bytes[i] {
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_RUST_SYNTAX_NESTING {
+                    bail!(
+                        "Rust source nesting in {} exceeds supported depth {}",
+                        path.display(),
+                        MAX_RUST_SYNTAX_NESTING
+                    );
+                }
+            }
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 fn discover_mutants_with_suppressions(
     root: &Path,
     operator: Option<&str>,
@@ -1869,6 +1951,7 @@ fn discover_mutants_with_suppressions(
 
         let source = fs::read_to_string(entry.path())
             .with_context(|| format!("cannot read {}", entry.path().display()))?;
+        validate_source_nesting(&source, entry.path())?;
         let syntax = match syn::parse_file(&source) {
             Ok(file) => file,
             Err(_) => continue,
