@@ -92,3 +92,7 @@ A useful rule is to separate baseline failures from mutant failures:
 - **Compile or tests exceed the configured timeout:** the mutant is `TIMEOUT`.
 
 When reporting a problem, include the Soro Mutants version, target-project commit, Rust toolchain, exact test command, and whether the clean baseline passes.
+
+## Deeply nested Rust syntax
+
+Before parsing a Rust file, Soro Mutants applies a structural-depth guard. Source with more than **256** nested delimiters is rejected with an actionable error. Delimiters in ordinary strings and comments do not count. This is a denial-of-service safety boundary for pathological source, not a normal contract restriction.
