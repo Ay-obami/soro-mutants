@@ -473,6 +473,10 @@ See [docs/benchmark.md](docs/benchmark.md) for exact commands, commit hashes, ex
 - [Performance tuning](docs/performance-tuning.md)
 - [Report consumer guide](docs/report-consumer.md)
 - [Roadmap](docs/roadmap.md)
+- [CLI Filter Fuzzing](docs/fuzzing.md)
+- [Fixture Conventions](docs/fixture-conventions.md)
+- [Fixture Coverage Matrix](docs/fixture-coverage-matrix.md)
+- [Compile Viability Suite](docs/compile-viability.md)
 - [Drips / Stellar Wave maintainer brief](docs/drips-application.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
@@ -488,3 +492,9 @@ The objective release gate is documented in [docs/v1-release-checklist.md](docs/
 ## Custom operator extension prototype
 
 A versioned compile-time extension boundary is documented in [docs/extensions.md](docs/extensions.md), with a runnable example in `examples/custom_operator.rs`.
+## Maintainer and security guides
+
+- [v1.0 maintainer architecture overview](docs/v1-maintainer-architecture.md) — parser, discovery, runner, isolation, reporting and CLI boundaries.
+- [v1.0 operator authoring guide](docs/operator-authoring.md) — conservative recognizers, fixtures and false-positive tests.
+- [Dependency advisory scanning](docs/dependency-auditing.md) — continuous RustSec audit and reviewed exception policy.
+- [Security policy](SECURITY.md) — reporting and diagnostic secret-redaction boundary.

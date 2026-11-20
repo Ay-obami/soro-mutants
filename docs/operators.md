@@ -1,6 +1,7 @@
 # Operator Specification
 
 This document defines the semantic contract of the v0.1 mutation operators.
+See the [Fixture Coverage Matrix](fixture-coverage-matrix.md) for full mapping of test fixtures across all operators.
 
 ## AUTH-001 — remove authorization
 

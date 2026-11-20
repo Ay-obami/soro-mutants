@@ -14,6 +14,10 @@ This is the objective release gate for v1.0. A release candidate is ready only w
 
 - [ ] Every operator from `cargo soro-mutants operators` is documented in `docs/operators.md`.
 - [ ] Every shipped operator has positive and false-positive regression coverage.
+- [ ] CLI filter parsing is fuzz-tested panic-free (`docs/fuzzing.md`).
+- [ ] Fixture organization follows `docs/fixture-conventions.md`.
+- [ ] Fixture coverage matrix in `docs/fixture-coverage-matrix.md` tracks all operators.
+- [ ] Compile-only fixture suite in `fixtures/compile-only/` validates compile viability.
 - [ ] Equivalent-mutant suppression tests pass.
 - [ ] Documentation never equates a surviving mutant with a vulnerability.
 
@@ -40,7 +44,8 @@ This is the objective release gate for v1.0. A release candidate is ready only w
 - [ ] Normal user-controlled invalid input returns errors, not panics.
 - [ ] Managed cleanup paths cannot be redirected through symlinks.
 - [ ] Report output does not overwrite a final-path symlink target.
-- [ ] Dependency advisory review has no unreviewed critical/high finding.
+- [ ] Dependency advisory review has no unreviewed critical/high finding; the independent RustSec audit job passes (see [policy](dependency-auditing.md)).
+- [ ] Environment credential redaction regression tests pass for errors, metadata, and child stderr.
 - [ ] Package contains no credentials, local secrets, or private fixture data.
 
 ## Compatibility — Required

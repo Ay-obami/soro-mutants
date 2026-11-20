@@ -1,14 +1,17 @@
+mod redaction;
+
 use anyhow::{bail, Context, Result};
 use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::{GlobSet, GlobSetBuilder};
 use proc_macro2::Span;
+use redaction::redact_environment_secrets;
 use serde::{Deserialize, Serialize};
 use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, Write},
+    io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -20,6 +23,11 @@ use syn::{
 };
 use wait_timeout::ChildExt;
 use walkdir::{DirEntry, WalkDir};
+
+mod filters;
+use filters::{
+    parse_exclude_glob, parse_file_filter, parse_function_filter, parse_operator, Shard,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "cargo-soro-mutants")]
@@ -144,10 +152,10 @@ enum Commands {
         #[arg(long, value_name = "INDEX/TOTAL")]
         shard: Option<Shard>,
         /// Only list mutants in source files ending with this path.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_file_filter)]
         file: Option<String>,
         /// Only list mutants inside this function.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_function_filter)]
         function: Option<String>,
         /// Restrict selection to these project-relative paths (repeatable).
         #[arg(long, value_name = "PATH", conflicts_with = "diff_base")]
@@ -186,10 +194,10 @@ enum Commands {
         #[arg(long, value_name = "INDEX/TOTAL")]
         shard: Option<Shard>,
         /// Only execute mutants in source files ending with this path.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_file_filter)]
         file: Option<String>,
         /// Only execute mutants inside this function.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_function_filter)]
         function: Option<String>,
         /// Restrict selection to these project-relative paths (repeatable).
         #[arg(long, value_name = "PATH", conflicts_with = "diff_base")]
@@ -342,58 +350,6 @@ impl From<CompletionShell> for Shell {
     }
 }
 
-fn parse_operator(value: &str) -> std::result::Result<String, String> {
-    if BUILTIN_OPERATORS.iter().any(|(id, _)| *id == value) {
-        Ok(value.to_owned())
-    } else {
-        let valid_ids = BUILTIN_OPERATORS
-            .iter()
-            .map(|(id, _)| *id)
-            .collect::<Vec<_>>()
-            .join(", ");
-        Err(format!(
-            "unknown operator ID {value:?}; valid IDs: {valid_ids}"
-        ))
-    }
-}
-
-fn parse_exclude_glob(value: &str) -> std::result::Result<globset::Glob, String> {
-    GlobBuilder::new(value)
-        .literal_separator(true)
-        .backslash_escape(true)
-        .build()
-        .map_err(|error| format!("invalid exclude-path glob {value:?}: {error}"))
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Shard {
-    index: usize,
-    total: usize,
-}
-
-impl std::str::FromStr for Shard {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        let invalid =
-            || "expected INDEX/TOTAL with 1 <= INDEX <= TOTAL (positive integers)".to_owned();
-        let (index, total) = value.split_once('/').ok_or_else(invalid)?;
-        if index.is_empty()
-            || total.is_empty()
-            || !index.bytes().all(|b| b.is_ascii_digit())
-            || !total.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Err(invalid());
-        }
-        let index = index.parse::<usize>().map_err(|_| invalid())?;
-        let total = total.parse::<usize>().map_err(|_| invalid())?;
-        if index == 0 || total == 0 || index > total {
-            return Err(invalid());
-        }
-        Ok(Self { index, total })
-    }
-}
-
 fn select_shard(mutants: Vec<Mutant>, shard: Option<Shard>) -> Vec<Mutant> {
     let Some(shard) = shard else { return mutants };
     mutants
@@ -491,7 +447,7 @@ impl RunMetadata {
         Self {
             rustc_version: tool_version("rustc"),
             cargo_version: tool_version("cargo"),
-            test_command: test_command.to_owned(),
+            test_command: redact_environment_secrets(test_command),
             compile_timeout_seconds: timeouts.compile,
             test_timeout_seconds: timeouts.test,
         }
@@ -2224,7 +2180,10 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Error: {error:#}");
+            eprintln!(
+                "Error: {}",
+                redact_environment_secrets(&format!("{error:#}"))
+            );
             if error.downcast_ref::<BaselineFailure>().is_some() {
                 std::process::ExitCode::from(3)
             } else if error.downcast_ref::<ScoreThresholdFailure>().is_some() {
@@ -2516,7 +2475,11 @@ fn run() -> Result<()> {
                 .map(|dir| root.join(dir))
                 .unwrap_or_else(|| root.clone());
             if !json && !markdown && !html && !sarif {
-                writeln!(report, "Baseline: {}", test_command)?;
+                writeln!(
+                    report,
+                    "Baseline: {}",
+                    redact_environment_secrets(&test_command)
+                )?;
             }
             match run_process(
                 &test_cwd,
@@ -5486,6 +5449,10 @@ fn run_process(
 ) -> Result<ProcessResult> {
     fs::create_dir_all(target_dir)?;
 
+    // Never send a child process's untrusted stderr directly to the terminal.
+    // Sanitize it before forwarding, while draining concurrently to avoid a
+    // blocked child on a full pipe. Only diagnostic output is sanitized: source
+    // excerpts intentionally supplied by the user retain their original bytes.
     let mut child = Command::new("bash")
         .arg("-lc")
         .arg(command)
@@ -5493,19 +5460,41 @@ fn run_process(
         .env("CARGO_TARGET_DIR", target_dir)
         .env_remove("RUSTUP_TOOLCHAIN")
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("failed to execute: {}", command))?;
+        .with_context(|| format!("failed to execute: {}", redact_environment_secrets(command)))?;
 
-    match child.wait_timeout(Duration::from_secs(timeout_seconds))? {
-        Some(status) if status.success() => Ok(ProcessResult::Passed),
-        Some(_) => Ok(ProcessResult::Failed),
+    let child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("cannot capture test command diagnostics"))?;
+    let stderr_reader = std::thread::spawn(move || -> io::Result<()> {
+        let mut reader = io::BufReader::new(child_stderr);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line)? == 0 {
+                break;
+            }
+            let message = redact_environment_secrets(&String::from_utf8_lossy(&line));
+            io::stderr().write_all(message.as_bytes())?;
+        }
+        Ok(())
+    });
+
+    let result = match child.wait_timeout(Duration::from_secs(timeout_seconds))? {
+        Some(status) if status.success() => ProcessResult::Passed,
+        Some(_) => ProcessResult::Failed,
         None => {
             let _ = child.kill();
             let _ = child.wait();
-            Ok(ProcessResult::Timeout)
+            ProcessResult::Timeout
         }
-    }
+    };
+    stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("cannot collect test command diagnostics"))??;
+    Ok(result)
 }
 
 fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
