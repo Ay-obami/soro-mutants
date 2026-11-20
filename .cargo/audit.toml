@@ -1,0 +1,6 @@
+# Explicit, reviewed exceptions only. Keep this list empty by default.
+# An exception requires a PR explaining why it cannot be fixed immediately,
+# its impact, compensating controls, an owner, and a removal/review date.
+# See docs/dependency-auditing.md.
+[advisories]
+ignore = []

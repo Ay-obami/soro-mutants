@@ -121,3 +121,14 @@ jobs:
             "${{ matrix.strong }}" \
             "${{ matrix.expected }}" \
             "${{ matrix.function }}"
+
+  dependency-audit:
+    name: RustSec dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: Check locked dependencies for known advisories
+        run: cargo audit --file Cargo.lock
