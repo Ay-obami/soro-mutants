@@ -1,11 +1,11 @@
 mod redaction;
 
-use redaction::redact_environment_secrets;
 use anyhow::{bail, Context, Result};
 use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use proc_macro2::Span;
+use redaction::redact_environment_secrets;
 use serde::{Deserialize, Serialize};
 use std::{
     env,

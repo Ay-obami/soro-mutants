@@ -17,10 +17,8 @@ impl TemporaryProject {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "soro-redaction-{}-{nonce}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("soro-redaction-{}-{nonce}", std::process::id()));
         fs::create_dir_all(root.join("src")).expect("create isolated test project");
         fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/weak-auth/src/lib.rs"),

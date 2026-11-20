@@ -19,15 +19,16 @@ fn is_sensitive_name(name: &str) -> bool {
         || key.contains("AUTHORIZATION")
 }
 
-/// Replace values of credential-shaped environment variables, longest first.
-/// Values shorter than four bytes are not replaced: replacing a common short
-/// substring would make diagnostic output unusable.
+/// Replace non-empty values of credential-shaped environment variables,
+/// longest first. Even short credential values are redacted: diagnostics may
+/// become less readable in that unusual case, but the security invariant is
+/// that configured secrets are never emitted.
 pub(crate) fn redact_environment_secrets(message: &str) -> String {
     let mut secrets: Vec<String> = std::env::vars_os()
         .filter_map(|(name, value)| {
             let name = name.into_string().ok()?;
             let value = value.into_string().ok()?;
-            (is_sensitive_name(&name) && value.len() >= 4).then_some(value)
+            (is_sensitive_name(&name) && !value.is_empty()).then_some(value)
         })
         .collect();
     secrets.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
@@ -65,5 +66,14 @@ mod tests {
             redact_environment_secrets("diagnostic without a credential"),
             "diagnostic without a credential"
         );
+    }
+
+    #[test]
+    fn redacts_short_sensitive_values_too() {
+        const KEY: &str = "SORO_MUTANTS_SHORT_SECRET";
+        std::env::set_var(KEY, "z7");
+        let redacted = redact_environment_secrets("credential=z7");
+        std::env::remove_var(KEY);
+        assert_eq!(redacted, "credential=[REDACTED]");
     }
 }
