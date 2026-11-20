@@ -27,6 +27,11 @@ impl<'ast> Visit<'ast> for SafeAstVisitor {
         syn::visit::visit_item_fn(self, node);
     }
 
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.function_count += 1;
+        syn::visit::visit_impl_item_fn(self, node);
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let name = node.method.to_string();
         if matches!(
@@ -116,7 +121,10 @@ pub fn validate_nesting(source: &str) -> Result<(), String> {
 
 /// Safely validates, parses, and traverses arbitrary Rust source input.
 /// Returns structured diagnostics instead of panicking on malformed or pathological syntax.
-pub fn parse_and_discover_source(source: &str, _file: &Path) -> Result<ParsedSourceSummary, String> {
+pub fn parse_and_discover_source(
+    source: &str,
+    _file: &Path,
+) -> Result<ParsedSourceSummary, String> {
     validate_nesting(source)?;
 
     let syntax = match syn::parse_file(source) {

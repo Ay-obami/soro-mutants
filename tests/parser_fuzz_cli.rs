@@ -31,7 +31,8 @@ fn parser_entry_point_handles_valid_soroban_contract() {
 #[test]
 fn parser_entry_point_rejects_pathological_nesting_panic_free() {
     // Deliberate nesting exceeding MAX_RUST_SYNTAX_NESTING
-    let deep_nested = "{".repeat(MAX_RUST_SYNTAX_NESTING + 5) + &"}".repeat(MAX_RUST_SYNTAX_NESTING + 5);
+    let deep_nested =
+        "{".repeat(MAX_RUST_SYNTAX_NESTING + 5) + &"}".repeat(MAX_RUST_SYNTAX_NESTING + 5);
     let res = validate_nesting(&deep_nested);
     assert!(res.is_err());
     let err = res.unwrap_err();

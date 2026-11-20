@@ -10,11 +10,8 @@ struct TempProject {
 
 impl TempProject {
     fn new(suffix: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "soro-order-prop-{}-{}",
-            std::process::id(),
-            suffix
-        ));
+        let root =
+            std::env::temp_dir().join(format!("soro-order-prop-{}-{}", std::process::id(), suffix));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
 
