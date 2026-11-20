@@ -109,3 +109,24 @@ from combined outcome counts, since shards can have different numbers of viable
 mutants. Each nonempty shard repeats the clean baseline, and empty shards still
 produce valid reports. See [performance tuning](performance-tuning.md) for the
 trade-offs of increasing the shard count.
+
+## CI test-suite runtime budget monitoring
+
+To detect accidental performance regressions and unbounded test suite execution times early, CI enforces a tolerant runtime budget via `.github/scripts/check-runtime-budget.sh`.
+
+- **Tolerant threshold**: A budget of 480 seconds (8 minutes) is allocated for `cargo test --all` to accommodate CI virtualization variances while strictly preventing pathological regressions from exceeding the job timeout.
+- **Diagnostics**: If the test suite exceeds the allocated threshold, the script outputs detailed metadata including total elapsed time, budget ceiling, and actionable troubleshooting guidance.
+
+### Running locally
+Contributors can verify runtime budget compliance locally:
+```bash
+# Verify with custom budget (e.g. 300 seconds)
+.github/scripts/check-runtime-budget.sh 300 cargo test --all
+
+# Run self-test regression suite
+.github/scripts/check-runtime-budget.sh --self-test
+```
+Or run the dedicated test target:
+```bash
+cargo test --test runtime_budget_cli
+```
