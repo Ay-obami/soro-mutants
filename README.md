@@ -424,3 +424,9 @@ The objective release gate is documented in [docs/v1-release-checklist.md](docs/
 ## Custom operator extension prototype
 
 A versioned compile-time extension boundary is documented in [docs/extensions.md](docs/extensions.md), with a runnable example in `examples/custom_operator.rs`.
+## Maintainer and security guides
+
+- [v1.0 maintainer architecture overview](docs/v1-maintainer-architecture.md) — parser, discovery, runner, isolation, reporting and CLI boundaries.
+- [v1.0 operator authoring guide](docs/operator-authoring.md) — conservative recognizers, fixtures and false-positive tests.
+- [Dependency advisory scanning](docs/dependency-auditing.md) — continuous RustSec audit and reviewed exception policy.
+- [Security policy](SECURITY.md) — reporting and diagnostic secret-redaction boundary.

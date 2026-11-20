@@ -76,3 +76,7 @@ Do not publish a claim that a third-party project is exploitable based only on a
 ## Pull request scope
 
 Avoid unrelated refactors in operator PRs. Performance work, output formats, runners, operator additions, and benchmark-corpus changes should remain separable whenever possible.
+
+## Detailed maintainer guidance
+
+For built-in operator changes, follow the [v1.0 operator authoring guide](docs/operator-authoring.md) and the [maintainer architecture overview](docs/v1-maintainer-architecture.md). For dependency changes, review [RustSec advisory scanning and exception policy](docs/dependency-auditing.md).
