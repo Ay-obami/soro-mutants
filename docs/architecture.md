@@ -129,6 +129,28 @@ Mutants are assigned to workers dynamically, so they *finish* in a non-determini
 
 If a mutant cannot be executed (for example an I/O error while copying the project), no new mutants are started, in-flight mutants are allowed to finish, scratch worktrees are removed, and the error with the lowest mutant ID is reported.
 
+### Deterministic mutant discovery and ordering
+
+To guarantee repeatable test runs, consistent sharding, and stable report diffs across environments, mutant discovery uses a total canonical ordering that never inherits the host filesystem's directory traversal order (`walkdir`).
+
+Mutant candidates are ordered using an 8-key lexicographic tie-breaker:
+1. `file` — relative path to the source file.
+2. `start_byte` — byte offset where the mutation begins.
+3. `operator` — canonical mutation operator identifier (e.g., `AUTH-001`, `AUTH-002`).
+4. `replacement` — substituted syntax string.
+5. `end_byte` — byte offset where the mutation ends.
+6. `original` — original syntax snippet.
+7. `function` — enclosing function identifier (if resolved).
+8. `description` — human-readable diagnostic description.
+
+Mutant identifiers (`M0001`, `M0002`, ...) and sharding partitions are assigned only after this total ordering step.
+
+Contributors can run the bounded property tests locally to verify invariant ordering across randomized filesystem traversal and in-memory permutations:
+```bash
+cargo test --test ordering_property_cli
+```
+
+
 ### Trade-offs
 
 **Disk space.** Every worker has its own complete Cargo target directory. For Soroban contracts this is typically on the order of 1 GB or more per worker (about 1.3 GB per worker for this repository's token fixtures), so `--jobs 4` needs roughly four times the serial mutant cache, plus one scratch copy of the project per worker. Use `cargo soro-mutants clean` (with the same `--target-dir`, if any) to remove all worker caches.
