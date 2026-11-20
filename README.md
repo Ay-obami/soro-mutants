@@ -409,6 +409,7 @@ See [docs/benchmark.md](docs/benchmark.md) for exact commands, commit hashes, ex
 - [Performance tuning](docs/performance-tuning.md)
 - [Report consumer guide](docs/report-consumer.md)
 - [Roadmap](docs/roadmap.md)
+- [Fixture Coverage Matrix](docs/fixture-coverage-matrix.md)
 - [Drips / Stellar Wave maintainer brief](docs/drips-application.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)

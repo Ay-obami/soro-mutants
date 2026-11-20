@@ -14,6 +14,7 @@ This is the objective release gate for v1.0. A release candidate is ready only w
 
 - [ ] Every operator from `cargo soro-mutants operators` is documented in `docs/operators.md`.
 - [ ] Every shipped operator has positive and false-positive regression coverage.
+- [ ] Fixture coverage matrix in `docs/fixture-coverage-matrix.md` tracks all operators.
 - [ ] Equivalent-mutant suppression tests pass.
 - [ ] Documentation never equates a surviving mutant with a vulnerability.
 
