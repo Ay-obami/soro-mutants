@@ -12,7 +12,13 @@ libfuzzer-sys = "0.4"
 cargo-soro-mutants = { path = ".." }
 
 [[bin]]
-name = "filter_parser"
-path = "fuzz_targets/filter_parser.rs"
+name = "parser_discovery"
+path = "fuzz_targets/parser_discovery.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "report_serialization"
+path = "fuzz_targets/report_serialization.rs"
 test = false
 doc = false
