@@ -1,5 +1,7 @@
 //! Versioned extension boundary for custom semantic operator prototypes.
 
+pub mod report;
+
 pub mod extension {
     pub mod v1 {
         use std::path::{Path, PathBuf};

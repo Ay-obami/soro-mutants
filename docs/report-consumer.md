@@ -76,3 +76,19 @@ used root arrays and need an explicit legacy reader. See the
 Reports include original and replacement source snippets, and test metadata
 contains the configured command verbatim. Review these fields before sharing
 artifacts outside the project.
+
+## Serialization Robustness and Fuzzing
+
+Report serialization across JSON, Markdown, and HTML is fuzz-tested against arbitrary and adversarial inputs:
+- HTML reports escape control characters and tags (`<script>`, `&`, `"`, `'`) via HTML entity encoding.
+- Markdown reports sanitize pipe delimiters (`|`) and newlines to preserve tabular layouts.
+- JSON reports strictly adhere to schema version 1 and encode arbitrary Unicode cleanly.
+
+Contributors can run report serialization fuzz tests locally:
+```bash
+cargo test --test report_fuzz_cli
+```
+Or run the LibFuzzer target:
+```bash
+cargo fuzz run report_serialization -- -max_total_time=60
+```
