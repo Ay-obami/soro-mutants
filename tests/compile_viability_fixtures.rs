@@ -4,10 +4,14 @@ fn shared_target_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/compile-only-fixtures")
 }
 
-fn run_fixture(path: &str, operator: &str) -> serde_json::Value {
+fn run_fixture(path: &str, operator: &str, function: Option<&str>) -> serde_json::Value {
     let target = shared_target_dir();
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
-        .args(["test", path, "--json", "--operator", operator])
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"));
+    command.args(["test", path, "--json", "--operator", operator]);
+    if let Some(function) = function {
+        command.args(["--function", function]);
+    }
+    let output = command
         .arg("--target-dir")
         .arg(&target)
         .args([
@@ -29,8 +33,8 @@ fn run_fixture(path: &str, operator: &str) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("valid JSON report")
 }
 
-fn assert_fixture_reaches_compile_gate(path: &str, operator: &str) {
-    let report = run_fixture(path, operator);
+fn assert_fixture_reaches_compile_gate(path: &str, operator: &str, function: Option<&str>) {
+    let report = run_fixture(path, operator, function);
     let results = report["results"].as_array().expect("results array");
     assert!(
         !results.is_empty(),
@@ -50,25 +54,29 @@ fn assert_fixture_reaches_compile_gate(path: &str, operator: &str) {
 #[test]
 #[ignore = "requires Soroban SDK Rust 1.91; CI runs this target explicitly"]
 fn compile_only_auth_fixture_mutants_reach_compile_gate() {
-    assert_fixture_reaches_compile_gate("fixtures/compile-only/auth", "AUTH-001");
+    assert_fixture_reaches_compile_gate("fixtures/compile-only/auth", "AUTH-001", None);
 }
 
 #[test]
 #[ignore = "requires Soroban SDK Rust 1.91; CI runs this target explicitly"]
 fn compile_only_token_fixture_mutants_reach_compile_gate() {
-    assert_fixture_reaches_compile_gate("fixtures/compile-only/token", "TOKEN-001");
+    assert_fixture_reaches_compile_gate("fixtures/compile-only/token", "TOKEN-001", None);
 }
 
 #[test]
 #[ignore = "requires Soroban SDK Rust 1.91; CI runs this target explicitly"]
 fn compile_only_event_fixture_mutants_reach_compile_gate() {
-    assert_fixture_reaches_compile_gate("fixtures/compile-only/event", "EVENT-001");
+    assert_fixture_reaches_compile_gate("fixtures/compile-only/event", "EVENT-001", None);
 }
 
 #[test]
 #[ignore = "requires Soroban SDK Rust 1.91; CI runs this target explicitly"]
 fn compile_only_storage_fixture_mutants_reach_compile_gate() {
-    assert_fixture_reaches_compile_gate("fixtures/compile-only/storage", "STORAGE-001");
+    assert_fixture_reaches_compile_gate(
+        "fixtures/compile-only/storage",
+        "STORAGE-001",
+        Some("update_storage"),
+    );
 }
 
 #[test]
