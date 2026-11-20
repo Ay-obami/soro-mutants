@@ -3067,13 +3067,12 @@ fn load_benchmark_manifest(path: &Path) -> Result<BenchmarkManifest> {
         }
         match target.kind {
             BenchmarkTargetKind::Local => {
-                if target.path.is_none() {
+                let Some(declared) = target.path.as_deref() else {
                     bail!("{location}.path is required for kind=local");
-                }
+                };
                 if target.repository.is_some() || target.revision.is_some() {
                     bail!("{location} must not declare repository/revision for kind=local");
                 }
-                let declared = target.path.as_deref().unwrap();
                 let resolved = declared.canonicalize().with_context(|| {
                     format!("{location}.path does not exist: {}", declared.display())
                 })?;
