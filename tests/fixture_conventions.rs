@@ -40,10 +40,18 @@ fn fixture_directories_follow_naming_and_layout_conventions() {
         if name != "compile-only" {
             let cargo_toml = path.join("Cargo.toml");
             let src_lib = path.join("src").join("lib.rs");
-            if cargo_toml.exists() {
+            if cargo_toml.exists() && !name.starts_with("workspace-") {
                 assert!(
                     src_lib.exists(),
                     "fixture '{name}' has Cargo.toml but missing src/lib.rs"
+                );
+            }
+            if name.starts_with("workspace-") {
+                let manifest = fs::read_to_string(&cargo_toml)
+                    .expect("workspace fixture must have a readable Cargo.toml");
+                assert!(
+                    manifest.contains("[workspace]") && manifest.contains("members"),
+                    "workspace fixture '{name}' must declare workspace members"
                 );
             }
         }

@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, Val, Vec};
 
 #[contract]
 pub struct AuthCompileViabilityContract;
@@ -12,7 +12,7 @@ impl AuthCompileViabilityContract {
         env.storage().instance().set(&symbol_short!("dest"), &to);
     }
 
-    pub fn verify_auth_003(caller: Address, args: Vec<Address>) {
+    pub fn verify_auth_003(caller: Address, args: Vec<Val>) {
         caller.require_auth_for_args(args);
     }
 
