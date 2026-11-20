@@ -7,6 +7,8 @@ const KNOWN_OPERATOR_IDS: &[&str] = &[
     "AUTH-003",
     "AUTH-004",
     "AUTH-005",
+    "AUTH-006",
+    "AUTH-007",
     "CALL-001",
     "CALL-002",
     "CALL-003",

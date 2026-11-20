@@ -1,6 +1,6 @@
 # Fixture Coverage Matrix
 
-This document tracks fixture test coverage for all 21 built-in semantic mutation operators in Soro Mutants.
+This document tracks fixture test coverage for all 23 built-in semantic mutation operators in Soro Mutants.
 
 ## Matrix Overview
 
@@ -21,6 +21,8 @@ Coverage dimensions tracked:
 | **AUTH-003** | Replace `require_auth_for_args(...)` argument set with empty Vec | `fixtures/weak-auth-args` | Non-Soroban args check | `fixtures/weak-auth-args` | `fixtures/strong-auth-args` | Viable | Yes |
 | **AUTH-004** | Skip or redirect auth through local `require_auth()` helper | `fixtures/weak-auth-helper` | Complex/external helpers | `fixtures/weak-auth-helper` | `fixtures/strong-auth-helper` | Viable | Yes |
 | **AUTH-005** | Replace stored admin/owner authority with another Address parameter | `fixtures/weak-auth-admin` | Non-admin storage keys | `fixtures/weak-auth-admin` | `fixtures/strong-auth-admin` | Viable | Yes |
+| **AUTH-006** | Remove or redirect authorization in recognized initialization entrypoints | `fixtures/weak-init-auth` | Generic authorization outside initialization context | `fixtures/weak-init-auth` | `fixtures/strong-init-auth` | Viable | Yes |
+| **AUTH-007** | Remove or redirect authorization in recognized contract-upgrade entrypoints | `fixtures/weak-upgrade-auth` | Generic authorization outside upgrade context | `fixtures/weak-upgrade-auth` | `fixtures/strong-upgrade-auth` | Viable | Yes |
 | **CALL-001** | Replace `Env::invoke_contract` dependency address with another Address | `fixtures/weak-call-target` | Non-client target addresses | `fixtures/weak-call-target` | `fixtures/strong-call-target` | Viable | Yes |
 | **CALL-002** | Replace contract-client call argument with another typed parameter | `fixtures/weak-call-args` | Non-matching argument types | `fixtures/weak-call-args` | `fixtures/strong-call-args` | Viable | Yes |
 | **CALL-003** | Remove supported contract-client return mismatch check | `fixtures/weak-call-return` | Non-contract-client returns | `fixtures/weak-call-return` | `fixtures/strong-call-return` | Viable | Yes |

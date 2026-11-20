@@ -33,6 +33,14 @@ impl Drop for TempDir {
 }
 
 fn run_test(root: &Path, args: &[&str]) -> Output {
+    use std::sync::{Mutex, OnceLock};
+
+    static COMMAND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = COMMAND_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("resumable-run command lock");
+
     Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
         .arg("test")
         .arg(root)

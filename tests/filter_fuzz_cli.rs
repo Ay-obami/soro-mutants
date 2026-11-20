@@ -37,6 +37,27 @@ fn operator_filter_parsing_deterministic_and_panic_free() {
 }
 
 #[test]
+fn filter_operator_registry_matches_real_cli_registry() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
+        .arg("operators")
+        .output()
+        .expect("operators command should run");
+    assert!(
+        output.status.success(),
+        "operators command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("operators output is UTF-8");
+    let cli_ids: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|token| token.contains('-'))
+        .collect();
+    assert_eq!(cli_ids, KNOWN_OPERATOR_IDS);
+}
+
+#[test]
 fn shard_filter_parsing_deterministic_and_panic_free() {
     let valid_shards = [
         ("1/1", 1, 1),
