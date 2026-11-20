@@ -410,6 +410,7 @@ See [docs/benchmark.md](docs/benchmark.md) for exact commands, commit hashes, ex
 - [Report consumer guide](docs/report-consumer.md)
 - [Roadmap](docs/roadmap.md)
 - [CLI Filter Fuzzing](docs/fuzzing.md)
+- [Fixture Conventions](docs/fixture-conventions.md)
 - [Drips / Stellar Wave maintainer brief](docs/drips-application.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
