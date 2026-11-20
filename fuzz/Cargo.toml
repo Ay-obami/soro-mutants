@@ -1,0 +1,18 @@
+[package]
+name = "cargo-soro-mutants-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cargo-soro-mutants = { path = ".." }
+
+[[bin]]
+name = "filter_parser"
+path = "fuzz_targets/filter_parser.rs"
+test = false
+doc = false

@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use globset::{GlobSet, GlobSetBuilder};
 use proc_macro2::Span;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,6 +20,11 @@ use syn::{
 };
 use wait_timeout::ChildExt;
 use walkdir::{DirEntry, WalkDir};
+
+mod filters;
+use filters::{
+    parse_exclude_glob, parse_file_filter, parse_function_filter, parse_operator, Shard,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "cargo-soro-mutants")]
@@ -136,10 +141,10 @@ enum Commands {
         #[arg(long, value_name = "INDEX/TOTAL")]
         shard: Option<Shard>,
         /// Only list mutants in source files ending with this path.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_file_filter)]
         file: Option<String>,
         /// Only list mutants inside this function.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_function_filter)]
         function: Option<String>,
         /// Restrict selection to these project-relative paths (repeatable).
         #[arg(long, value_name = "PATH", conflicts_with = "diff_base")]
@@ -178,10 +183,10 @@ enum Commands {
         #[arg(long, value_name = "INDEX/TOTAL")]
         shard: Option<Shard>,
         /// Only execute mutants in source files ending with this path.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_file_filter)]
         file: Option<String>,
         /// Only execute mutants inside this function.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_function_filter)]
         function: Option<String>,
         /// Restrict selection to these project-relative paths (repeatable).
         #[arg(long, value_name = "PATH", conflicts_with = "diff_base")]
@@ -289,58 +294,6 @@ impl From<CompletionShell> for Shell {
             CompletionShell::Zsh => Shell::Zsh,
             CompletionShell::Fish => Shell::Fish,
         }
-    }
-}
-
-fn parse_operator(value: &str) -> std::result::Result<String, String> {
-    if BUILTIN_OPERATORS.iter().any(|(id, _)| *id == value) {
-        Ok(value.to_owned())
-    } else {
-        let valid_ids = BUILTIN_OPERATORS
-            .iter()
-            .map(|(id, _)| *id)
-            .collect::<Vec<_>>()
-            .join(", ");
-        Err(format!(
-            "unknown operator ID {value:?}; valid IDs: {valid_ids}"
-        ))
-    }
-}
-
-fn parse_exclude_glob(value: &str) -> std::result::Result<globset::Glob, String> {
-    GlobBuilder::new(value)
-        .literal_separator(true)
-        .backslash_escape(true)
-        .build()
-        .map_err(|error| format!("invalid exclude-path glob {value:?}: {error}"))
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Shard {
-    index: usize,
-    total: usize,
-}
-
-impl std::str::FromStr for Shard {
-    type Err = String;
-
-    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        let invalid =
-            || "expected INDEX/TOTAL with 1 <= INDEX <= TOTAL (positive integers)".to_owned();
-        let (index, total) = value.split_once('/').ok_or_else(invalid)?;
-        if index.is_empty()
-            || total.is_empty()
-            || !index.bytes().all(|b| b.is_ascii_digit())
-            || !total.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Err(invalid());
-        }
-        let index = index.parse::<usize>().map_err(|_| invalid())?;
-        let total = total.parse::<usize>().map_err(|_| invalid())?;
-        if index == 0 || total == 0 || index > total {
-            return Err(invalid());
-        }
-        Ok(Self { index, total })
     }
 }
 
