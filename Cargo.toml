@@ -23,6 +23,7 @@ include = [
 [workspace]
 members = ["."]
 exclude = [
+    "fuzz",
     "fixtures/weak-auth",
     "fixtures/strong-auth",
     "fixtures/workspace-multi-package",
