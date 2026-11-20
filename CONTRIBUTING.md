@@ -24,6 +24,7 @@ A new operator should satisfy all of these:
 - The operator has a narrow recognizer to avoid unrelated method calls with the same name.
 - At least one test demonstrates discovery of the intended mutation.
 - At least one test covers an important false-positive boundary.
+- Test fixtures follow the [Fixture Conventions](docs/fixture-conventions.md).
 - The operator documentation explains what a surviving mutant means and what it does **not** prove.
 
 Use IDs grouped by semantic family:
