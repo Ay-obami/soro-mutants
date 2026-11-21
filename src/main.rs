@@ -3641,6 +3641,9 @@ fn run_timed_command(
     let mut child = command
         .current_dir(cwd)
         .env("CARGO_TARGET_DIR", target_dir)
+        // Baseline, mutant compile and mutant test commands all inherit the
+        // same parent environment. Only the per-phase target directory and
+        // toolchain override are intentional differences.
         .env_remove("RUSTUP_TOOLCHAIN")
         .stdout(Stdio::from(fs::File::create(&stdout_path)?))
         .stderr(Stdio::from(fs::File::create(&stderr_path)?))
