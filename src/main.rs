@@ -28,7 +28,7 @@ use walkdir::{DirEntry, WalkDir};
 
 mod filters;
 use filters::{
-    parse_exclude_glob, parse_file_filter, parse_function_filter, parse_operator, Shard,
+    parse_exclude_glob, parse_file_filter, parse_function_filter, Shard,
 };
 
 #[derive(Parser, Debug)]
@@ -231,13 +231,13 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = Runner::CargoTest)]
         runner: Runner,
         /// Legacy timeout in seconds used for both phases unless overridden.
-        #[arg(long, default_value = "120s", value_parser = parse_duration)]
+        #[arg(long, default_value = "120s", value_parser = parse_duration, allow_hyphen_values = true)]
         timeout: u64,
         /// Timeout in seconds for each mutant's separate compile gate.
-        #[arg(long, value_parser = parse_duration)]
+        #[arg(long, value_parser = parse_duration, allow_hyphen_values = true)]
         compile_timeout: Option<u64>,
         /// Timeout in seconds for baseline and mutant test commands.
-        #[arg(long, value_parser = parse_duration)]
+        #[arg(long, value_parser = parse_duration, allow_hyphen_values = true)]
         test_timeout: Option<u64>,
         /// Number of mutants to execute concurrently (1 keeps serial execution).
         /// Each worker uses its own scratch worktree and Cargo target directory.
@@ -318,7 +318,7 @@ enum Commands {
         #[arg(long, default_value = ".soro-mutants-benchmarks")]
         checkout_dir: PathBuf,
         /// Timeout in seconds for each target's baseline and mutant commands.
-        #[arg(long, default_value = "120s", value_parser = parse_duration)]
+        #[arg(long, default_value = "120s", value_parser = parse_duration, allow_hyphen_values = true)]
         timeout: u64,
         /// Only run the target with this manifest id.
         #[arg(long, value_name = "ID")]
@@ -522,17 +522,32 @@ struct TestReport<'a> {
 #[derive(Clone, Debug, Serialize)]
 struct SelectionMetadata {
     operator_filter: Option<String>,
+    file_filter: Option<String>,
     function_filter: Option<String>,
+    shard_index: Option<usize>,
+    shard_total: Option<usize>,
 }
 
 impl SelectionMetadata {
-    fn capture(operator_filter: Option<&str>, function_filter: Option<&str>) -> Option<Self> {
-        if operator_filter.is_none() && function_filter.is_none() {
+    fn capture(
+        operator_filter: Option<&str>,
+        file_filter: Option<&str>,
+        function_filter: Option<&str>,
+        shard: Option<Shard>,
+    ) -> Option<Self> {
+        if operator_filter.is_none()
+            && file_filter.is_none()
+            && function_filter.is_none()
+            && shard.is_none()
+        {
             return None;
         }
         Some(Self {
             operator_filter: operator_filter.map(str::to_owned),
+            file_filter: file_filter.map(str::to_owned),
             function_filter: function_filter.map(str::to_owned),
+            shard_index: shard.map(|value| value.index),
+            shard_total: shard.map(|value| value.total),
         })
     }
 }
@@ -545,7 +560,10 @@ struct RunMetadata {
     compile_timeout_seconds: u64,
     test_timeout_seconds: u64,
     operator_filter: Option<String>,
+    file_filter: Option<String>,
     function_filter: Option<String>,
+    shard_index: Option<usize>,
+    shard_total: Option<usize>,
 }
 
 impl RunMetadata {
@@ -553,7 +571,9 @@ impl RunMetadata {
         test_command: &str,
         timeouts: Timeouts,
         operator_filter: Option<&str>,
+        file_filter: Option<&str>,
         function_filter: Option<&str>,
+        shard: Option<Shard>,
     ) -> Self {
         Self {
             rustc_version: tool_version("rustc"),
@@ -562,7 +582,10 @@ impl RunMetadata {
             compile_timeout_seconds: timeouts.compile,
             test_timeout_seconds: timeouts.test,
             operator_filter: operator_filter.map(str::to_owned),
+            file_filter: file_filter.map(str::to_owned),
             function_filter: function_filter.map(str::to_owned),
+            shard_index: shard.map(|value| value.index),
+            shard_total: shard.map(|value| value.total),
         }
     }
 }
@@ -2339,17 +2362,27 @@ fn parse_min_score(value: &str) -> std::result::Result<f64, String> {
 }
 
 fn parse_duration(value: &str) -> std::result::Result<u64, String> {
+    if value.starts_with('-') {
+        return Err(format!("duration must be positive, got {value}"));
+    }
+
     let (number, multiplier) = match value.chars().last() {
-        Some(suffix @ ('s' | 'm' | 'h' | 'd')) => {
-            let number = &value[..value.len() - suffix.len_utf8()];
-            let multiplier = match suffix { 's' => 1, 'm' => 60, 'h' => 3_600, 'd' => 86_400, _ => unreachable!() };
-            (number, multiplier)
-        }
+        Some('s') => (&value[..value.len() - 1], 1_u64),
+        Some('m') => (&value[..value.len() - 1], 60),
+        Some('h') => (&value[..value.len() - 1], 3_600),
+        Some('d') => (&value[..value.len() - 1], 86_400),
         _ => (value, 1),
     };
-    let amount = number.parse::<u64>().map_err(|_| "duration must be a positive integer with an optional s, m, h, or d suffix".to_owned())?;
-    if amount == 0 { return Err("duration must be greater than zero".to_owned()); }
-    amount.checked_mul(multiplier).ok_or_else(|| "duration is too large".to_owned())
+
+    let amount = number.parse::<u64>().map_err(|_| {
+        "duration must be a positive integer with an optional s, m, h, or d suffix".to_owned()
+    })?;
+    if amount == 0 {
+        return Err("duration must be greater than zero".to_owned());
+    }
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration is too large".to_owned())
 }
 
 fn ensure_min_score(results: &[MutantResult], minimum: Option<f64>) -> Result<()> {
@@ -2558,7 +2591,12 @@ fn run() -> Result<()> {
                         }),
                         ..list_report(
                             &mutants,
-                            SelectionMetadata::capture(operator.as_deref(), function.as_deref()),
+                            SelectionMetadata::capture(
+                                operator.as_deref(),
+                                file.as_deref(),
+                                function.as_deref(),
+                                shard,
+                            ),
                         )
                     })?
                 )?;
@@ -2628,7 +2666,9 @@ fn run() -> Result<()> {
                 &test_command,
                 timeouts,
                 operator.as_deref(),
+                file.as_deref(),
                 function.as_deref(),
+                shard,
             );
             let root = path
                 .canonicalize()
@@ -5909,24 +5949,42 @@ fn compile_command_for(test_command: &str) -> Option<String> {
 fn apply_mutant(root: &Path, mutant: &Mutant) -> Result<()> {
     let path = root.join(&mutant.file);
     let source = read_rust_source(&path)?;
-    if mutant.end_byte > source.len() || mutant.start_byte >= mutant.end_byte {
-        bail!("invalid source span for {}", mutant.id);
-    }
-
-    if source[mutant.start_byte..mutant.end_byte] != mutant.original {
-        bail!(
-            "source changed before applying {} at {}",
-            mutant.id,
-            mutant.file.display()
-        );
-    }
-
-    let mut mutated = String::with_capacity(source.len() + mutant.replacement.len());
-    mutated.push_str(&source[..mutant.start_byte]);
-    mutated.push_str(&mutant.replacement);
-    mutated.push_str(&source[mutant.end_byte..]);
+    let mutated = replace_source_range(
+        &source,
+        mutant.start_byte,
+        mutant.end_byte,
+        &mutant.original,
+        &mutant.replacement,
+    )
+    .with_context(|| format!("cannot apply {} at {}", mutant.id, mutant.file.display()))?;
     fs::write(path, mutated)?;
     Ok(())
+}
+
+fn replace_source_range(
+    source: &str,
+    start_byte: usize,
+    end_byte: usize,
+    expected: &str,
+    replacement: &str,
+) -> Result<String> {
+    if start_byte >= end_byte
+        || end_byte > source.len()
+        || !source.is_char_boundary(start_byte)
+        || !source.is_char_boundary(end_byte)
+    {
+        bail!("invalid UTF-8 source span {start_byte}..{end_byte}");
+    }
+
+    if &source[start_byte..end_byte] != expected {
+        bail!("source text does not match the selected mutation range");
+    }
+
+    let mut mutated = String::with_capacity(source.len() + replacement.len());
+    mutated.push_str(&source[..start_byte]);
+    mutated.push_str(replacement);
+    mutated.push_str(&source[end_byte..]);
+    Ok(mutated)
 }
 
 fn run_process(
@@ -6454,6 +6512,61 @@ mod tests {
     }
 
     #[test]
+    fn property_source_replacements_preserve_bytes_outside_selected_range() {
+        const CHARS: &[char] = &['a', 'Z', '0', ' ', '\n', 'é', 'λ', '🦀'];
+        let mut state = 0x7f4a_7c15_d1ce_4e5b_u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (state >> 32) as usize
+        };
+
+        for case in 0..256 {
+            let source_len = 2 + next() % 39;
+            let source: String = (0..source_len)
+                .map(|_| CHARS[next() % CHARS.len()])
+                .collect();
+            let boundaries: Vec<usize> = source
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(source.len()))
+                .collect();
+            let start_index = next() % (boundaries.len() - 1);
+            let end_index = start_index + 1 + next() % (boundaries.len() - start_index - 1);
+            let start_byte = boundaries[start_index];
+            let end_byte = boundaries[end_index];
+            let replacement: String = (0..next() % 9)
+                .map(|_| CHARS[next() % CHARS.len()])
+                .collect();
+            let mutated = replace_source_range(
+                &source,
+                start_byte,
+                end_byte,
+                &source[start_byte..end_byte],
+                &replacement,
+            )
+            .expect("generated valid source ranges should be replaceable");
+
+            assert_eq!(
+                &mutated.as_bytes()[..start_byte],
+                &source.as_bytes()[..start_byte],
+                "prefix changed outside case {case}"
+            );
+            assert_eq!(
+                &mutated.as_bytes()[start_byte + replacement.len()..],
+                &source.as_bytes()[end_byte..],
+                "suffix changed outside case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_replacement_rejects_invalid_utf8_boundaries_and_stale_text() {
+        assert!(replace_source_range("aλb", 2, 3, "λ", "x").is_err());
+        assert!(replace_source_range("abc", 1, 4, "bc", "x").is_err());
+        assert!(replace_source_range("abc", 1, 2, "x", "y").is_err());
+    }
+
+    #[test]
     fn equivalent_suppression_recognizes_no_change_and_repeated_edit() {
         let mut candidates = discover_mutants(
             Path::new("fixtures/weak-auth"),
@@ -6588,6 +6701,104 @@ mod tests {
             resolve_runner_command(Runner::CargoTest, "cargo test -q").unwrap(),
             "cargo test -q"
         );
+    }
+
+    fn runner_cleanup_unit_fixture(replacement: &str) -> (PathBuf, Mutant) {
+        static FIXTURE_SEQUENCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "soro-runner-cleanup-unit-{}-{nonce}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"cleanup-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let source = "pub fn value() -> i32 { 1 }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn value_is_one() { assert_eq!(super::value(), 1); }\n}\n";
+        fs::write(root.join("src/lib.rs"), source).unwrap();
+        let marker = "{ 1 }";
+        let start_byte = source.find(marker).unwrap() + 2;
+        let mutant = Mutant {
+            id: "M-CLEANUP".into(),
+            operator: "TEST".into(),
+            file: PathBuf::from("src/lib.rs"),
+            function: Some("value".into()),
+            span: SourceSpan {
+                line: 1,
+                column: 24,
+                end_line: 1,
+                end_column: 25,
+            },
+            original: "1".into(),
+            replacement: replacement.into(),
+            description: "cleanup regression".into(),
+            start_byte,
+            end_byte: start_byte + 1,
+        };
+        (root, mutant)
+    }
+
+    #[test]
+    fn execute_mutant_cleans_scratch_after_compile_failure() {
+        let (root, mutant) = runner_cleanup_unit_fixture("unknown_symbol");
+        let scratch = root.join(".soro-mutants-worktree");
+        let target = root
+            .join(".soro-mutants-target")
+            .join("unit-compile-failure");
+        let outcome = execute_mutant(
+            &root,
+            &mutant,
+            None,
+            "cargo test -q",
+            Timeouts {
+                compile: 60,
+                test: 60,
+            },
+            &scratch,
+            &target,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(outcome, Outcome::Unviable);
+        assert!(!scratch.exists(), "scratch worktree must be removed");
+        assert!(fs::read_to_string(root.join("src/lib.rs"))
+            .unwrap()
+            .contains("pub fn value() -> i32 { 1 }"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn execute_mutant_cleans_scratch_after_test_failure() {
+        let (root, mutant) = runner_cleanup_unit_fixture("2");
+        let scratch = root.join(".soro-mutants-worktree");
+        let target = root.join(".soro-mutants-target").join("unit-test-failure");
+        let outcome = execute_mutant(
+            &root,
+            &mutant,
+            None,
+            "cargo test -q",
+            Timeouts {
+                compile: 60,
+                test: 60,
+            },
+            &scratch,
+            &target,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(outcome, Outcome::Killed);
+        assert!(!scratch.exists(), "scratch worktree must be removed");
+        assert!(fs::read_to_string(root.join("src/lib.rs"))
+            .unwrap()
+            .contains("pub fn value() -> i32 { 1 }"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

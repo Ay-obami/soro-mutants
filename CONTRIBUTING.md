@@ -82,3 +82,14 @@ Avoid unrelated refactors in operator PRs. Performance work, output formats, run
 ## Detailed maintainer guidance
 
 For built-in operator changes, follow the [v1.0 operator authoring guide](docs/operator-authoring.md) and the [maintainer architecture overview](docs/v1-maintainer-architecture.md). For dependency changes, review [RustSec advisory scanning and exception policy](docs/dependency-auditing.md).
+
+
+### Mutation replacement boundary property test
+
+When changing mutation span handling or source replacement logic, run the bounded property regression locally:
+
+```bash
+cargo test --bin cargo-soro-mutants property_source_replacements_preserve_bytes_outside_selected_range
+```
+
+CI runs the same focused test through the runtime-budget wrapper in addition to the normal `cargo test --all` suite. The regression verifies that generated source replacements preserve every byte outside the selected UTF-8 mutation range.

@@ -1,6 +1,15 @@
-use std::process::Command;
+use std::{
+    process::Command,
+    sync::{Mutex, OnceLock},
+};
+
+fn fixture_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn run(command: &str, extra: &[&str]) -> std::process::Output {
+    let _guard = fixture_lock().lock().unwrap();
     Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
         .args([command, "fixtures/weak-auth"])
         .args(extra)
@@ -93,7 +102,10 @@ fn test_json_records_execution_context_without_host_inventory() {
     assert_eq!(metadata["compile_timeout_seconds"], 15);
     assert_eq!(metadata["test_timeout_seconds"], 20);
     assert!(metadata["operator_filter"].is_null());
+    assert!(metadata["file_filter"].is_null());
     assert!(metadata["function_filter"].is_null());
+    assert!(metadata["shard_index"].is_null());
+    assert!(metadata["shard_total"].is_null());
     assert!(metadata["rustc_version"].is_string() || metadata["rustc_version"].is_null());
     assert!(metadata["cargo_version"].is_string() || metadata["cargo_version"].is_null());
     assert!(metadata.get("environment").is_none());
@@ -146,4 +158,41 @@ fn list_json_records_active_operator_and_function_filters() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["metadata"]["operator_filter"], "AUTH-001");
     assert_eq!(report["metadata"]["function_filter"], "change_admin");
+}
+
+#[test]
+fn list_and_test_json_record_file_and_shard_selection() {
+    let selection_args = ["--file", "src/not-selected.rs", "--shard", "2/3", "--json"];
+
+    let list = run("list", &selection_args);
+    assert!(list.status.success());
+    let list_report: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(
+        list_report["metadata"]["file_filter"],
+        "src/not-selected.rs"
+    );
+    assert_eq!(list_report["metadata"]["shard_index"], 2);
+    assert_eq!(list_report["metadata"]["shard_total"], 3);
+
+    let test = run(
+        "test",
+        &[
+            "--file",
+            "src/not-selected.rs",
+            "--shard",
+            "2/3",
+            "--test-command",
+            "true",
+            "--json",
+        ],
+    );
+    assert!(test.status.success());
+    let test_report: serde_json::Value = serde_json::from_slice(&test.stdout).unwrap();
+    assert_eq!(
+        test_report["metadata"]["file_filter"],
+        "src/not-selected.rs"
+    );
+    assert_eq!(test_report["metadata"]["shard_index"], 2);
+    assert_eq!(test_report["metadata"]["shard_total"], 3);
+    assert_eq!(test_report["results"], serde_json::json!([]));
 }

@@ -29,6 +29,8 @@ jobs:
         run: .github/scripts/check-runtime-budget.sh --self-test
       - name: Test (with runtime budget monitoring)
         run: .github/scripts/check-runtime-budget.sh 480 cargo test --all
+      - name: Verify mutation replacement boundary properties
+        run: .github/scripts/check-runtime-budget.sh 30 cargo test --bin cargo-soro-mutants property_source_replacements_preserve_bytes_outside_selected_range
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Package

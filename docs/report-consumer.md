@@ -20,9 +20,9 @@ array.
 
 | Report | Fields |
 | --- | --- |
-| List | `schema_version`, `mutants`; additive `metadata` is present when `--operator` or `--function` is selected |
+| List | `schema_version`, `mutants`; additive `metadata` is present when `--operator`, `--file`, `--function`, or `--shard` is selected |
 | Test | `schema_version`, `results`; each result has `mutant` and `outcome` |
-| Test run metadata | `metadata` contains nullable `rustc_version` and `cargo_version`, the configured `test_command`, effective `compile_timeout_seconds` and `test_timeout_seconds`, and nullable `operator_filter` and `function_filter` selections |
+| Test run metadata | `metadata` contains nullable `rustc_version` and `cargo_version`, the configured `test_command`, effective `compile_timeout_seconds` and `test_timeout_seconds`, plus nullable `operator_filter`, `file_filter`, `function_filter`, `shard_index`, and `shard_total` selections |
 | Suppression summary | Optional `suppression` with `count` and `details` when suppressions were recorded |
 
 Each mutant includes `id`, `operator`, `file`, nullable `function`, `span`
@@ -36,8 +36,8 @@ encode path characters that are special in URLs.
 
 Mutant IDs are deterministic for identical source and discovery settings. IDs
 survive sharding, but can shift when the source or discovery filters change.
-Store the revision, filters, and shard index alongside the report when
-comparing runs.
+JSON list and test reports record active operator, file, function, and shard selection.
+Store the revision and any remaining discovery settings alongside the report when comparing runs.
 
 ## Reproduce the CLI score
 

@@ -4,7 +4,7 @@ Both `list --json` and `test --json` emit an object with the integer
 `schema_version`, currently `1`. This version describes the JSON contract and is
 independent of the package version. Text output is unchanged.
 
-`list` returns `{"schema_version": 1, "mutants": [...]}` and, when `--operator` or `--function` is active, an additive `metadata` object containing the selected filters. Each mutant retains
+`list` returns `{"schema_version": 1, "mutants": [...]}` and, when any of `--operator`, `--file`, `--function`, or `--shard` is active, an additive `metadata` object containing the selected filters. Each mutant retains
 `id`, `operator`, `file`, `function` (a string or null), `span` (`line`, `column`,
 `end_line`, `end_column`), `original`, `replacement`, and `description`.
 Internal byte offsets are not serialized.
@@ -15,8 +15,8 @@ Internal byte offsets are not serialized.
 The additional `metadata` object records `rustc_version` and `cargo_version` (strings,
 or null when unavailable), `test_command` (the configured command after environment-secret redaction),
 `compile_timeout_seconds`, and `test_timeout_seconds` (the effective budgets after
-legacy `--timeout` fallback), plus `operator_filter` and `function_filter` (the
-active `--operator` and `--function` values, or null when unset). This makes
+legacy `--timeout` fallback), plus `operator_filter`, `file_filter`, `function_filter`,
+`shard_index`, and `shard_total` (null when the corresponding selector is unset). This makes
 selection settings observable when reproducing a run. The metadata is also present for successful runs
 with no matching mutants. Empty successful reports retain an empty results array.
 Baseline failures still fail the command instead of emitting a successful report.
@@ -60,7 +60,10 @@ To enable robust client-side deserialization, the following field guarantees app
 | `metadata.compile_timeout_seconds` | `metadata` | Required | Integer | Non-negative effective compilation timeout in seconds. Never `null`. |
 | `metadata.test_timeout_seconds` | `metadata` | Required | Integer | Non-negative effective test execution timeout in seconds. Never `null`. |
 | `metadata.operator_filter` | `metadata` | Required for test; conditional for list | String or `null` | Active `--operator` filter, or `null` when unset. |
+| `metadata.file_filter` | `metadata` | Required for test; conditional for list | String or `null` | Active `--file` suffix filter, or `null` when unset. |
 | `metadata.function_filter` | `metadata` | Required for test; conditional for list | String or `null` | Active `--function` filter, or `null` when unset. |
+| `metadata.shard_index` | `metadata` | Required for test; conditional for list | Integer or `null` | One-based active shard index, or `null` when `--shard` is unset. |
+| `metadata.shard_total` | `metadata` | Required for test; conditional for list | Integer or `null` | Active shard total, or `null` when `--shard` is unset. |
 | `suppression` | `test --json` root | Optional | Object | Omitted / absent when no mutants are suppressed. Contains `count` (integer) and `details` (array) when present. |
 | `mutant.id` | Mutant object | Required | String | Non-empty deterministic identifier (e.g. `"M0001"`). Never `null`. |
 | `mutant.operator` | Mutant object | Required | String | Non-empty operator code (e.g. `"AUTH-001"`). Never `null`. |
