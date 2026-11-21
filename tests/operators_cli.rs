@@ -99,3 +99,37 @@ fn operators_help_flag_succeeds() {
         "--help output should mention operators"
     );
 }
+
+#[test]
+fn operators_json_is_versioned_and_stable() {
+    let first = run(&["--json"]);
+    let second = run(&["--json"]);
+    assert!(first.status.success());
+    assert!(second.status.success());
+    assert_eq!(
+        first.stdout, second.stdout,
+        "JSON catalog must be deterministic"
+    );
+    assert!(first.stderr.is_empty());
+
+    let value: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(value.as_object().unwrap().len(), 2);
+    assert_eq!(value["schema_version"], 1);
+    let operators = value["operators"].as_array().unwrap();
+    assert!(!operators.is_empty());
+
+    let ids: Vec<&str> = operators
+        .iter()
+        .map(|operator| {
+            let object = operator.as_object().expect("operator must be an object");
+            assert_eq!(object.len(), 2);
+            let description = operator["description"].as_str().unwrap();
+            assert!(!description.trim().is_empty());
+            operator["id"].as_str().unwrap()
+        })
+        .collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted, "operator JSON IDs must be stably sorted");
+    assert_eq!(ids.first().copied(), Some("AUTH-001"));
+}

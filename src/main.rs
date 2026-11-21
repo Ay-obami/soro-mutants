@@ -335,7 +335,11 @@ enum Commands {
         json: bool,
     },
     /// Print all built-in operator IDs and their descriptions.
-    Operators,
+    Operators {
+        /// Emit a versioned machine-readable document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate shell completion scripts on stdout.
     Completions {
         /// Target shell (bash, zsh, or fish).
@@ -359,6 +363,32 @@ impl From<CompletionShell> for Shell {
             CompletionShell::Fish => Shell::Fish,
         }
     }
+}
+
+fn completion_script(shell: CompletionShell) -> Vec<u8> {
+    let mut cmd = Cli::command();
+    let mut output = Vec::new();
+    generate(
+        Shell::from(shell),
+        &mut cmd,
+        "cargo-soro-mutants",
+        &mut output,
+    );
+
+    if matches!(shell, CompletionShell::Bash) {
+        let script = String::from_utf8_lossy(&output);
+        return script
+            .replace(
+                r#"COMPREPLY=($(compgen -f "${cur}"))"#,
+                r#"COMPREPLY=()
+                    while IFS= read -r completion; do
+                        COMPREPLY+=("$completion")
+                    done < <(compgen -f -- "${cur}")"#,
+            )
+            .into_bytes();
+    }
+
+    output
 }
 
 fn select_shard(mutants: Vec<Mutant>, shard: Option<Shard>) -> Vec<Mutant> {
@@ -3093,17 +3123,18 @@ fn run() -> Result<()> {
                 );
             }
         }
-        Commands::Operators => {
-            print_operators(&mut io::stdout())?;
+        Commands::Operators { json } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&OperatorsReport::current())?
+                );
+            } else {
+                print_operators(&mut io::stdout())?;
+            }
         }
         Commands::Completions { shell } => {
-            let mut cmd = Cli::command();
-            generate(
-                Shell::from(shell),
-                &mut cmd,
-                "cargo-soro-mutants",
-                &mut io::stdout(),
-            );
+            io::stdout().write_all(&completion_script(shell))?;
         }
     }
 
@@ -6065,6 +6096,30 @@ fn print_operators(report: &mut dyn Write) -> Result<()> {
     }
     writeln!(report, "\n{} built-in operators", BUILTIN_OPERATORS.len())?;
     Ok(())
+}
+
+#[derive(Serialize)]
+struct OperatorsReport {
+    schema_version: u32,
+    operators: Vec<OperatorDescription>,
+}
+
+#[derive(Serialize)]
+struct OperatorDescription {
+    id: &'static str,
+    description: &'static str,
+}
+
+impl OperatorsReport {
+    fn current() -> Self {
+        Self {
+            schema_version: 1,
+            operators: BUILTIN_OPERATORS
+                .iter()
+                .map(|(id, description)| OperatorDescription { id, description })
+                .collect(),
+        }
+    }
 }
 
 fn print_suppression_summary(
