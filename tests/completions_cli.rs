@@ -30,3 +30,14 @@ fn rejects_unsupported_completion_shell() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid value"));
 }
+
+#[test]
+fn operator_completion_lists_operator_ids() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
+        .args(["completions", "bash"])
+        .output()
+        .expect("CLI should launch");
+    let script = String::from_utf8_lossy(&output.stdout);
+    assert!(script.contains("AUTH-001"));
+    assert!(script.contains("TTL-003"));
+}

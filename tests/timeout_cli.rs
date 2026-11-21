@@ -25,7 +25,7 @@ fn specific_test_timeout_overrides_legacy_timeout_for_baseline() {
             "--test-command",
             "true",
             "--timeout",
-            "0",
+            "1s",
             "--test-timeout",
             "5",
             "--compile-timeout",
@@ -64,7 +64,7 @@ fn baseline_test_timeout_is_reported_as_baseline_failure() {
             "--timeout",
             "5",
             "--test-timeout",
-            "0",
+            "1s",
         ])
         .output()
         .unwrap();
