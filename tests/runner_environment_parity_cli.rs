@@ -13,7 +13,7 @@ impl Fixture {
         fs::create_dir_all(root.join("project/src")).unwrap();
         fs::create_dir_all(root.join("isolated-home")).unwrap();
         fs::create_dir_all(root.join("isolated-xdg")).unwrap();
-        fs::write(root.join("project/src/lib.rs"), "fn check(user: Address) { user.require_auth(); }\\n").unwrap();
+        fs::write(root.join("project/src/lib.rs"), "fn check(user: Address) { user.require_auth(); }\n").unwrap();
         Self(root)
     }
 }
