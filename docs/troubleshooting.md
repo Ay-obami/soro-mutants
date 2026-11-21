@@ -10,6 +10,7 @@ underlying test command from that project subdirectory.
 | --- | --- | --- |
 | Invalid argument (exit 2) | Run `cargo soro-mutants test --help`. | Check operator IDs, glob syntax, mutually exclusive output modes, and one-based shard numbers. |
 | Project path cannot be resolved (exit 1) | Check the path from the shell's working directory and confirm it points to the intended Cargo project or workspace. | Use an absolute path if the caller's working directory varies. Check that the project and test subdirectory are readable. |
+| Filesystem path too long (exit 1) | Check the path printed in the copy or directory creation diagnostic. | Move the checkout nearer the filesystem root or choose a shorter `--target-dir` (where applicable); keep directory nesting and filenames short. |
 | No matching mutants (usually exit 0) | Read the `note:` and `warning:` lines on stderr, then run `cargo soro-mutants list . --count-only` and add your filters one at a time. | See [empty selections](#empty-selections). An empty selection skips the baseline. A positive score threshold on an empty selection exits 4. |
 | Mutants from the wrong project, or every mutant `UNVIABLE` in a repository with several projects | Check which directory you passed as `PATH`. | See [monorepo invocation patterns](monorepo.md). |
 | Too much progress output in CI logs | The text report prints one line per mutant. | Pass `--no-progress` to `test`. See [quiet CI output](#quiet-ci-output). |
@@ -230,3 +231,30 @@ After successful and failed mutation runs, the runner removes the
 `.soro-mutants-worktree` scratch directory; reusable Cargo caches under
 `.soro-mutants-target` are intentionally retained. Use
 `cargo soro-mutants clean` to remove managed caches when needed.
+
+## Runner environment parity and HOME isolation
+
+The clean baseline, mutant compile checks, and mutant test commands inherit the same
+parent process environment. For every command, the runner deliberately removes
+`RUSTUP_TOOLCHAIN` and sets `CARGO_TARGET_DIR` to the corresponding isolated
+build-cache directory. The latter differs between baseline and mutant runs by
+design; other inherited variables, including `HOME`, are not modified by the
+production runner. Run-to-run determinism requires using consistent toolchain
+and environment values.
+
+Tests that invoke tools which create home-directory caches should explicitly
+pass temporary `HOME` and `XDG_CONFIG_HOME` values to their spawned CLI,
+**not** modify the test process's global environment. For example, create a
+scratch directory and pass `.env("HOME", &scratch_home)` to
+`Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))`. This ensures all
+baseline/mutant child processes share the same isolated test HOME without
+writing into your actual user profile. Production commands retain normal HOME
+behavior for backwards compatibility.
+
+Scratch copies preserve the source tree's file and directory permissions,
+including executable bits used by shell scripts. Source trees with intentionally
+read-only files may prevent mutation of those files; make the source writable
+before running mutation tests if appropriate. If filesystem path length limits
+are exceeded while preparing a scratch copy, the error includes the failing
+path and suggests a shorter checkout or target directory. No fixed artificial
+path-length cutoff is imposed.
