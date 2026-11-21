@@ -6598,7 +6598,7 @@ mod tests {
         let root = fixture.join("source");
         let destination = fixture.join("mutant");
         fs::create_dir_all(root.join("bin")).unwrap();
-        fs::write(root.join("bin/run.sh"), "#!/bin/sh\\nexit 0\\n").unwrap();
+        fs::write(root.join("bin/run.sh"), "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(root.join("bin/run.sh"), fs::Permissions::from_mode(0o750)).unwrap();
         fs::set_permissions(root.join("bin"), fs::Permissions::from_mode(0o750)).unwrap();
         copy_project(&root, &destination, &[]).unwrap();
