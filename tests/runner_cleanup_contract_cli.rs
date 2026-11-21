@@ -185,7 +185,7 @@ fn baseline_timeout_removes_scratch_and_preserves_source() {
             "--test-command",
             "sleep 2",
             "--test-timeout",
-            "0",
+            "1s",
         ])
         .output()
         .unwrap();
