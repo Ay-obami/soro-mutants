@@ -31,6 +31,17 @@ use filters::{
     parse_exclude_glob, parse_file_filter, parse_function_filter, parse_operator, Shard,
 };
 
+/// Parse CLI timeout seconds with an actionable error for negative values.
+fn parse_timeout_seconds(raw: &str) -> std::result::Result<u64, String> {
+    if raw.starts_with('-') {
+        return Err(format!(
+            "timeout must be a non-negative number of seconds, got {raw}"
+        ));
+    }
+    raw.parse::<u64>()
+        .map_err(|_| format!("timeout must be a non-negative integer number of seconds, got {raw}"))
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "cargo-soro-mutants")]
 #[command(version)]
@@ -223,13 +234,13 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = Runner::CargoTest)]
         runner: Runner,
         /// Legacy timeout in seconds used for both phases unless overridden.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 120, value_parser = parse_timeout_seconds, allow_hyphen_values = true)]
         timeout: u64,
         /// Timeout in seconds for each mutant's separate compile gate.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_timeout_seconds, allow_hyphen_values = true)]
         compile_timeout: Option<u64>,
         /// Timeout in seconds for baseline and mutant test commands.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_timeout_seconds, allow_hyphen_values = true)]
         test_timeout: Option<u64>,
         /// Number of mutants to execute concurrently (1 keeps serial execution).
         /// Each worker uses its own scratch worktree and Cargo target directory.
@@ -310,7 +321,7 @@ enum Commands {
         #[arg(long, default_value = ".soro-mutants-benchmarks")]
         checkout_dir: PathBuf,
         /// Timeout in seconds for each target's baseline and mutant commands.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 120, value_parser = parse_timeout_seconds, allow_hyphen_values = true)]
         timeout: u64,
         /// Only run the target with this manifest id.
         #[arg(long, value_name = "ID")]
@@ -6669,6 +6680,104 @@ mod tests {
             resolve_runner_command(Runner::CargoTest, "cargo test -q").unwrap(),
             "cargo test -q"
         );
+    }
+
+    fn runner_cleanup_unit_fixture(replacement: &str) -> (PathBuf, Mutant) {
+        static FIXTURE_SEQUENCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "soro-runner-cleanup-unit-{}-{nonce}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"cleanup-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let source = "pub fn value() -> i32 { 1 }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn value_is_one() { assert_eq!(super::value(), 1); }\n}\n";
+        fs::write(root.join("src/lib.rs"), source).unwrap();
+        let marker = "{ 1 }";
+        let start_byte = source.find(marker).unwrap() + 2;
+        let mutant = Mutant {
+            id: "M-CLEANUP".into(),
+            operator: "TEST".into(),
+            file: PathBuf::from("src/lib.rs"),
+            function: Some("value".into()),
+            span: SourceSpan {
+                line: 1,
+                column: 24,
+                end_line: 1,
+                end_column: 25,
+            },
+            original: "1".into(),
+            replacement: replacement.into(),
+            description: "cleanup regression".into(),
+            start_byte,
+            end_byte: start_byte + 1,
+        };
+        (root, mutant)
+    }
+
+    #[test]
+    fn execute_mutant_cleans_scratch_after_compile_failure() {
+        let (root, mutant) = runner_cleanup_unit_fixture("unknown_symbol");
+        let scratch = root.join(".soro-mutants-worktree");
+        let target = root
+            .join(".soro-mutants-target")
+            .join("unit-compile-failure");
+        let outcome = execute_mutant(
+            &root,
+            &mutant,
+            None,
+            "cargo test -q",
+            Timeouts {
+                compile: 60,
+                test: 60,
+            },
+            &scratch,
+            &target,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(outcome, Outcome::Unviable);
+        assert!(!scratch.exists(), "scratch worktree must be removed");
+        assert!(fs::read_to_string(root.join("src/lib.rs"))
+            .unwrap()
+            .contains("pub fn value() -> i32 { 1 }"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn execute_mutant_cleans_scratch_after_test_failure() {
+        let (root, mutant) = runner_cleanup_unit_fixture("2");
+        let scratch = root.join(".soro-mutants-worktree");
+        let target = root.join(".soro-mutants-target").join("unit-test-failure");
+        let outcome = execute_mutant(
+            &root,
+            &mutant,
+            None,
+            "cargo test -q",
+            Timeouts {
+                compile: 60,
+                test: 60,
+            },
+            &scratch,
+            &target,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(outcome, Outcome::Killed);
+        assert!(!scratch.exists(), "scratch worktree must be removed");
+        assert!(fs::read_to_string(root.join("src/lib.rs"))
+            .unwrap()
+            .contains("pub fn value() -> i32 { 1 }"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

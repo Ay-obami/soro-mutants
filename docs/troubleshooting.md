@@ -213,3 +213,20 @@ Soro Mutants intentionally refuses to parse an individual Rust source file large
 ## Non-Unicode filesystem paths
 
 On Unix, the project root may contain bytes that are not valid UTF-8. Soro Mutants passes filesystem paths to child processes as native OS strings and does not replace an unrepresentable project root with another directory. Human diagnostics use the platform's display representation; project-relative report paths must still be serializable by the selected report format.
+## Timeout argument validation
+
+The `test` command accepts non-negative integer seconds for `--timeout`,
+`--compile-timeout`, and `--test-timeout`. For example,
+`cargo soro-mutants test fixtures/weak-auth --timeout 120 --compile-timeout 30 --test-timeout 60`.
+A negative value such as `--test-timeout -1` is a usage error (exit code 2),
+reported on stderr without producing a mutation report. Zero remains supported
+for compatibility with existing immediate-timeout behavior. The benchmark
+matrix `--timeout` uses the same validation.
+
+The `--version` and `-V` flags print `cargo-soro-mutants <version>` followed
+by a newline on stdout, with exit code 0 and no stderr output.
+
+After successful and failed mutation runs, the runner removes the
+`.soro-mutants-worktree` scratch directory; reusable Cargo caches under
+`.soro-mutants-target` are intentionally retained. Use
+`cargo soro-mutants clean` to remove managed caches when needed.

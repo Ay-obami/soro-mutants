@@ -1,6 +1,15 @@
-use std::process::Command;
+use std::{
+    process::Command,
+    sync::{Mutex, OnceLock},
+};
+
+fn fixture_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn run(command: &str, extra: &[&str]) -> std::process::Output {
+    let _guard = fixture_lock().lock().unwrap();
     Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
         .args([command, "fixtures/weak-auth"])
         .args(extra)
