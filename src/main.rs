@@ -5839,13 +5839,46 @@ fn execute_mutant(
     }
 }
 
+/// Preserve the original I/O error while explaining a filesystem path-length failure.
+fn path_io_error(action: &str, path: &Path, error: io::Error) -> anyhow::Error {
+    // ENAMETOOLONG (Unix) and ERROR_FILENAME_EXCED_RANGE (Windows).
+    if matches!(error.raw_os_error(), Some(36 | 206)) {
+        anyhow::anyhow!(
+            "filesystem path is too long while {action} {}: use a shorter project or --target-dir path ({error})",
+            path.display()
+        )
+    } else {
+        anyhow::anyhow!("failed while {action} {}: {error}", path.display())
+    }
+}
+
+fn create_copy_directory(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).map_err(|error| path_io_error("creating directory", path, error))
+}
+
+fn copy_with_permissions(source: &Path, target: &Path) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        create_copy_directory(parent)?;
+    }
+    fs::copy(source, target).map_err(|error| path_io_error("copying file to", target, error))?;
+    let permissions = fs::metadata(source)
+        .map_err(|error| path_io_error("reading permissions of", source, error))?
+        .permissions();
+    fs::set_permissions(target, permissions)
+        .map_err(|error| path_io_error("setting permissions on", target, error))?;
+    Ok(())
+}
+
 fn copy_project(root: &Path, destination: &Path, ignored: &[PathBuf]) -> Result<()> {
-    fs::create_dir_all(destination)?;
+    create_copy_directory(destination)?;
+    // Restore directory permissions after copying children, otherwise read-only
+    // source directories could prevent us from creating their contents.
+    let mut directories = Vec::new();
 
     for entry in WalkDir::new(root).into_iter().filter_entry(|entry| {
         !ignored_entry(entry, root) && !ignored.iter().any(|path| entry.path() == path)
     }) {
-        let entry = entry?;
+        let entry = entry.with_context(|| format!("cannot traverse project {}", root.display()))?;
         let relative = entry.path().strip_prefix(root)?;
         if relative.as_os_str().is_empty() {
             continue;
@@ -5853,16 +5886,18 @@ fn copy_project(root: &Path, destination: &Path, ignored: &[PathBuf]) -> Result<
 
         let target = destination.join(relative);
         if entry.file_type().is_dir() {
-            fs::create_dir_all(&target)?;
+            create_copy_directory(&target)?;
+            directories.push((target, entry.metadata()?.permissions()));
         } else if entry.file_type().is_file() {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(entry.path(), &target)?;
+            copy_with_permissions(entry.path(), &target)?;
         }
     }
 
     copy_wasm_fixtures(root, destination, ignored)?;
+    for (path, permissions) in directories.into_iter().rev() {
+        fs::set_permissions(&path, permissions)
+            .map_err(|error| path_io_error("restoring directory permissions on", &path, error))?;
+    }
     Ok(())
 }
 
@@ -5900,10 +5935,7 @@ fn copy_wasm_fixtures(root: &Path, destination: &Path, ignored: &[PathBuf]) -> R
         }
 
         let target = destination.join(relative);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(entry.path(), target)?;
+        copy_with_permissions(entry.path(), &target)?;
     }
     Ok(())
 }
