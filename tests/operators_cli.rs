@@ -99,3 +99,15 @@ fn operators_help_flag_succeeds() {
         "--help output should mention operators"
     );
 }
+
+#[test]
+fn operators_json_is_versioned_and_stable() {
+    let output = run(&["--json"]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    let operators = value["operators"].as_array().unwrap();
+    assert!(!operators.is_empty());
+    assert_eq!(operators[0]["id"], "AUTH-001");
+    assert!(operators[0]["description"].as_str().unwrap().len() > 1);
+}

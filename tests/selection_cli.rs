@@ -106,6 +106,16 @@ fn operator_ids_are_validated_before_discovery_or_execution() {
 }
 
 #[test]
+fn file_path_filters_accept_nested_paths_and_reject_empty_paths() {
+    let project = Project::new();
+    let nested = project.json("list", &["--file", "vendor/nested/lib.rs"]);
+    assert!(nested["mutants"].is_array());
+    let empty = project.run("list", &["--file", ""]);
+    assert_eq!(empty.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("file filter cannot be empty"));
+}
+
+#[test]
 fn exclusions_prune_files_and_directories_and_override_includes() {
     let project = Project::new();
     // Reading this invalid UTF-8 file would fail if pruning happened after discovery.

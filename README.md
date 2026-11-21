@@ -106,6 +106,33 @@ cargo soro-mutants test /path/to/project \
   --test-command 'cargo test -q -p phoenix-pool admin_change'
 ```
 
+### Common CI workflows
+
+Run a focused mutation gate for files changed in a pull request:
+
+```bash
+cargo soro-mutants list . --diff-base origin/main --changed-functions --json > mutants.json
+cargo soro-mutants test . --diff-base origin/main --changed-functions --min-score 80 --no-progress
+```
+
+Run the complete workspace suite and retain a machine-readable result for later steps:
+
+```bash
+cargo soro-mutants test . --package my-contract --test-command 'cargo test -q -p my-contract' \
+  --json --output soro-mutants.json
+```
+
+For a matrix job, split discovery into deterministic shards and pass the shard specification to
+each runner:
+
+```bash
+cargo soro-mutants test . --shard "${{ matrix.shard }}/4" --json \
+  --output "artifacts/mutants-${{ matrix.shard }}.json"
+```
+
+The `operators --json` command emits a versioned operator catalog for CI tooling. Consumers should
+check `schema_version` before reading the `operators` array.
+
 For different compile and test budgets, use `--compile-timeout` and `--test-timeout` (seconds):
 
 ```bash

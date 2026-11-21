@@ -329,7 +329,11 @@ enum Commands {
         json: bool,
     },
     /// Print all built-in operator IDs and their descriptions.
-    Operators,
+    Operators {
+        /// Emit a versioned machine-readable document.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate shell completion scripts on stdout.
     Completions {
         /// Target shell (bash, zsh, or fish).
@@ -3063,8 +3067,12 @@ fn run() -> Result<()> {
                 );
             }
         }
-        Commands::Operators => {
-            print_operators(&mut io::stdout())?;
+        Commands::Operators { json } => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&OperatorsReport::current())?);
+            } else {
+                print_operators(&mut io::stdout())?;
+            }
         }
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
@@ -6035,6 +6043,30 @@ fn print_operators(report: &mut dyn Write) -> Result<()> {
     }
     writeln!(report, "\n{} built-in operators", BUILTIN_OPERATORS.len())?;
     Ok(())
+}
+
+#[derive(Serialize)]
+struct OperatorsReport {
+    schema_version: u32,
+    operators: Vec<OperatorDescription>,
+}
+
+#[derive(Serialize)]
+struct OperatorDescription {
+    id: &'static str,
+    description: &'static str,
+}
+
+impl OperatorsReport {
+    fn current() -> Self {
+        Self {
+            schema_version: 1,
+            operators: BUILTIN_OPERATORS
+                .iter()
+                .map(|(id, description)| OperatorDescription { id: *id, description: *description })
+                .collect(),
+        }
+    }
 }
 
 fn print_suppression_summary(
