@@ -31,6 +31,15 @@ use filters::{
     parse_exclude_glob, parse_file_filter, parse_function_filter, parse_operator, Shard,
 };
 
+/// Parse CLI timeout seconds with an actionable error for negative values.
+fn parse_timeout_seconds(raw: &str) -> std::result::Result<u64, String> {
+    if raw.starts_with('-') {
+        return Err(format!("timeout must be a non-negative number of seconds, got {raw}"));
+    }
+    raw.parse::<u64>()
+        .map_err(|_| format!("timeout must be a non-negative integer number of seconds, got {raw}"))
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "cargo-soro-mutants")]
 #[command(version)]
@@ -223,13 +232,13 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = Runner::CargoTest)]
         runner: Runner,
         /// Legacy timeout in seconds used for both phases unless overridden.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 120, value_parser = parse_timeout_seconds)]
         timeout: u64,
         /// Timeout in seconds for each mutant's separate compile gate.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_timeout_seconds)]
         compile_timeout: Option<u64>,
         /// Timeout in seconds for baseline and mutant test commands.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_timeout_seconds)]
         test_timeout: Option<u64>,
         /// Number of mutants to execute concurrently (1 keeps serial execution).
         /// Each worker uses its own scratch worktree and Cargo target directory.
@@ -310,7 +319,7 @@ enum Commands {
         #[arg(long, default_value = ".soro-mutants-benchmarks")]
         checkout_dir: PathBuf,
         /// Timeout in seconds for each target's baseline and mutant commands.
-        #[arg(long, default_value_t = 120)]
+        #[arg(long, default_value_t = 120, value_parser = parse_timeout_seconds)]
         timeout: u64,
         /// Only run the target with this manifest id.
         #[arg(long, value_name = "ID")]
