@@ -27,9 +27,7 @@ use wait_timeout::ChildExt;
 use walkdir::{DirEntry, WalkDir};
 
 mod filters;
-use filters::{
-    parse_exclude_glob, parse_file_filter, parse_function_filter, Shard,
-};
+use filters::{parse_exclude_glob, parse_file_filter, parse_function_filter, Shard};
 
 #[derive(Parser, Debug)]
 #[command(name = "cargo-soro-mutants")]
