@@ -80,7 +80,7 @@ To enable robust client-side deserialization, the following field guarantees app
 - **Absent / Omitted**: Used exclusively for optional features that were not triggered (such as `suppression` when zero mutants were suppressed).
 - **`null`**: Used only when a property is semantically applicable but unresolvable (e.g., `function: null` for mutations outside function bodies, or toolchain versions when querying fails).
 - **Empty Array `[]`**: Used when a collection has zero elements (e.g., `mutants: []` or `results: []`). Collections are never serialized as `null`.
-- **Zero `0`**: Used for numeric quantities that are zero (e.g., zero timeouts or zero counts). Numeric fields are never serialized as `null`.
+- **Zero `0`**: Used for numeric quantities where zero is meaningful (for example, zero result counts). Timeout CLI limits must be positive and reject zero before execution. Numeric report fields are never serialized as `null`.
 
 ### Concrete Example: Zero-Mutant Test Report
 
