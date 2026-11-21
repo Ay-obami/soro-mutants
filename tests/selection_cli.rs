@@ -78,7 +78,11 @@ fn operator_ids_are_validated_before_discovery_or_execution() {
             let output = project.run(command, &["--operator", invalid]);
             assert_eq!(output.status.code(), Some(2));
             let error = String::from_utf8_lossy(&output.stderr);
-            assert!(error.contains("invalid value"), "{error}");
+            if invalid.is_empty() {
+                assert!(error.contains("a value is required"), "{error}");
+            } else {
+                assert!(error.contains("invalid value"), "{error}");
+            }
             assert!(error.contains("--operator <OPERATOR>"), "{error}");
             for id in ["AUTH-001", "AUTH-002", "EVENT-001", "TOKEN-001", "TTL-001"] {
                 assert!(error.contains(id), "{error}");
