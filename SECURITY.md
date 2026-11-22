@@ -28,6 +28,12 @@ Public benchmark notes report mutation-testing behavior only. They must:
 
 The `clean` command removes only Soro Mutants-managed scratch and build-cache paths. It refuses to clean when the managed scratch path, cache root, or managed cache directories are symbolic links. This prevents an attacker-controlled link from redirecting cleanup into an unrelated directory. The command does not attempt to clean arbitrary user directories or global Cargo caches.
 
+The same boundary is enforced for every other deletion path: stale cache invalidation, `--clear-cache`, and runner scratch reuse all call a shared ownership guard before deleting. A target is owned only when it is a symlink-free child of the resolved managed root whose first component is one of the fixed names Soro Mutants creates (`baseline`, `mutants-shared`, `mutants-parallel`, `progress.json`, `cache-identity.json`, `result-cache.json`) or the project's `.soro-mutants-worktree` scratch tree. An externally supplied `--target-dir` is still allowed, but only its managed children may be removed. Violations return a structured error naming the rejected path and the managed root; no deletion occurs. `clean --dry-run` uses the same non-mutating ownership decision as a real clean.
+
+## Shell command construction
+
+`--test-command` and benchmark `test_command` values are intentionally evaluated by `bash -lc`; shell operators (`&&`, `|`, quoting, environment prefixes) are a documented feature. The protected boundary is everything *derived* from user input: values interpolated into a shell string (such as `--package` names used to build `-p` arguments) must be single inert words, and every command handed to the shell is checked for NUL and control bytes that could truncate or reinterpret it. Rejections are deterministic, report the offending field and value, and happen before any worktree, cache, or process is created. Non-shell process invocations pass arguments as arrays with a `--` separator where operand/option confusion is possible. Benchmark manifests are executable input and should come from trusted sources; the guard limits accidental corruption, not deliberate shell code.
+
 ## Panic-free input handling
 
 Normal user-controlled CLI arguments, project contents, and environment failures should return structured errors rather than trigger `unwrap`/`expect` panics. CI includes an audit guard over production code plus adversarial CLI coverage for invalid diff-base input.

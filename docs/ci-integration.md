@@ -132,3 +132,23 @@ Or run the dedicated test target:
 ```bash
 cargo test --test runtime_budget_cli
 ```
+
+## Latest stable Rust check
+
+The `stable` job in `.github/workflows/msrv.yml` is the latest-stable gate. It is intentionally independent of the
+pinned `1.85.0` MSRV job: it uses `dtolnay/rust-toolchain@stable` with no `toolchain:` pin, keeps a 15-minute job
+bound, writes the detected toolchain versions to `$GITHUB_STEP_SUMMARY`, and runs the `latest_stable_ci` contract
+test with a 30-second runtime budget. The regression seed in that test rejects a stable job that has been pinned,
+unbounded, or stripped of its verification steps.
+
+Run the check locally before opening a release-affecting pull request:
+
+```bash
+cargo +stable check --locked --all-targets --all-features
+cargo +stable test --locked --test check_platform_cli
+cargo +stable test --locked --test latest_stable_ci
+cargo +stable test --locked --test parser_stable_syntax_corpus_cli
+cargo +stable run --locked -- check-platform --json
+```
+
+See [supported platforms](supported-platforms.md#latest-stable-gate) for the full toolchain policy.

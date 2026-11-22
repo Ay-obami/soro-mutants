@@ -24,9 +24,10 @@ reported as structured data, not panics.
 ## Rust and Cargo versions
 
 - **MSRV:** Rust `1.85.0` (`rust-version = "1.85"` in `Cargo.toml`).
-- **Supported Rust:** any stable Rust `>= 1.85.0`. The dedicated `.github/workflows/msrv.yml` workflow verifies
-  Rust `1.85.0` and the current stable toolchain on every pull request and main push.
-  The semantic fixture matrix separately pins `1.91.0`.
+- **Supported Rust:** any stable Rust `>= 1.85.0`. The dedicated `.github/workflows/msrv.yml` workflow has two
+  independent jobs: `msrv` verifies the pinned `1.85.0` baseline, while `stable` is the **latest stable Rust gate**
+  and deliberately uses the unpinned `dtolnay/rust-toolchain@stable` action. Both run on every pull request and
+  main push. The semantic fixture matrix separately pins `1.91.0`; that pin is *not* the latest-stable check.
 - **Cargo:** Cargo `>= 1.85.0`, installed from the same toolchain as `rustc`.
   Cargo lockfile version 4 and `--locked` builds are assumed.
 - **Compatibility assumption:** `rustc` and `cargo` are taken from one
@@ -91,6 +92,27 @@ cargo +1.85.0 run --locked -- check-platform --json
 ```
 
 A failure at `cargo check --locked` may indicate a dependency has increased its Rust requirement; inspect `Cargo.lock` and the dependency's declared `rust-version` before changing the project's MSRV. The platform check requires `bash` and `git` on the host.
+
+### Latest stable gate
+
+The `stable` job in the same workflow tracks current stable Rust independently of the MSRV pin. It has a
+15-minute bound, reports the exact `rustc`/`cargo` versions both in the log and in the GitHub step summary, and
+runs the `latest_stable_ci` contract test under a 30-second runtime budget so a silently pinned, unbounded, or
+truncated stable job fails the check. It also runs the modern stable-syntax parser corpus.
+
+To reproduce the latest-stable gate locally:
+
+```bash
+rustup toolchain install stable
+cargo +stable check --locked --all-targets --all-features
+cargo +stable test --locked --test check_platform_cli
+cargo +stable test --locked --test latest_stable_ci
+cargo +stable test --locked --test parser_stable_syntax_corpus_cli
+cargo +stable run --locked -- check-platform --json
+```
+
+A failure only in the `stable` job (while `msrv` passes) usually means a dependency or syntax feature requires a
+newer compiler than the declared MSRV; update the MSRV deliberately rather than loosening the stable gate.
 
 ## Verification commands
 

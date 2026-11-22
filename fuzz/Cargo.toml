@@ -7,9 +7,19 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+# Standalone fuzz crate: keep it out of the root workspace so `cargo fuzz`
+# and a plain `cargo check` both resolve it independently.
+[workspace]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 cargo-soro-mutants = { path = ".." }
+
+[[bin]]
+name = "command_construction"
+path = "fuzz_targets/command_construction.rs"
+test = false
+doc = false
 
 [[bin]]
 name = "filter_parser"

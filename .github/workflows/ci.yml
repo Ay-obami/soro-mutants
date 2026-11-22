@@ -160,3 +160,16 @@ jobs:
         uses: taiki-e/install-action@cargo-audit
       - name: Check locked dependencies for known advisories
         run: cargo audit --file Cargo.lock
+
+  dependency-hygiene:
+    name: Dependency graph hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify dependency-graph guard
+        run: .github/scripts/check-dependency-graph.sh --self-test
+      - name: Audit duplicate and unnecessary crates
+        run: .github/scripts/check-dependency-graph.sh
+      - name: Dependency graph regression tests
+        run: .github/scripts/check-runtime-budget.sh 30 cargo test --locked --test dependency_graph_cli

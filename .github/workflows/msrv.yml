@@ -31,19 +31,33 @@ jobs:
         run: cargo run --locked -- check-platform --json
 
   stable:
-    name: Current stable Rust compatibility
+    name: Latest stable Rust compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+      # Deliberately unpinned: this job is the latest-stable gate and must stay
+      # independent of the pinned 1.85.0 MSRV job above.
       - uses: dtolnay/rust-toolchain@stable
       - name: Report toolchain
         run: |
           rustc --version
           cargo --version
+          {
+            echo '### Latest stable Rust check'
+            echo
+            echo '```text'
+            rustc --version
+            cargo --version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify latest-stable CI contract
+        run: .github/scripts/check-runtime-budget.sh 30 cargo test --locked --test latest_stable_ci
       - name: Compile all targets and features
         run: cargo check --locked --all-targets --all-features
       - name: Run platform policy regression tests
         run: cargo test --locked --test check_platform_cli
+      - name: Run stable-syntax parser corpus
+        run: cargo test --locked --test parser_stable_syntax_corpus_cli
       - name: Verify platform policy
         run: cargo run --locked -- check-platform --json

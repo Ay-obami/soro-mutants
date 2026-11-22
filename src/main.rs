@@ -1,4 +1,6 @@
+mod command;
 mod diagnostics;
+mod pathguard;
 mod redaction;
 
 use anyhow::{bail, Context, Result};
@@ -1049,6 +1051,12 @@ fn validate_and_isolate_cache(
     parallel_mutants: &Path,
     identity: &CacheIdentity,
 ) -> Result<()> {
+    // #184: every path this function may delete must be a managed child of the
+    // resolved cache root, never a symlink pointing outside it.
+    pathguard::require_owned_cache_path(&cache_base.join("cache-identity.json"), cache_base)?;
+    pathguard::require_owned_cache_path(baseline, cache_base)?;
+    pathguard::require_owned_cache_path(mutants, cache_base)?;
+    pathguard::require_owned_cache_path(parallel_mutants, cache_base)?;
     fs::create_dir_all(cache_base)?;
     let identity_path = cache_base.join("cache-identity.json");
 
@@ -1067,14 +1075,23 @@ fn validate_and_isolate_cache(
     };
 
     if is_stale {
+        // Errors are surfaced instead of silently discarded: a failed removal
+        // must never leave a stale cache that is mistaken for a valid one.
         if baseline.exists() {
-            let _ = fs::remove_dir_all(baseline);
+            fs::remove_dir_all(baseline)
+                .with_context(|| format!("failed to remove stale cache {}", baseline.display()))?;
         }
         if mutants.exists() {
-            let _ = fs::remove_dir_all(mutants);
+            fs::remove_dir_all(mutants)
+                .with_context(|| format!("failed to remove stale cache {}", mutants.display()))?;
         }
         if parallel_mutants.exists() {
-            let _ = fs::remove_dir_all(parallel_mutants);
+            fs::remove_dir_all(parallel_mutants).with_context(|| {
+                format!(
+                    "failed to remove stale cache {}",
+                    parallel_mutants.display()
+                )
+            })?;
         }
     }
 
@@ -1090,11 +1107,13 @@ fn validate_and_isolate_cache(
     let baseline_in_mutant = mutants.join(".soro-baseline-artifact");
 
     if mutant_in_baseline.exists() {
-        let _ = fs::remove_dir_all(baseline);
+        fs::remove_dir_all(baseline)
+            .with_context(|| format!("failed to reset cache {}", baseline.display()))?;
         fs::create_dir_all(baseline)?;
     }
     if baseline_in_mutant.exists() {
-        let _ = fs::remove_dir_all(mutants);
+        fs::remove_dir_all(mutants)
+            .with_context(|| format!("failed to reset cache {}", mutants.display()))?;
         fs::create_dir_all(mutants)?;
     }
 
@@ -2670,24 +2689,12 @@ fn run() -> Result<()> {
             let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
             let mut test_command = resolve_runner_command(runner, &test_command)?;
             if !package.is_empty() {
+                // #183: validate package names before they become shell words.
+                let package_words = command::package_words(&package)?;
                 if runner == Runner::Nextest && test_command == "cargo nextest run" {
-                    test_command = format!(
-                        "cargo nextest run {}",
-                        package
-                            .iter()
-                            .map(|p| format!("-p {}", p))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    );
+                    test_command = format!("cargo nextest run {package_words}");
                 } else if runner == Runner::CargoTest && test_command == "cargo test -q" {
-                    test_command = format!(
-                        "cargo test -q {}",
-                        package
-                            .iter()
-                            .map(|p| format!("-p {}", p))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    );
+                    test_command = format!("cargo test -q {package_words}");
                 }
             }
             let metadata = RunMetadata::capture(
@@ -2852,6 +2859,7 @@ fn run() -> Result<()> {
 
             let cache_file = result_cache_path(&cache_base);
             if clear_cache && cache_file.exists() {
+                pathguard::require_owned_cache_path(&cache_file, &cache_base)?;
                 fs::remove_file(&cache_file).with_context(|| {
                     format!("cannot clear result cache at {}", cache_file.display())
                 })?;
@@ -3781,6 +3789,9 @@ fn run_benchmark_matrix(
 
         let workspace_dir = checkout_dir.join(&target.id);
         let target_dir = workspace_dir.join("target");
+        // #183: benchmark manifests are JSON input; reject control bytes
+        // before their test_command reaches `bash -lc`.
+        command::validate_shell_command(&target.test_command, "benchmark test_command")?;
         let baseline_command = format!("bash -lc '{}'", target.test_command.replace('\'', "'\\''"));
         let (baseline, _) = run_timed_command(
             {
@@ -5608,16 +5619,27 @@ fn clean_generated_state(
     if !dry_run {
         for path in &paths {
             if target_dir.is_none() && path == &root.join(".soro-mutants-target") {
+                // Content-based ownership for the cache root was already
+                // verified in `managed_cleanup_paths` without mutating it.
                 if path.exists() {
                     fs::remove_dir(path)
                         .with_context(|| format!("failed to remove {}", path.display()))?;
                 }
-            } else if path.is_file() {
-                fs::remove_file(path)
-                    .with_context(|| format!("failed to remove {}", path.display()))?;
-            } else if path.is_dir() {
-                fs::remove_dir_all(path)
-                    .with_context(|| format!("failed to remove {}", path.display()))?;
+            } else {
+                // #184: cover the metadata files too, not just directories.
+                let cache_root = target_dir_base(root, target_dir);
+                if path.starts_with(root.join(pathguard::SCRATCH_NAME)) {
+                    pathguard::require_owned_scratch_path(path, root)?;
+                } else {
+                    pathguard::require_owned_cache_path(path, &cache_root)?;
+                }
+                if path.is_file() {
+                    fs::remove_file(path)
+                        .with_context(|| format!("failed to remove {}", path.display()))?;
+                } else if path.is_dir() {
+                    fs::remove_dir_all(path)
+                        .with_context(|| format!("failed to remove {}", path.display()))?;
+                }
             }
         }
     }
@@ -5756,6 +5778,8 @@ fn execute_mutants(
     });
 
     let scratch_root = root.join(".soro-mutants-worktree");
+    // #184: refuse to follow a symlinked scratch root out of the project.
+    pathguard::require_owned_scratch_path(&scratch_root, root)?;
     let cleanup = if scratch_root.exists() {
         fs::remove_dir_all(&scratch_root).with_context(|| {
             format!(
@@ -5797,8 +5821,12 @@ fn execute_mutant(
     target_dir: &Path,
     ignored: &[PathBuf],
 ) -> Result<Outcome> {
+    // #184: the scratch worktree is always owned by the project; verify that
+    // before either the pre-run clear or the post-run cleanup deletes it.
+    pathguard::require_owned_scratch_path(scratch, root)?;
     if scratch.exists() {
-        fs::remove_dir_all(scratch)?;
+        fs::remove_dir_all(scratch)
+            .with_context(|| format!("failed to clear scratch {}", scratch.display()))?;
     }
     copy_project(root, scratch, ignored)?;
     apply_mutant(scratch, mutant)?;
@@ -5909,13 +5937,17 @@ fn copy_wasm_fixtures(root: &Path, destination: &Path, ignored: &[PathBuf]) -> R
 }
 
 fn resolve_runner_command(runner: Runner, test_command: &str) -> Result<String> {
-    match runner {
-        Runner::CargoTest => Ok(test_command.to_owned()),
-        Runner::Nextest if test_command == "cargo test -q" => Ok("cargo nextest run".to_owned()),
+    let resolved = match runner {
+        Runner::CargoTest => test_command.to_owned(),
+        Runner::Nextest if test_command == "cargo test -q" => "cargo nextest run".to_owned(),
         Runner::Nextest => bail!(
             "cannot combine --runner nextest with --test-command; choose one execution method"
         ),
-    }
+    };
+    // #183: every CLI test command reaches a shell; reject corrupt bytes here
+    // so the error is actionable before any worktree or cache is created.
+    command::validate_shell_command(&resolved, "--test-command")?;
+    Ok(resolved)
 }
 
 fn ensure_nextest_available() -> Result<()> {
@@ -6022,6 +6054,9 @@ fn run_process(
     timeout_seconds: u64,
     target_dir: &Path,
 ) -> Result<ProcessResult> {
+    // #183: validate at the final shell sink so no future caller can bypass
+    // the earlier checks with a corrupt or truncated command string.
+    command::validate_shell_command(command, "test command")?;
     fs::create_dir_all(target_dir)?;
 
     // Never send a child process's untrusted stderr directly to the terminal.

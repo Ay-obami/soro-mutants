@@ -1,0 +1,12 @@
+# Reviewed exceptions for the dependency-graph hygiene check (issue #182).
+#
+# This file is intentionally separate from audit.toml: cargo-audit tracks
+# vulnerability advisories, while this policy tracks avoidable duplication and
+# unused direct dependencies. Every entry must name an owner and a review date.
+
+[duplicate-crates]
+# syn 2.x is our direct AST/span-locations API. syn 3.x is required by
+# clap_derive 4.6.7 and serde_derive 1.0.229 and cannot be removed by us
+# without dropping those dependencies. Recheck when either is upgraded.
+# owner: maintainers; review by 2026-12-31.
+allow = ["syn"]

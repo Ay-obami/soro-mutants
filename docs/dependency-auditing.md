@@ -43,3 +43,44 @@ update may change audit results without a source change. Reproduce with the
 advisory ID and database revision and investigate the report; do not automatically
 ignore new advisories. A clean audit is not a guarantee that dependencies are
 vulnerability-free.
+
+## Duplicate and unnecessary crates
+
+The independent `dependency-hygiene` CI job complements the advisory scan by
+checking the dependency graph for avoidable bloat:
+
+- **Duplicate crate names** — more than one version of the same crate in the
+  committed root `Cargo.lock` (identical versions in different graph branches
+  are not duplicates).
+- **Unused direct dependencies** — a `[dependencies]` entry in `Cargo.toml`
+  that is no longer referenced anywhere under `src/`.
+
+The check is a pure function of the checked-in files, so it needs neither
+network access nor an advisory database:
+
+```bash
+.github/scripts/check-dependency-graph.sh --self-test
+.github/scripts/check-dependency-graph.sh
+cargo test --test dependency_graph_cli
+```
+
+The `--self-test` mode is the regression seed: it injects a synthetic
+`serde_json` duplicate into a sample lockfile and verifies the detector both
+reports it and honors a reviewed exception. The Rust test target performs the
+same assertions over the real lockfile and CI workflow, so deleting the guard
+from CI fails a normal `cargo test`.
+
+### Current reviewed exception
+
+`syn` appears at two majors: `2.0.119` is our direct AST/span-locations API,
+while `3.0.6` is pulled in by `clap_derive 4.6.7` and `serde_derive 1.0.229`.
+That duplication is reviewed and time-bounded in
+`.cargo/dependency-hygiene.toml` with an owner and review date. To introduce a
+new exception, document the same fields in that file and in the pull request;
+blanket allowlists are not accepted. Removing a duplicate by upgrading a
+direct dependency is always preferred over adding an exception.
+
+Only the root `Cargo.lock` is audited. Fixture lockfiles under `fixtures/`
+are independently versioned and excluded, and the `fuzz/` crate has its own
+manifest outside the workspace. Disabling this job or downgrading its failures
+to warnings is a policy change that requires maintainer review.

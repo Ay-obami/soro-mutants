@@ -13,7 +13,12 @@ Soro Mutants is a semantic mutation-testing tool for Soroban smart contracts. Co
 cargo fmt --all -- --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
+cargo +stable test --locked --test latest_stable_ci
 ```
+
+`latest_stable_ci` verifies the unpinned, bounded latest-stable job in
+`.github/workflows/msrv.yml`; run it with `+stable` when you touch CI,
+dependencies, or toolchain-sensitive parser code.
 
 ## Adding a semantic operator
 
@@ -81,7 +86,7 @@ Avoid unrelated refactors in operator PRs. Performance work, output formats, run
 
 ## Detailed maintainer guidance
 
-For built-in operator changes, follow the [v1.0 operator authoring guide](docs/operator-authoring.md) and the [maintainer architecture overview](docs/v1-maintainer-architecture.md). For dependency changes, review [RustSec advisory scanning and exception policy](docs/dependency-auditing.md).
+For built-in operator changes, follow the [v1.0 operator authoring guide](docs/operator-authoring.md) and the [maintainer architecture overview](docs/v1-maintainer-architecture.md). For dependency changes, review [RustSec advisory scanning and exception policy](docs/dependency-auditing.md), including the [duplicate and unnecessary crate policy](docs/dependency-auditing.md#duplicate-and-unnecessary-crates).
 
 
 ### Mutation replacement boundary property test
