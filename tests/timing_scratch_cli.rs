@@ -106,7 +106,10 @@ fn timing_reports_real_baseline_compile_test_and_mutant_durations() {
         "compile_ms",
         "test_ms",
     ] {
-        assert!(timing[field].is_u64(), "missing timing field {field}: {timing}");
+        assert!(
+            timing[field].is_u64(),
+            "missing timing field {field}: {timing}"
+        );
     }
 
     let results = report["results"].as_array().unwrap();
@@ -121,8 +124,14 @@ fn timing_reports_real_baseline_compile_test_and_mutant_durations() {
         report["metadata"]["scratch_dir"],
         scratch_root.display().to_string()
     );
-    assert!(!scratch_root.exists(), "custom scratch tree must be cleaned");
-    assert_eq!(fs::read(fixture.project.join("src/lib.rs")).unwrap(), fixture.source);
+    assert!(
+        !scratch_root.exists(),
+        "custom scratch tree must be cleaned"
+    );
+    assert_eq!(
+        fs::read(fixture.project.join("src/lib.rs")).unwrap(),
+        fixture.source
+    );
 }
 
 #[test]

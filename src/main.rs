@@ -3110,9 +3110,7 @@ fn run() -> Result<()> {
                     )
                 });
                 let test_ms = results.iter().fold(0u64, |total, result| {
-                    total.saturating_add(
-                        result.timing.and_then(|value| value.test_ms).unwrap_or(0),
-                    )
+                    total.saturating_add(result.timing.and_then(|value| value.test_ms).unwrap_or(0))
                 });
                 metadata.timing = Some(RunTiming {
                     discovery_ms,
@@ -5877,12 +5875,7 @@ fn execute_mutants(
 
     let worker_dirs = (0..workers)
         .map(|worker| {
-            worker_paths_with_scratch(
-                root,
-                settings.target_dir,
-                settings.scratch_root,
-                worker,
-            )
+            worker_paths_with_scratch(root, settings.target_dir, settings.scratch_root, worker)
         })
         .collect::<Vec<_>>();
     for (_, target) in &worker_dirs {
@@ -6801,7 +6794,11 @@ mod tests {
 
     #[test]
     fn path_length_failure_recommends_shorter_project_or_target_directory() {
-        let error = path_io_error("copying file to", Path::new("/deep/nested/file.rs"), io::Error::from_raw_os_error(36));
+        let error = path_io_error(
+            "copying file to",
+            Path::new("/deep/nested/file.rs"),
+            io::Error::from_raw_os_error(36),
+        );
         let message = error.to_string();
         assert!(message.contains("/deep/nested/file.rs"));
         assert!(message.contains("--target-dir"));
@@ -6810,9 +6807,15 @@ mod tests {
 
     #[test]
     fn ordinary_copy_errors_keep_the_original_cause() {
-        let error = path_io_error("copying file to", Path::new("example.rs"), io::Error::from_raw_os_error(2));
+        let error = path_io_error(
+            "copying file to",
+            Path::new("example.rs"),
+            io::Error::from_raw_os_error(2),
+        );
         assert!(error.to_string().contains("example.rs"));
-        assert!(error.to_string().contains("No such file") || error.to_string().contains("cannot find"));
+        assert!(
+            error.to_string().contains("No such file") || error.to_string().contains("cannot find")
+        );
     }
 
     #[cfg(unix)]
@@ -6823,7 +6826,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let fixture = env::temp_dir().join(format!("soro-copy-mode-{}-{nonce}", std::process::id()));
+        let fixture =
+            env::temp_dir().join(format!("soro-copy-mode-{}-{nonce}", std::process::id()));
         let root = fixture.join("source");
         let destination = fixture.join("mutant");
         fs::create_dir_all(root.join("bin")).unwrap();
@@ -6831,11 +6835,24 @@ mod tests {
         fs::set_permissions(root.join("bin/run.sh"), fs::Permissions::from_mode(0o750)).unwrap();
         fs::set_permissions(root.join("bin"), fs::Permissions::from_mode(0o750)).unwrap();
         copy_project(&root, &destination, &[]).unwrap();
-        assert_eq!(fs::metadata(destination.join("bin/run.sh")).unwrap().permissions().mode() & 0o777, 0o750);
-        assert_eq!(fs::metadata(destination.join("bin")).unwrap().permissions().mode() & 0o777, 0o750);
+        assert_eq!(
+            fs::metadata(destination.join("bin/run.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+        assert_eq!(
+            fs::metadata(destination.join("bin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
         fs::remove_dir_all(fixture).unwrap();
     }
-
 
     #[test]
     fn machine_report_paths_use_forward_slashes() {

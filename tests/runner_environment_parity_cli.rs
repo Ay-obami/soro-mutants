@@ -8,12 +8,20 @@ use std::{
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("soro-runner-home-{}-{nonce}", std::process::id()));
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("soro-runner-home-{}-{nonce}", std::process::id()));
         fs::create_dir_all(root.join("project/src")).unwrap();
         fs::create_dir_all(root.join("isolated-home")).unwrap();
         fs::create_dir_all(root.join("isolated-xdg")).unwrap();
-        fs::write(root.join("project/src/lib.rs"), "fn check(user: Address) { user.require_auth(); }\n").unwrap();
+        fs::write(
+            root.join("project/src/lib.rs"),
+            "fn check(user: Address) { user.require_auth(); }\n",
+        )
+        .unwrap();
         Self(root)
     }
 }
@@ -35,7 +43,14 @@ fn baseline_and_mutants_inherit_the_same_intended_environment_with_isolated_home
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
         .arg("test")
         .arg(fixture.0.join("project"))
-        .args(["--operator", "AUTH-001", "--test-command", command, "--timeout", "10"])
+        .args([
+            "--operator",
+            "AUTH-001",
+            "--test-command",
+            command,
+            "--timeout",
+            "10",
+        ])
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &xdg)
         .env("SORO_TEST_HOME", &home)
@@ -44,9 +59,19 @@ fn baseline_and_mutants_inherit_the_same_intended_environment_with_isolated_home
         .env("RUSTUP_TOOLCHAIN", "intentionally-removed")
         .output()
         .expect("soro mutants should launch");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("SURVIVED"));
-    assert_eq!(fs::read_to_string(home.join(".soro-tool-test/marker")).unwrap(), "success");
-    assert_eq!(fs::read(fixture.0.join("project/src/lib.rs")).unwrap(), source);
+    assert_eq!(
+        fs::read_to_string(home.join(".soro-tool-test/marker")).unwrap(),
+        "success"
+    );
+    assert_eq!(
+        fs::read(fixture.0.join("project/src/lib.rs")).unwrap(),
+        source
+    );
     assert!(!fixture.0.join("project/.soro-mutants-worktree").exists());
 }
