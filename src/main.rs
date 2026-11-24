@@ -3059,7 +3059,7 @@ fn run() -> Result<()> {
                         .failure_kind
                         .unwrap_or(ProcessFailureKind::Test);
                     let mut message = format!(
-                        "baseline {} in {} using `{}`; mutation results were not created",
+                        "baseline tests failed ({}) in {} using `{}`; mutation results were not created",
                         kind.label(),
                         test_cwd.display(),
                         redact_environment_secrets(&test_command)
@@ -3079,7 +3079,7 @@ fn run() -> Result<()> {
                 }
                 ProcessResult::Timeout => {
                     return Err(BaselineFailure::new(format!(
-                        "baseline timeout after {}s (effective timeout from {}) in {} using `{}`; mutation results were not created",
+                        "baseline tests timed out after {}s (effective timeout from {}) in {} using `{}`; mutation results were not created",
                         timeouts.test,
                         baseline_timeout_source,
                         test_cwd.display(),
@@ -6482,11 +6482,11 @@ fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
     let _ = Command::new("kill").args(["-TERM", &group]).status();
     let started = Instant::now();
     while started.elapsed() < TERMINATION_GRACE {
-        if child.try_wait()?.is_some() {
-            return Ok(());
-        }
+        let _ = child.try_wait()?;
         std::thread::sleep(Duration::from_millis(20));
     }
+    // Always target the whole group after the grace period. The shell leader
+    // may have exited while a descendant still owns stdout/stderr pipes.
     let _ = Command::new("kill").args(["-KILL", &group]).status();
     let _ = child.wait();
     Ok(())

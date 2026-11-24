@@ -75,7 +75,10 @@ fn baseline_compile_failure_is_classified_with_bounded_context() {
         "baseline failure must not emit a JSON result"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("baseline compile_failure"), "{stderr}");
+    assert!(
+        stderr.contains("baseline tests failed (compile_failure)"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains(&fixture.path().display().to_string()),
         "{stderr}"
@@ -94,7 +97,10 @@ fn baseline_test_failure_is_classified_and_includes_output_excerpt() {
     let output = fixture.run("cargo test -q");
     assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("baseline test_failure"), "{stderr}");
+    assert!(
+        stderr.contains("baseline tests failed (test_failure)"),
+        "{stderr}"
+    );
     assert!(stderr.contains("diagnostic-marker"), "{stderr}");
     assert!(stderr.contains("exit code:"), "{stderr}");
 }
@@ -106,10 +112,16 @@ fn missing_baseline_command_is_not_misclassified_as_a_test_failure() {
     let output = fixture.run("soro-mutants-definitely-missing-command");
     assert_eq!(output.status.code(), Some(3));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("baseline command_not_found"), "{stderr}");
+    assert!(
+        stderr.contains("baseline tests failed (command_not_found)"),
+        "{stderr}"
+    );
     assert!(
         stderr.contains("soro-mutants-definitely-missing-command"),
         "{stderr}"
     );
-    assert!(!stderr.contains("baseline test_failure"), "{stderr}");
+    assert!(
+        !stderr.contains("baseline tests failed (test_failure)"),
+        "{stderr}"
+    );
 }
