@@ -15,7 +15,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, BufRead, Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
