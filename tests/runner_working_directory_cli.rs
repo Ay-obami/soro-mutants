@@ -13,10 +13,8 @@ impl Fixture {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "soro-working-dir-{}-{nonce}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("soro-working-dir-{}-{nonce}", std::process::id()));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("runner")).unwrap();
         fs::write(

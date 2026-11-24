@@ -12,10 +12,8 @@ fn timeout_terminates_spawned_child_process_tree() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "soro-process-tree-{}-{nonce}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("soro-process-tree-{}-{nonce}", std::process::id()));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
         root.join("src/lib.rs"),
@@ -44,7 +42,10 @@ fn timeout_terminates_spawned_child_process_tree() {
     );
 
     let pid_file = root.join("child.pid");
-    assert!(pid_file.exists(), "child pid should be written before timeout");
+    assert!(
+        pid_file.exists(),
+        "child pid should be written before timeout"
+    );
     let pid = fs::read_to_string(&pid_file).unwrap();
     let pid = pid.trim();
     thread::sleep(Duration::from_millis(100));
