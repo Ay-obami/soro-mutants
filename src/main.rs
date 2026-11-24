@@ -5651,7 +5651,7 @@ fn resolve_scratch_root(root: &Path, scratch_dir: Option<&Path>) -> Result<PathB
         .canonicalize()
         .with_context(|| format!("cannot resolve --scratch-dir {}", base.display()))?;
 
-    if &base == root || root.starts_with(&base) {
+    if base == root || root.starts_with(&base) {
         bail!(
             "--scratch-dir {} must not be the project root or one of its parents",
             base.display()
@@ -5707,6 +5707,7 @@ fn worker_paths_with_scratch(
     )
 }
 
+#[cfg(test)]
 fn worker_paths(root: &Path, target_dir: Option<&Path>, worker: usize) -> (PathBuf, PathBuf) {
     worker_paths_with_scratch(
         root,
