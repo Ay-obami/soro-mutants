@@ -138,22 +138,41 @@ pub fn require_owned_cache_path(path: &Path, cache_root: &Path) -> Result<(), Cl
     Ok(())
 }
 
-/// Require that `path` lives inside the project's scratch worktree.
-/// Deeper worker directories are allowed; only the first component matters.
+/// Require that `path` lives inside a selected managed scratch root.
+///
+/// The scratch root itself and deeper worker directories are allowed. This is
+/// used for both the historical project-local scratch directory and custom
+/// `--scratch-dir` locations.
+pub fn require_owned_scratch_location(
+    path: &Path,
+    scratch_root: &Path,
+) -> Result<(), CleanupPathError> {
+    reject_symlink(scratch_root)?;
+    reject_symlink(path)?;
+    if scratch_root.file_name().and_then(|name| name.to_str()) != Some(SCRATCH_NAME) {
+        return Err(CleanupPathError::UnmanagedName {
+            path: scratch_root.to_path_buf(),
+            allowed: &[SCRATCH_NAME],
+        });
+    }
+    if path != scratch_root && !path.starts_with(scratch_root) {
+        return Err(CleanupPathError::OutsideManagedRoot {
+            path: path.to_path_buf(),
+            root: scratch_root.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// Require that `path` lives inside the project's default scratch worktree.
+/// Kept as the project-root convenience wrapper used by clean and existing
+/// callers.
 pub fn require_owned_scratch_path(
     path: &Path,
     project_root: &Path,
 ) -> Result<(), CleanupPathError> {
-    reject_symlink(project_root)?;
-    reject_symlink(path)?;
-    let first = first_component(path, project_root)?;
-    if first.as_os_str() != SCRATCH_NAME {
-        return Err(CleanupPathError::UnmanagedName {
-            path: path.to_path_buf(),
-            allowed: &[SCRATCH_NAME],
-        });
-    }
-    Ok(())
+    let scratch_root = project_root.join(SCRATCH_NAME);
+    require_owned_scratch_location(path, &scratch_root)
 }
 
 #[cfg(test)]
@@ -217,9 +236,26 @@ mod tests {
         );
         assert!(matches!(
             require_owned_scratch_path(&root.join("src"), &root),
-            Err(CleanupPathError::UnmanagedName { .. })
+            Err(CleanupPathError::OutsideManagedRoot { .. })
+                | Err(CleanupPathError::UnmanagedName { .. })
         ));
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn custom_scratch_root_owns_only_itself_and_worker_children() {
+        let base = temp_dir("custom-scratch");
+        let scratch = base.join(SCRATCH_NAME);
+        assert_eq!(require_owned_scratch_location(&scratch, &scratch), Ok(()));
+        assert_eq!(
+            require_owned_scratch_location(&scratch.join("worker-2"), &scratch),
+            Ok(())
+        );
+        assert!(matches!(
+            require_owned_scratch_location(&base.join("other"), &scratch),
+            Err(CleanupPathError::OutsideManagedRoot { .. })
+        ));
+        fs::remove_dir_all(base).expect("cleanup");
     }
 
     #[cfg(unix)]
