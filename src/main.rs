@@ -6585,13 +6585,12 @@ fn run_process(
     if !execution.stderr.is_empty() {
         io::stderr().write_all(redact_environment_secrets(&execution.stderr).as_bytes())?;
     }
-    if matches!(
-        execution.failure_kind,
-        Some(ProcessFailureKind::CommandNotFound | ProcessFailureKind::Spawn)
-    ) {
+    if let Some(kind @ (ProcessFailureKind::CommandNotFound | ProcessFailureKind::Spawn)) =
+        execution.failure_kind
+    {
         bail!(
             "test process launch failed ({}) in {} for `{}`",
-            execution.failure_kind.expect("checked launch failure").label(),
+            kind.label(),
             cwd.display(),
             redact_environment_secrets(command)
         );
