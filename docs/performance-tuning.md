@@ -93,3 +93,23 @@ See [nextest setup](nextest-runner.md).
 cargo nextest --version
 cargo soro-mutants test . --runner nextest --operator AUTH-001
 ```
+## Timing and scratch placement
+
+### `--timing`
+
+`soro-mutants test --timing` records wall-clock durations:
+
+- Run level, in `metadata.timing`: `discovery_ms`, `baseline_ms`, `mutant_wall_ms`, and `compile_ms` and `test_ms` summed over executed mutants. With `--jobs` above 1 the sums can exceed `mutant_wall_ms`.
+- Per mutant, in each result's `timing`: `total_ms`, plus `compile_ms` and `test_ms` when those gates ran. Cached or resumed mutants have no `timing`.
+
+Text output prints one `Timing:` line. Without the flag, reports are unchanged. Durations vary between runs, so compare them only on the same machine and load.
+
+```bash
+soro-mutants test --timing --json > report.json
+```
+
+### `--scratch-dir`
+
+`soro-mutants test --scratch-dir /fast/disk` creates mutation worktrees under `/fast/disk/.soro-mutants-worktree` instead of the project root. Each run removes only that directory. The directory must not be the project root or one of its parents. Put it outside the project, or inside it only if it is under a path already excluded from copies.
+
+`soro-mutants clean` removes only the default `.soro-mutants-worktree` in the project root, so remove a custom scratch directory yourself.
