@@ -7021,10 +7021,12 @@ mod tests {
         let survived = MutantResult {
             mutant: mutant.clone(),
             outcome: Outcome::Survived,
+            timing: None,
         };
         let killed = MutantResult {
             mutant,
             outcome: Outcome::Killed,
+            timing: None,
         };
         let mut output = Vec::new();
         print_github_annotations(&mut output, &[survived.clone(), survived, killed]).unwrap();
@@ -7116,11 +7118,13 @@ mod tests {
                 test: 60,
             },
             &scratch,
+            &scratch,
             &target,
             &[],
+            false,
         )
         .unwrap();
-        assert_eq!(outcome, Outcome::Unviable);
+        assert_eq!(outcome.outcome, Outcome::Unviable);
         assert!(!scratch.exists(), "scratch worktree must be removed");
         assert!(fs::read_to_string(root.join("src/lib.rs"))
             .unwrap()
@@ -7143,11 +7147,13 @@ mod tests {
                 test: 60,
             },
             &scratch,
+            &scratch,
             &target,
             &[],
+            false,
         )
         .unwrap();
-        assert_eq!(outcome, Outcome::Killed);
+        assert_eq!(outcome.outcome, Outcome::Killed);
         assert!(!scratch.exists(), "scratch worktree must be removed");
         assert!(fs::read_to_string(root.join("src/lib.rs"))
             .unwrap()
@@ -7238,6 +7244,7 @@ mod tests {
         let results = [MutantResult {
             mutant,
             outcome: Outcome::Survived,
+            timing: None,
         }];
         let mut output = Vec::new();
         print_html_report(&mut output, &results).unwrap();
@@ -7285,6 +7292,7 @@ mod tests {
         .map(|outcome| MutantResult {
             mutant: report_mutant(),
             outcome,
+            timing: None,
         })
         .collect::<Vec<_>>();
         assert!(ensure_min_score(&results, Some(50.0)).is_ok());
@@ -7304,6 +7312,7 @@ mod tests {
             let results = [MutantResult {
                 mutant: report_mutant(),
                 outcome,
+                timing: None,
             }];
             let report = serde_json::to_value(test_report(&results)).unwrap();
             let example: serde_json::Value =
@@ -8667,12 +8676,14 @@ mod tests {
             "cargo test -q",
             Timeouts::resolve(30, None, None),
             &root.join(".soro-mutants-worktree"),
+            &root.join(".soro-mutants-worktree"),
             &target,
             &[],
+            false,
         )
         .expect("mutant execution should succeed");
 
-        assert!(matches!(outcome, Outcome::Survived));
+        assert!(matches!(outcome.outcome, Outcome::Survived));
         assert!(!root.join(".soro-mutants-worktree").exists());
 
         let _ = fs::remove_dir_all(&root);
@@ -8840,7 +8851,9 @@ mod tests {
                     test_command: "cargo test -q",
                     timeouts: Timeouts::resolve(120, None, None),
                     target_dir: Some(&cache),
+                    scratch_root: &root.join(pathguard::SCRATCH_NAME),
                     jobs,
+                    timing: false,
                 },
                 &mut |mutant, outcome| {
                     reported.push((mutant.id.clone(), outcome_label(outcome)));
@@ -8849,7 +8862,10 @@ mod tests {
             )
             .expect("mutant execution should succeed");
 
-            let labels = outcomes.iter().map(outcome_label).collect::<Vec<_>>();
+            let labels = outcomes
+                .iter()
+                .map(|execution| outcome_label(&execution.outcome))
+                .collect::<Vec<_>>();
             assert_eq!(labels, ["KILLED", "SURVIVED", "SURVIVED"], "jobs={jobs}");
             assert_eq!(
                 reported,
