@@ -99,3 +99,7 @@ When a test run matches no mutants, an empty results array is emitted with compl
   }
 }
 ```
+
+## Timing fields
+
+When `test --timing` is set, `metadata.timing` holds run-level phase durations in milliseconds: `discovery_ms`, `baseline_ms`, `mutant_wall_ms`, `compile_ms`, and `test_ms`. Each result then has `timing` with `total_ms`, and `compile_ms` and `test_ms` when those gates ran. Both fields are absent without the flag, so existing consumers are unaffected. The values vary between runs.
