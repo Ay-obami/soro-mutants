@@ -5562,6 +5562,36 @@ fn target_dirs(root: &Path, target_dir: Option<&Path>) -> (PathBuf, PathBuf) {
     (base.join("baseline"), base.join("mutants-shared"))
 }
 
+fn resolve_scratch_root(root: &Path, scratch_dir: Option<&Path>) -> Result<PathBuf> {
+    let Some(requested) = scratch_dir else {
+        return Ok(root.join(pathguard::SCRATCH_NAME));
+    };
+
+    let base = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        env::current_dir()
+            .context("cannot resolve current directory for --scratch-dir")?
+            .join(requested)
+    };
+    fs::create_dir_all(&base)
+        .with_context(|| format!("cannot create --scratch-dir {}", base.display()))?;
+    let base = base
+        .canonicalize()
+        .with_context(|| format!("cannot resolve --scratch-dir {}", base.display()))?;
+
+    if &base == root || root.starts_with(&base) {
+        bail!(
+            "--scratch-dir {} must not be the project root or one of its parents",
+            base.display()
+        );
+    }
+
+    let scratch_root = base.join(pathguard::SCRATCH_NAME);
+    pathguard::require_owned_scratch_path_under(&scratch_root, &scratch_root)?;
+    Ok(scratch_root)
+}
+
 fn reject_cleanup_symlink(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -5593,11 +5623,25 @@ fn parallel_target_root(root: &Path, target_dir: Option<&Path>) -> PathBuf {
 /// Each worker owns both paths for the whole run: no two workers ever share a
 /// source tree or a `CARGO_TARGET_DIR`, while a worker's stable paths still let
 /// Cargo reuse dependency builds between the mutants it executes.
-fn worker_paths(root: &Path, target_dir: Option<&Path>, worker: usize) -> (PathBuf, PathBuf) {
+fn worker_paths_with_scratch(
+    root: &Path,
+    target_dir: Option<&Path>,
+    scratch_root: &Path,
+    worker: usize,
+) -> (PathBuf, PathBuf) {
     let name = format!("worker-{}", worker + 1);
     (
-        root.join(".soro-mutants-worktree").join(&name),
+        scratch_root.join(&name),
         parallel_target_root(root, target_dir).join(name),
+    )
+}
+
+fn worker_paths(root: &Path, target_dir: Option<&Path>, worker: usize) -> (PathBuf, PathBuf) {
+    worker_paths_with_scratch(
+        root,
+        target_dir,
+        &root.join(pathguard::SCRATCH_NAME),
+        worker,
     )
 }
 
