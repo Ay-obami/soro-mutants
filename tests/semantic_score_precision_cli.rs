@@ -5,7 +5,7 @@ use cargo_soro_mutants::report::{
 #[test]
 fn semantic_score_precision_and_rounding_contract() {
     let make_res = |id: &str, outcome: ReportOutcome| ReportResult {
-            timing: None,
+        timing: None,
         mutant: ReportMutant {
             id: id.into(),
             operator: "AUTH-001".into(),

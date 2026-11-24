@@ -1,4 +1,9 @@
-use std::{fs, path::PathBuf, process::Command, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fs,
+    path::PathBuf,
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 struct TempDir(PathBuf);
 
@@ -85,13 +90,19 @@ fn timing_is_opt_in_and_records_real_baseline_and_mutant_phases() {
     assert!(mutant_timing["total_ms"].is_u64(), "{mutant_timing}");
     assert!(mutant_timing["compile_ms"].is_u64(), "{mutant_timing}");
     assert!(mutant_timing["test_ms"].is_u64(), "{mutant_timing}");
-    assert_eq!(fs::read_to_string(project.join("src/lib.rs")).unwrap(), original);
+    assert_eq!(
+        fs::read_to_string(project.join("src/lib.rs")).unwrap(),
+        original
+    );
     assert!(
         !scratch_base.join(".soro-mutants-worktree").exists(),
         "managed scratch must be removed after the run"
     );
 
-    let untimed = run(&project, &["--operator", "AUTH-001", "--json", "--no-progress"]);
+    let untimed = run(
+        &project,
+        &["--operator", "AUTH-001", "--json", "--no-progress"],
+    );
     assert!(
         untimed.status.success(),
         "{}",

@@ -7,7 +7,7 @@ use cargo_soro_mutants::report::{
 #[test]
 fn report_serialization_deterministic_and_valid() {
     let result = ReportResult {
-            timing: None,
+        timing: None,
         mutant: ReportMutant {
             id: "M0001".into(),
             operator: "AUTH-001".into(),
@@ -123,7 +123,7 @@ fn pseudo_random_fuzz_simulation_for_reports() {
             let s = String::from_utf8_lossy(&bytes).into_owned();
 
             results.push(ReportResult {
-            timing: None,
+                timing: None,
                 mutant: ReportMutant {
                     id: format!("M{:04}", i + 1),
                     operator: s.clone(),
