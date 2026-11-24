@@ -8917,6 +8917,72 @@ mod tests {
     }
 
     #[test]
+    fn timing_and_scratch_flags_are_opt_in_and_parse_together() {
+        let parsed = Cli::try_parse_from([
+            "cargo-soro-mutants",
+            "test",
+            ".",
+            "--timing",
+            "--scratch-dir",
+            "/tmp/soro-mutants-scratch",
+        ])
+        .unwrap();
+        match parsed.command {
+            Commands::Test {
+                timing,
+                scratch_dir,
+                ..
+            } => {
+                assert!(timing);
+                assert_eq!(
+                    scratch_dir.as_deref(),
+                    Some(Path::new("/tmp/soro-mutants-scratch"))
+                );
+            }
+            _ => unreachable!("test subcommand"),
+        }
+
+        let defaults = Cli::try_parse_from(["cargo-soro-mutants", "test", "."]).unwrap();
+        match defaults.command {
+            Commands::Test {
+                timing,
+                scratch_dir,
+                ..
+            } => {
+                assert!(!timing);
+                assert!(scratch_dir.is_none());
+            }
+            _ => unreachable!("test subcommand"),
+        }
+    }
+
+    #[test]
+    fn optional_timing_fields_serialize_only_when_enabled() {
+        let mutant = report_mutant();
+        let without = serde_json::to_value(MutantResult {
+            mutant: mutant.clone(),
+            outcome: Outcome::Survived,
+            timing: None,
+        })
+        .unwrap();
+        assert!(without.get("timing").is_none());
+
+        let with = serde_json::to_value(MutantResult {
+            mutant,
+            outcome: Outcome::Killed,
+            timing: Some(MutantTiming {
+                total_ms: 9,
+                compile_ms: Some(4),
+                test_ms: Some(3),
+            }),
+        })
+        .unwrap();
+        assert_eq!(with["timing"]["total_ms"], 9);
+        assert_eq!(with["timing"]["compile_ms"], 4);
+        assert_eq!(with["timing"]["test_ms"], 3);
+    }
+
+    #[test]
     fn duration_parser_accepts_human_suffixes_and_rejects_zero() {
         assert_eq!(parse_duration("2s"), Ok(2));
         assert_eq!(parse_duration("3m"), Ok(180));
