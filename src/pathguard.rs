@@ -138,22 +138,40 @@ pub fn require_owned_cache_path(path: &Path, cache_root: &Path) -> Result<(), Cl
     Ok(())
 }
 
-/// Require that `path` lives inside the project's scratch worktree.
-/// Deeper worker directories are allowed; only the first component matters.
+/// Require that `path` lives inside a specific Soro Mutants scratch root.
+///
+/// The scratch root itself must end in `.soro-mutants-worktree`. Deeper worker
+/// directories are allowed. The root and the concrete deletion target are both
+/// checked without following symbolic links.
+pub fn require_owned_scratch_path_under(
+    path: &Path,
+    scratch_root: &Path,
+) -> Result<(), CleanupPathError> {
+    if scratch_root.file_name().and_then(|name| name.to_str()) != Some(SCRATCH_NAME) {
+        return Err(CleanupPathError::UnmanagedName {
+            path: scratch_root.to_path_buf(),
+            allowed: &[SCRATCH_NAME],
+        });
+    }
+    reject_symlink(scratch_root)?;
+    reject_symlink(path)?;
+    if path != scratch_root && !path.starts_with(scratch_root) {
+        return Err(CleanupPathError::OutsideManagedRoot {
+            path: path.to_path_buf(),
+            root: scratch_root.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// Require that `path` lives inside the project's default scratch worktree.
+/// Deeper worker directories are allowed.
 pub fn require_owned_scratch_path(
     path: &Path,
     project_root: &Path,
 ) -> Result<(), CleanupPathError> {
     reject_symlink(project_root)?;
-    reject_symlink(path)?;
-    let first = first_component(path, project_root)?;
-    if first.as_os_str() != SCRATCH_NAME {
-        return Err(CleanupPathError::UnmanagedName {
-            path: path.to_path_buf(),
-            allowed: &[SCRATCH_NAME],
-        });
-    }
-    Ok(())
+    require_owned_scratch_path_under(path, &project_root.join(SCRATCH_NAME))
 }
 
 #[cfg(test)]
@@ -217,9 +235,23 @@ mod tests {
         );
         assert!(matches!(
             require_owned_scratch_path(&root.join("src"), &root),
-            Err(CleanupPathError::UnmanagedName { .. })
+            Err(CleanupPathError::OutsideManagedRoot { .. })
+                | Err(CleanupPathError::UnmanagedName { .. })
         ));
+
+        let external_base = temp_dir("custom-scratch");
+        let custom_root = external_base.join(SCRATCH_NAME);
+        assert_eq!(
+            require_owned_scratch_path_under(&custom_root.join("worker-1"), &custom_root),
+            Ok(())
+        );
+        assert!(matches!(
+            require_owned_scratch_path_under(&external_base.join("other"), &custom_root),
+            Err(CleanupPathError::OutsideManagedRoot { .. })
+        ));
+
         fs::remove_dir_all(root).expect("cleanup");
+        fs::remove_dir_all(external_base).expect("cleanup");
     }
 
     #[cfg(unix)]
