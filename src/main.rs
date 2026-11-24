@@ -581,8 +581,6 @@ struct SelectionMetadata {
     function_filter: Option<String>,
     shard_index: Option<usize>,
     shard_total: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timing: Option<RunTiming>,
 }
 
 impl SelectionMetadata {
@@ -630,6 +628,8 @@ struct RunMetadata {
     function_filter: Option<String>,
     shard_index: Option<usize>,
     shard_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timing: Option<RunTiming>,
 }
 
 impl RunMetadata {
@@ -2616,7 +2616,6 @@ fn run() -> Result<()> {
             let root = path
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
-            let discovery_started = timing.then(Instant::now);
             let package_dirs = resolve_package_filter(&root, &package)?;
             let selection_filters = SelectionFilters {
                 package: &package,
@@ -2654,12 +2653,6 @@ fn run() -> Result<()> {
             )?;
             let after_changed = mutants.len();
             let mutants = select_shard(mutants, shard);
-            if let Some(started) = discovery_started {
-                metadata.timing = Some(RunTiming {
-                    discovery_ms: elapsed_ms(started),
-                    ..RunTiming::default()
-                });
-            }
             if mutants.is_empty() {
                 diagnostics::report_empty_selection(&selection_filters.empty_selection(
                     &root,
@@ -2754,6 +2747,7 @@ fn run() -> Result<()> {
             let root = path
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
+            let discovery_started = timing.then(Instant::now);
             let package_dirs = resolve_package_filter(&root, &package)?;
             let exclude_globs = exclude_path
                 .iter()
@@ -2792,6 +2786,12 @@ fn run() -> Result<()> {
             )?;
             let after_changed = mutants.len();
             let mutants = select_shard(mutants, shard);
+            if let Some(started) = discovery_started {
+                metadata.timing = Some(RunTiming {
+                    discovery_ms: elapsed_ms(started),
+                    ..RunTiming::default()
+                });
+            }
             if mutants.is_empty() {
                 diagnostics::report_empty_selection(&selection_filters.empty_selection(
                     &root,
