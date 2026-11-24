@@ -7,6 +7,7 @@ use cargo_soro_mutants::report::{
 fn test_per_operator_and_per_file_summary_counts() {
     let results = vec![
         ReportResult {
+            timing: None,
             mutant: ReportMutant {
                 id: "M0001".into(),
                 operator: "AUTH-001".into(),
@@ -23,6 +24,7 @@ fn test_per_operator_and_per_file_summary_counts() {
             outcome: ReportOutcome::Killed,
         },
         ReportResult {
+            timing: None,
             mutant: ReportMutant {
                 id: "M0002".into(),
                 operator: "AUTH-001".into(),
@@ -39,6 +41,7 @@ fn test_per_operator_and_per_file_summary_counts() {
             outcome: ReportOutcome::Survived,
         },
         ReportResult {
+            timing: None,
             mutant: ReportMutant {
                 id: "M0003".into(),
                 operator: "TOKEN-001".into(),
