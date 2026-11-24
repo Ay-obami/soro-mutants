@@ -93,3 +93,21 @@ See [nextest setup](nextest-runner.md).
 cargo nextest --version
 cargo soro-mutants test . --runner nextest --operator AUTH-001
 ```
+
+## Timing and scratch placement
+
+Use `--timing` when diagnosing where a mutation run spends time:
+
+```bash
+cargo soro-mutants test . --timing --json > report.json
+```
+
+The text report prints one `Timing:` line. JSON includes discovery, baseline, mutant wall-clock, compile, and test durations. Per-mutant timing is emitted only for mutants executed in the current run; cache and resume hits intentionally have no timing.
+
+Use `--scratch-dir DIR` to place temporary mutation worktrees under `DIR/.soro-mutants-worktree`, which is useful when the checkout is on a slow or space-constrained filesystem:
+
+```bash
+cargo soro-mutants test . --scratch-dir /fast/local-disk
+```
+
+A custom scratch directory may be outside the project or inside a project subdirectory. The managed scratch tree is excluded from project copies and removed after success or failure. For safety, `DIR` cannot be the project root or one of its parents. `cargo soro-mutants clean` continues to manage the default project-local scratch tree; a custom base directory itself is never deleted.
