@@ -268,3 +268,20 @@ If a custom scratch path is a symbolic link at cleanup time, the run fails safel
 ## Baseline timeout diagnostics
 
 A baseline timeout exits with code 3 before any mutant result is created. The diagnostic reports the effective baseline timeout in seconds and names the flag that supplied it: `--test-timeout` when explicitly set, otherwise the legacy `--timeout` value. Mutant timeouts remain ordinary `TIMEOUT` outcomes and do not use the baseline-failure exit path.
+
+
+## Baseline root-cause diagnostics
+
+When the clean baseline cannot complete successfully, Soro Mutants stops before
+running any mutant and exits with code 3. The failure is classified as
+`compile_failure`, `test_failure`, `command_not_found`, `spawn_failure`,
+or `timeout`. The diagnostic includes the effective command and working
+directory plus bounded stdout/stderr excerpts where available.
+
+Use the working directory shown in the error to reproduce relative-path
+failures exactly. Baseline and mutant working-directory rules, output bounds,
+and timeout process-tree cleanup are documented in
+[process execution](process-execution.md).
+
+Machine-readable mutation reports are not emitted for failed baselines because
+there are no valid mutation outcomes to serialize.
