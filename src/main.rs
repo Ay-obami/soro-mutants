@@ -6990,10 +6990,12 @@ mod tests {
         let survived = MutantResult {
             mutant: mutant.clone(),
             outcome: Outcome::Survived,
+            timing: None,
         };
         let killed = MutantResult {
             mutant,
             outcome: Outcome::Killed,
+            timing: None,
         };
         let mut output = Vec::new();
         print_github_annotations(&mut output, &[survived.clone(), survived, killed]).unwrap();
@@ -7207,6 +7209,7 @@ mod tests {
         let results = [MutantResult {
             mutant,
             outcome: Outcome::Survived,
+            timing: None,
         }];
         let mut output = Vec::new();
         print_html_report(&mut output, &results).unwrap();
@@ -7254,6 +7257,7 @@ mod tests {
         .map(|outcome| MutantResult {
             mutant: report_mutant(),
             outcome,
+            timing: None,
         })
         .collect::<Vec<_>>();
         assert!(ensure_min_score(&results, Some(50.0)).is_ok());
@@ -7273,6 +7277,7 @@ mod tests {
             let results = [MutantResult {
                 mutant: report_mutant(),
                 outcome,
+                timing: None,
             }];
             let report = serde_json::to_value(test_report(&results)).unwrap();
             let example: serde_json::Value =
