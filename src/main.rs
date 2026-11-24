@@ -6412,65 +6412,176 @@ fn replace_source_range(
     Ok(mutated)
 }
 
+const PROCESS_EXCERPT_LIMIT: usize = 8 * 1024;
+const TERMINATION_GRACE: Duration = Duration::from_millis(300);
+
+fn read_bounded<R: Read>(mut reader: R) -> io::Result<Vec<u8>> {
+    let mut kept = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let remaining = PROCESS_EXCERPT_LIMIT.saturating_sub(kept.len());
+        if remaining > 0 {
+            kept.extend_from_slice(&buffer[..count.min(remaining)]);
+        }
+    }
+    Ok(kept)
+}
+
+fn one_line_excerpt(value: &str) -> String {
+    redact_environment_secrets(value)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn classify_failed_process(exit_code: Option<i32>, stderr: &str) -> ProcessFailureKind {
+    let lower = stderr.to_ascii_lowercase();
+    if exit_code == Some(127) || lower.contains("command not found") {
+        ProcessFailureKind::CommandNotFound
+    } else if lower.contains("could not compile") {
+        ProcessFailureKind::Compile
+    } else {
+        ProcessFailureKind::Test
+    }
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
+    let group = format!("-{}", child.id());
+    let _ = Command::new("kill").args(["-TERM", &group]).status();
+    let started = Instant::now();
+    while started.elapsed() < TERMINATION_GRACE {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = Command::new("kill").args(["-KILL", &group]).status();
+    let _ = child.wait();
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
+    child.kill()?;
+    let _ = child.wait();
+    Ok(())
+}
+
+fn run_process_detailed(
+    cwd: &Path,
+    command: &str,
+    timeout_seconds: u64,
+    target_dir: &Path,
+) -> Result<ProcessExecution> {
+    command::validate_shell_command(command, "test command")?;
+    fs::create_dir_all(target_dir)?;
+
+    let mut command_builder = Command::new("bash");
+    command_builder
+        .arg("-lc")
+        .arg(command)
+        .current_dir(cwd)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_process_group(&mut command_builder);
+
+    let mut child = match command_builder.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return Ok(ProcessExecution {
+                result: ProcessResult::Failed,
+                failure_kind: Some(ProcessFailureKind::Spawn),
+                stdout: String::new(),
+                stderr: error.to_string(),
+                exit_code: None,
+            });
+        }
+    };
+
+    let child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("cannot capture test command stdout"))?;
+    let child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("cannot capture test command stderr"))?;
+    let stdout_reader = std::thread::spawn(move || read_bounded(child_stdout));
+    let stderr_reader = std::thread::spawn(move || read_bounded(child_stderr));
+
+    let (result, exit_code) = match child.wait_timeout(Duration::from_secs(timeout_seconds))? {
+        Some(status) if status.success() => (ProcessResult::Passed, status.code()),
+        Some(status) => (ProcessResult::Failed, status.code()),
+        None => {
+            terminate_process_tree(&mut child)?;
+            (ProcessResult::Timeout, None)
+        }
+    };
+
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("cannot collect test command stdout"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("cannot collect test command stderr"))??;
+    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
+    let failure_kind = if result == ProcessResult::Failed {
+        Some(classify_failed_process(exit_code, &stderr))
+    } else {
+        None
+    };
+
+    Ok(ProcessExecution {
+        result,
+        failure_kind,
+        stdout,
+        stderr,
+        exit_code,
+    })
+}
+
 fn run_process(
     cwd: &Path,
     command: &str,
     timeout_seconds: u64,
     target_dir: &Path,
 ) -> Result<ProcessResult> {
-    // #183: validate at the final shell sink so no future caller can bypass
-    // the earlier checks with a corrupt or truncated command string.
-    command::validate_shell_command(command, "test command")?;
-    fs::create_dir_all(target_dir)?;
-
-    // Never send a child process's untrusted stderr directly to the terminal.
-    // Sanitize it before forwarding, while draining concurrently to avoid a
-    // blocked child on a full pipe. Only diagnostic output is sanitized: source
-    // excerpts intentionally supplied by the user retain their original bytes.
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg(command)
-        .current_dir(cwd)
-        .env("CARGO_TARGET_DIR", target_dir)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("failed to execute: {}", redact_environment_secrets(command)))?;
-
-    let child_stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("cannot capture test command diagnostics"))?;
-    let stderr_reader = std::thread::spawn(move || -> io::Result<()> {
-        let mut reader = io::BufReader::new(child_stderr);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            if reader.read_until(b'\n', &mut line)? == 0 {
-                break;
-            }
-            let message = redact_environment_secrets(&String::from_utf8_lossy(&line));
-            io::stderr().write_all(message.as_bytes())?;
-        }
-        Ok(())
-    });
-
-    let result = match child.wait_timeout(Duration::from_secs(timeout_seconds))? {
-        Some(status) if status.success() => ProcessResult::Passed,
-        Some(_) => ProcessResult::Failed,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            ProcessResult::Timeout
-        }
-    };
-    stderr_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("cannot collect test command diagnostics"))??;
-    Ok(result)
+    let execution = run_process_detailed(cwd, command, timeout_seconds, target_dir)?;
+    if !execution.stderr.is_empty() {
+        io::stderr().write_all(redact_environment_secrets(&execution.stderr).as_bytes())?;
+    }
+    if matches!(
+        execution.failure_kind,
+        Some(ProcessFailureKind::CommandNotFound | ProcessFailureKind::Spawn)
+    ) {
+        bail!(
+            "test process launch failed ({}) in {} for `{}`",
+            execution.failure_kind.expect("checked launch failure").label(),
+            cwd.display(),
+            redact_environment_secrets(command)
+        );
+    }
+    Ok(execution.result)
 }
-
 fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
     writeln!(report, "Discovered {} semantic mutants\n", mutants.len())?;
     for mutant in mutants {
