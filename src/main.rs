@@ -6479,7 +6479,7 @@ fn configure_process_group(_command: &mut Command) {}
 #[cfg(unix)]
 fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
     let group = format!("-{}", child.id());
-    let _ = Command::new("kill").args(["-TERM", &group]).status();
+    let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
     let started = Instant::now();
     while started.elapsed() < TERMINATION_GRACE {
         let _ = child.try_wait()?;
@@ -6487,7 +6487,7 @@ fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
     }
     // Always target the whole group after the grace period. The shell leader
     // may have exited while a descendant still owns stdout/stderr pipes.
-    let _ = Command::new("kill").args(["-KILL", &group]).status();
+    let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
     let _ = child.wait();
     Ok(())
 }
