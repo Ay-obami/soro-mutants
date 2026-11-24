@@ -7,6 +7,7 @@ use cargo_soro_mutants::report::{
 #[test]
 fn report_serialization_deterministic_and_valid() {
     let result = ReportResult {
+            timing: None,
         mutant: ReportMutant {
             id: "M0001".into(),
             operator: "AUTH-001".into(),
@@ -55,6 +56,7 @@ fn report_serialization_handles_pathological_strings_panic_free() {
 
     for (idx, str_val) in pathological_strings.iter().enumerate() {
         let result = ReportResult {
+            timing: None,
             mutant: ReportMutant {
                 id: format!("M{:04}", idx + 1),
                 operator: (*str_val).to_string(),
@@ -121,6 +123,7 @@ fn pseudo_random_fuzz_simulation_for_reports() {
             let s = String::from_utf8_lossy(&bytes).into_owned();
 
             results.push(ReportResult {
+            timing: None,
                 mutant: ReportMutant {
                     id: format!("M{:04}", i + 1),
                     operator: s.clone(),
