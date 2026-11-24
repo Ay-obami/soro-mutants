@@ -2709,12 +2709,14 @@ fn run() -> Result<()> {
             changed_functions,
             test_dir,
             target_dir,
+            scratch_dir,
             test_command,
             runner,
             timeout,
             compile_timeout,
             test_timeout,
             jobs,
+            timing,
             json,
             markdown,
             html,
@@ -2741,7 +2743,7 @@ fn run() -> Result<()> {
                     test_command = format!("cargo test -q {package_words}");
                 }
             }
-            let metadata = RunMetadata::capture(
+            let mut metadata = RunMetadata::capture(
                 &test_command,
                 timeouts,
                 operator.as_deref(),
@@ -2752,6 +2754,12 @@ fn run() -> Result<()> {
             let root = path
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
+            let scratch_root = resolve_scratch_root(&root, scratch_dir.as_deref())?;
+            if scratch_dir.is_some() {
+                metadata.scratch_dir = Some(scratch_root.display().to_string());
+            }
+
+            let discovery_started = Instant::now();
             let package_dirs = resolve_package_filter(&root, &package)?;
             let exclude_globs = exclude_path
                 .iter()
@@ -2790,6 +2798,13 @@ fn run() -> Result<()> {
             )?;
             let after_changed = mutants.len();
             let mutants = select_shard(mutants, shard);
+            let discovery_ms = duration_ms(discovery_started.elapsed());
+            if timing {
+                metadata.timing = Some(RunTiming {
+                    discovery_ms,
+                    ..RunTiming::default()
+                });
+            }
             if mutants.is_empty() {
                 diagnostics::report_empty_selection(&selection_filters.empty_selection(
                     &root,
@@ -2822,6 +2837,13 @@ fn run() -> Result<()> {
                 } else if sarif {
                     print_sarif_report(&mut report, &[])?;
                 } else {
+                    if let Some(run_timing) = metadata.timing {
+                        writeln!(
+                            report,
+                            "Timing: discovery={}ms baseline=0ms mutants=0ms compile=0ms test=0ms",
+                            run_timing.discovery_ms
+                        )?;
+                    }
                     writeln!(report, "No matching Soroban semantic mutants found.")?;
                 }
                 if !suppressed.is_empty() && !json {
@@ -2879,6 +2901,9 @@ fn run() -> Result<()> {
                 diff_base: diff_base.clone(),
                 changed_functions,
                 jobs: usize::from(jobs),
+                scratch_dir: scratch_dir
+                    .as_ref()
+                    .map(|_| scratch_root.display().to_string()),
                 execution_env_hash: execution_env_hash(),
                 compile_timeout_seconds: timeouts.compile,
                 test_timeout_seconds: timeouts.test,
@@ -2940,12 +2965,15 @@ fn run() -> Result<()> {
                     redact_environment_secrets(&test_command)
                 )?;
             }
-            match run_process(
+            let baseline_started = Instant::now();
+            let baseline_result = run_process(
                 &test_cwd,
                 &test_command,
                 timeouts.test,
                 &baseline_target_dir,
-            )? {
+            )?;
+            let baseline_ms = duration_ms(baseline_started.elapsed());
+            match baseline_result {
                 ProcessResult::Passed => {
                     if text_progress {
                         writeln!(report, "Baseline PASS\n")?;
@@ -2962,7 +2990,9 @@ fn run() -> Result<()> {
                 }
             }
 
+            let mutant_phase_started = Instant::now();
             let mut outcome_slots: Vec<Option<Outcome>> = vec![None; mutants.len()];
+            let mut timing_slots: Vec<Option<MutantTiming>> = vec![None; mutants.len()];
             let mut pending_mutants = Vec::new();
             let mut pending_indices = Vec::new();
 
@@ -3016,7 +3046,7 @@ fn run() -> Result<()> {
                 }
             }
 
-            let pending_outcomes = execute_mutants(
+            let pending_executions = execute_mutants(
                 &root,
                 &pending_mutants,
                 &ExecutionSettings {
@@ -3024,7 +3054,9 @@ fn run() -> Result<()> {
                     test_command: &test_command,
                     timeouts,
                     target_dir: target_dir.as_deref(),
+                    scratch_root: &scratch_root,
                     jobs: usize::from(jobs),
+                    timing,
                 },
                 &mut |mutant, outcome| {
                     if text_progress {
@@ -3048,20 +3080,48 @@ fn run() -> Result<()> {
                 },
             )?;
 
-            for (pending_pos, outcome) in pending_outcomes.into_iter().enumerate() {
-                outcome_slots[pending_indices[pending_pos]] = Some(outcome);
+            for (pending_pos, execution) in pending_executions.into_iter().enumerate() {
+                let index = pending_indices[pending_pos];
+                outcome_slots[index] = Some(execution.outcome);
+                timing_slots[index] = execution.timing;
             }
 
             let results = mutants
                 .into_iter()
                 .zip(outcome_slots)
-                .map(|(mutant, outcome)| {
+                .zip(timing_slots)
+                .map(|((mutant, outcome), mutant_timing)| {
                     Ok(MutantResult {
                         mutant,
                         outcome: outcome.context("mutation execution ended without an outcome")?,
+                        timing: mutant_timing,
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            let mutant_wall_ms = duration_ms(mutant_phase_started.elapsed());
+
+            if timing {
+                let compile_ms = results.iter().fold(0u64, |total, result| {
+                    total.saturating_add(
+                        result
+                            .timing
+                            .and_then(|value| value.compile_ms)
+                            .unwrap_or(0),
+                    )
+                });
+                let test_ms = results.iter().fold(0u64, |total, result| {
+                    total.saturating_add(
+                        result.timing.and_then(|value| value.test_ms).unwrap_or(0),
+                    )
+                });
+                metadata.timing = Some(RunTiming {
+                    discovery_ms,
+                    baseline_ms,
+                    mutant_wall_ms,
+                    compile_ms,
+                    test_ms,
+                });
+            }
 
             if cache_enabled {
                 result_cache.identity = result_identity;
@@ -3091,6 +3151,17 @@ fn run() -> Result<()> {
             } else if sarif {
                 print_sarif_report(&mut report, &results)?;
             } else {
+                if let Some(run_timing) = metadata.timing {
+                    writeln!(
+                        report,
+                        "Timing: discovery={}ms baseline={}ms mutants={}ms compile={}ms test={}ms",
+                        run_timing.discovery_ms,
+                        run_timing.baseline_ms,
+                        run_timing.mutant_wall_ms,
+                        run_timing.compile_ms,
+                        run_timing.test_ms
+                    )?;
+                }
                 print_summary(&mut report, &results)?;
                 print_suppression_summary(&mut report, &suppressed)?;
             }
