@@ -18,7 +18,7 @@ use std::{
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use syn::{
     spanned::Spanned,
@@ -224,6 +224,9 @@ enum Commands {
         /// Store Soro Mutants baseline and mutant Cargo caches under this directory.
         #[arg(long)]
         target_dir: Option<PathBuf>,
+        /// Place mutation worktrees under DIR/.soro-mutants-worktree instead of the project root.
+        #[arg(long, value_name = "DIR")]
+        scratch_dir: Option<PathBuf>,
         /// Command used for the clean baseline and each viable mutant.
         #[arg(long, default_value = "cargo test -q")]
         test_command: String,
@@ -243,6 +246,9 @@ enum Commands {
         /// Each worker uses its own scratch worktree and Cargo target directory.
         #[arg(short = 'j', long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
         jobs: u16,
+        /// Record wall-clock timing for discovery, baseline, and executed mutants.
+        #[arg(long)]
+        timing: bool,
         /// Emit machine-readable JSON on stdout.
         #[arg(long)]
         json: bool,
@@ -456,10 +462,30 @@ enum Outcome {
     Timeout,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct MutantTiming {
+    total_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compile_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct RunTiming {
+    discovery_ms: u64,
+    baseline_ms: u64,
+    mutant_wall_ms: u64,
+    compile_ms: u64,
+    test_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct MutantResult {
     mutant: Mutant,
     outcome: Outcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timing: Option<MutantTiming>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -594,6 +620,10 @@ struct RunMetadata {
     function_filter: Option<String>,
     shard_index: Option<usize>,
     shard_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scratch_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timing: Option<RunTiming>,
 }
 
 impl RunMetadata {
@@ -616,6 +646,8 @@ impl RunMetadata {
             function_filter: function_filter.map(str::to_owned),
             shard_index: shard.map(|value| value.index),
             shard_total: shard.map(|value| value.total),
+            scratch_dir: None,
+            timing: None,
         }
     }
 }
@@ -666,6 +698,8 @@ struct ResultCacheIdentity {
     diff_base: Option<String>,
     changed_functions: bool,
     jobs: usize,
+    #[serde(default)]
+    scratch_dir: Option<String>,
     execution_env_hash: String,
     compile_timeout_seconds: u64,
     test_timeout_seconds: u64,
@@ -1325,6 +1359,16 @@ enum ProcessResult {
     Passed,
     Failed,
     Timeout,
+}
+
+#[derive(Clone, Debug)]
+struct MutantExecution {
+    outcome: Outcome,
+    timing: Option<MutantTiming>,
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5655,7 +5699,10 @@ struct ExecutionSettings<'a> {
     timeouts: Timeouts,
     /// The user's `--target-dir`, if any; Soro Mutants derives its caches from it.
     target_dir: Option<&'a Path>,
+    /// Resolved root directory for mutation worktrees.
+    scratch_root: &'a Path,
     jobs: usize,
+    timing: bool,
 }
 
 /// Execute every mutant and return their outcomes in input order.
