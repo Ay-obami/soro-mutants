@@ -1,6 +1,5 @@
 use std::{
     fs,
-    path::PathBuf,
     process::Command,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
