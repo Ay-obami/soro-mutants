@@ -5766,40 +5766,52 @@ fn execute_mutants(
     mutants: &[Mutant],
     settings: &ExecutionSettings<'_>,
     on_result: &mut dyn FnMut(&Mutant, &Outcome) -> Result<()>,
-) -> Result<Vec<Outcome>> {
+) -> Result<Vec<MutantExecution>> {
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     };
 
     let (baseline_target, serial_target) = target_dirs(root, settings.target_dir);
-    let ignored = soro_target_base(root, settings.target_dir)
+    let mut ignored = soro_target_base(root, settings.target_dir)
         .into_iter()
         .collect::<Vec<_>>();
+    if settings.scratch_root.starts_with(root) {
+        ignored.push(settings.scratch_root.to_path_buf());
+    }
     let workers = settings.jobs.max(1).min(mutants.len());
 
     if workers <= 1 {
-        let scratch = root.join(".soro-mutants-worktree");
-        let mut outcomes = Vec::with_capacity(mutants.len());
+        let scratch = settings.scratch_root.to_path_buf();
+        let mut executions = Vec::with_capacity(mutants.len());
         for mutant in mutants {
-            let outcome = execute_mutant(
+            let execution = execute_mutant(
                 root,
                 mutant,
                 settings.test_dir,
                 settings.test_command,
                 settings.timeouts,
                 &scratch,
+                settings.scratch_root,
                 &serial_target,
                 &ignored,
+                settings.timing,
             )?;
-            on_result(mutant, &outcome)?;
-            outcomes.push(outcome);
+            on_result(mutant, &execution.outcome)?;
+            executions.push(execution);
         }
-        return Ok(outcomes);
+        return Ok(executions);
     }
 
     let worker_dirs = (0..workers)
-        .map(|worker| worker_paths(root, settings.target_dir, worker))
+        .map(|worker| {
+            worker_paths_with_scratch(
+                root,
+                settings.target_dir,
+                settings.scratch_root,
+                worker,
+            )
+        })
         .collect::<Vec<_>>();
     for (_, target) in &worker_dirs {
         if target == &baseline_target || target.starts_with(&baseline_target) {
@@ -5812,11 +5824,11 @@ fn execute_mutants(
 
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
-    let mut slots: Vec<Option<Outcome>> = vec![None; mutants.len()];
+    let mut slots: Vec<Option<MutantExecution>> = vec![None; mutants.len()];
     let mut errors: Vec<(usize, anyhow::Error)> = Vec::new();
 
     std::thread::scope(|scope| {
-        let (sender, receiver) = mpsc::channel::<(usize, Result<Outcome>)>();
+        let (sender, receiver) = mpsc::channel::<(usize, Result<MutantExecution>)>();
         for (scratch, target) in &worker_dirs {
             let sender = sender.clone();
             let (next, stop, ignored) = (&next, &stop, &ignored);
@@ -5833,8 +5845,10 @@ fn execute_mutants(
                         settings.test_command,
                         settings.timeouts,
                         scratch,
+                        settings.scratch_root,
                         target,
                         ignored,
+                        settings.timing,
                     );
                     let failed = result.is_err();
                     if failed {
@@ -5851,17 +5865,17 @@ fn execute_mutants(
         let mut reported = 0;
         for (index, result) in receiver {
             match result {
-                Ok(outcome) => slots[index] = Some(outcome),
+                Ok(execution) => slots[index] = Some(execution),
                 Err(error) => {
                     stop.store(true, Ordering::SeqCst);
                     errors.push((index, error));
                 }
             }
             while errors.is_empty() {
-                let Some(Some(outcome)) = slots.get(reported) else {
+                let Some(Some(execution)) = slots.get(reported) else {
                     break;
                 };
-                if let Err(error) = on_result(&mutants[reported], outcome) {
+                if let Err(error) = on_result(&mutants[reported], &execution.outcome) {
                     stop.store(true, Ordering::SeqCst);
                     errors.push((reported, error));
                     break;
@@ -5871,14 +5885,12 @@ fn execute_mutants(
         }
     });
 
-    let scratch_root = root.join(".soro-mutants-worktree");
-    // #184: refuse to follow a symlinked scratch root out of the project.
-    pathguard::require_owned_scratch_path(&scratch_root, root)?;
-    let cleanup = if scratch_root.exists() {
-        fs::remove_dir_all(&scratch_root).with_context(|| {
+    pathguard::require_owned_scratch_path_under(settings.scratch_root, settings.scratch_root)?;
+    let cleanup = if settings.scratch_root.exists() {
+        fs::remove_dir_all(settings.scratch_root).with_context(|| {
             format!(
                 "failed to clean mutation scratch {}",
-                scratch_root.display()
+                settings.scratch_root.display()
             )
         })
     } else {
@@ -5912,12 +5924,15 @@ fn execute_mutant(
     test_command: &str,
     timeouts: Timeouts,
     scratch: &Path,
+    scratch_root: &Path,
     target_dir: &Path,
     ignored: &[PathBuf],
-) -> Result<Outcome> {
-    // #184: the scratch worktree is always owned by the project; verify that
-    // before either the pre-run clear or the post-run cleanup deletes it.
-    pathguard::require_owned_scratch_path(scratch, root)?;
+    timing: bool,
+) -> Result<MutantExecution> {
+    let total_started = Instant::now();
+
+    // #184: verify ownership before either the pre-run clear or post-run cleanup.
+    pathguard::require_owned_scratch_path_under(scratch, scratch_root)?;
     if scratch.exists() {
         fs::remove_dir_all(scratch)
             .with_context(|| format!("failed to clear scratch {}", scratch.display()))?;
@@ -5925,26 +5940,35 @@ fn execute_mutant(
     copy_project(root, scratch, ignored)?;
     apply_mutant(scratch, mutant)?;
 
-    let result = (|| -> Result<Outcome> {
+    let result = (|| -> Result<(Outcome, Option<u64>, Option<u64>)> {
         let scratch_cwd = test_dir
             .map(|dir| scratch.join(dir))
             .unwrap_or_else(|| scratch.to_path_buf());
 
+        let mut compile_ms = None;
         if let Some(compile_command) = compile_command_for(test_command) {
-            match run_process(&scratch_cwd, &compile_command, timeouts.compile, target_dir)? {
-                ProcessResult::Failed => return Ok(Outcome::Unviable),
-                ProcessResult::Timeout => return Ok(Outcome::Timeout),
+            let compile_started = Instant::now();
+            let compile_result =
+                run_process(&scratch_cwd, &compile_command, timeouts.compile, target_dir)?;
+            if timing {
+                compile_ms = Some(duration_ms(compile_started.elapsed()));
+            }
+            match compile_result {
+                ProcessResult::Failed => return Ok((Outcome::Unviable, compile_ms, None)),
+                ProcessResult::Timeout => return Ok((Outcome::Timeout, compile_ms, None)),
                 ProcessResult::Passed => {}
             }
         }
 
-        Ok(
-            match run_process(&scratch_cwd, test_command, timeouts.test, target_dir)? {
-                ProcessResult::Passed => Outcome::Survived,
-                ProcessResult::Failed => Outcome::Killed,
-                ProcessResult::Timeout => Outcome::Timeout,
-            },
-        )
+        let test_started = Instant::now();
+        let test_result = run_process(&scratch_cwd, test_command, timeouts.test, target_dir)?;
+        let test_ms = timing.then(|| duration_ms(test_started.elapsed()));
+        let outcome = match test_result {
+            ProcessResult::Passed => Outcome::Survived,
+            ProcessResult::Failed => Outcome::Killed,
+            ProcessResult::Timeout => Outcome::Timeout,
+        };
+        Ok((outcome, compile_ms, test_ms))
     })();
 
     let cleanup_result = if scratch.exists() {
@@ -5957,7 +5981,14 @@ fn execute_mutant(
     match (result, cleanup_result) {
         (Err(error), _) => Err(error),
         (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok((outcome, compile_ms, test_ms)), Ok(())) => Ok(MutantExecution {
+            outcome,
+            timing: timing.then(|| MutantTiming {
+                total_ms: duration_ms(total_started.elapsed()),
+                compile_ms,
+                test_ms,
+            }),
+        }),
     }
 }
 
