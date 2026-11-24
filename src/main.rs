@@ -3041,37 +3041,53 @@ fn run() -> Result<()> {
                 )?;
             }
             let baseline_started = Instant::now();
-            let baseline_result = run_process(
+            let baseline_execution = run_process_detailed(
                 &test_cwd,
                 &test_command,
                 timeouts.test,
                 &baseline_target_dir,
             )?;
             let baseline_ms = duration_ms(baseline_started.elapsed());
-            match baseline_result {
+            match baseline_execution.result {
                 ProcessResult::Passed => {
                     if text_progress {
                         writeln!(report, "Baseline PASS\n")?;
                     }
                 }
                 ProcessResult::Failed => {
-                    return Err(BaselineFailure(
-                        "baseline tests failed; mutation results would be invalid",
-                    )
-                    .into());
+                    let kind = baseline_execution
+                        .failure_kind
+                        .unwrap_or(ProcessFailureKind::Test);
+                    let mut message = format!(
+                        "baseline {} in {} using `{}`; mutation results were not created",
+                        kind.label(),
+                        test_cwd.display(),
+                        redact_environment_secrets(&test_command)
+                    );
+                    let stdout = one_line_excerpt(&baseline_execution.stdout);
+                    let stderr = one_line_excerpt(&baseline_execution.stderr);
+                    if !stdout.is_empty() {
+                        message.push_str(&format!("; stdout: {stdout}"));
+                    }
+                    if !stderr.is_empty() {
+                        message.push_str(&format!("; stderr: {stderr}"));
+                    }
+                    if let Some(code) = baseline_execution.exit_code {
+                        message.push_str(&format!("; exit code: {code}"));
+                    }
+                    return Err(BaselineFailure::new(message).into());
                 }
                 ProcessResult::Timeout => {
-                    return Err(BaselineFailure(Box::leak(
-                        format!(
-                            "baseline tests timed out after {}s (effective timeout from {})",
-                            timeouts.test, baseline_timeout_source
-                        )
-                        .into_boxed_str(),
+                    return Err(BaselineFailure::new(format!(
+                        "baseline timeout after {}s (effective timeout from {}) in {} using `{}`; mutation results were not created",
+                        timeouts.test,
+                        baseline_timeout_source,
+                        test_cwd.display(),
+                        redact_environment_secrets(&test_command)
                     ))
-                    .into())
+                    .into());
                 }
             }
-
             let mutant_phase_started = Instant::now();
             let mut outcome_slots: Vec<Option<Outcome>> = vec![None; mutants.len()];
             let mut timing_slots: Vec<Option<MutantTiming>> = vec![None; mutants.len()];
