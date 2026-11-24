@@ -39,7 +39,7 @@ fn baseline_and_mutants_inherit_the_same_intended_environment_with_isolated_home
     let source = fs::read(fixture.0.join("project/src/lib.rs")).unwrap();
     // This command is executed by both baseline and mutant runs; it must
     // receive the same inherited values and the same test-only HOME.
-    let command = r#"test "$HOME" = "$SORO_TEST_HOME" && test "$XDG_CONFIG_HOME" = "$SORO_TEST_XDG" && test "$SORO_PARITY_SENTINEL" = "consistent" && test -z "${RUSTUP_TOOLCHAIN+x}" && mkdir -p "$HOME/.soro-tool-test" && printf success > "$HOME/.soro-tool-test/marker""#;
+    let command = r#"test "$HOME" = "$SORO_TEST_HOME" && test "$XDG_CONFIG_HOME" = "$SORO_TEST_XDG" && test "$SORO_PARITY_SENTINEL" = "value with spaces λ🦀" && test -z "${SORO_ABSENT_SENTINEL+x}" && test -z "${RUSTUP_TOOLCHAIN+x}" && mkdir -p "$HOME/.soro-tool-test" && printf success > "$HOME/.soro-tool-test/marker""#;
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
         .arg("test")
         .arg(fixture.0.join("project"))
@@ -55,7 +55,8 @@ fn baseline_and_mutants_inherit_the_same_intended_environment_with_isolated_home
         .env("XDG_CONFIG_HOME", &xdg)
         .env("SORO_TEST_HOME", &home)
         .env("SORO_TEST_XDG", &xdg)
-        .env("SORO_PARITY_SENTINEL", "consistent")
+        .env("SORO_PARITY_SENTINEL", "value with spaces λ🦀")
+        .env_remove("SORO_ABSENT_SENTINEL")
         .env("RUSTUP_TOOLCHAIN", "intentionally-removed")
         .output()
         .expect("soro mutants should launch");

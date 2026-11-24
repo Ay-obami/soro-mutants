@@ -7,3 +7,9 @@ Soro Mutants keeps semantic discovery conservative around Rust control-flow patt
 - Tuple and struct destructuring whose element types cannot be proven from the syntax are intentionally not guessed. Their method calls may be ignored by type-sensitive operators rather than creating false-positive substitutions.
 
 The analysis does not infer arbitrary iterator item types, follow aliases through user-defined containers, or broaden Soroban type recognition beyond explicit supported shapes. This keeps discovery deterministic and avoids unsafe semantic guesses.
+
+## Match arms
+
+For a function parameter explicitly typed as `Option<Address>`, a simple `Some(binding)` match pattern introduces `binding` as an Address candidate only for that arm. The candidate is available to the arm guard and body, then discarded before the next arm. Nested matches follow the same lexical rule, so a binding from one arm is never proposed as an `AUTH-002` replacement in a sibling arm or after the match.
+
+Soro Mutants does not guess types for arbitrary destructuring patterns. For example, `Option<u32>` bindings are never treated as Address candidates merely because they appear in a match.

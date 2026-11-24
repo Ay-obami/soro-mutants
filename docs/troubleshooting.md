@@ -264,3 +264,7 @@ path-length cutoff is imposed.
 If `--scratch-dir` reports that the directory is the project root or one of its parents, choose a separate directory such as `/tmp/soro-mutants`, a fast local disk, or a dedicated project subdirectory. Soro Mutants appends `.soro-mutants-worktree` beneath the selected directory and refuses layouts that could make cleanup encompass the project itself.
 
 If a custom scratch path is a symbolic link at cleanup time, the run fails safely rather than following the link. Remove the link or choose a normal directory and retry.
+
+## Baseline timeout diagnostics
+
+A baseline timeout exits with code 3 before any mutant result is created. The diagnostic reports the effective baseline timeout in seconds and names the flag that supplied it: `--test-timeout` when explicitly set, otherwise the legacy `--timeout` value. Mutant timeouts remain ordinary `TIMEOUT` outcomes and do not use the baseline-failure exit path.

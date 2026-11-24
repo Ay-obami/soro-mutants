@@ -1397,6 +1397,7 @@ struct FunctionState {
     lifecycle: Option<LifecycleKind>,
     address_params: Vec<String>,
     address_vec_params: Vec<String>,
+    address_option_params: Vec<String>,
     token_client_vars: Vec<String>,
     contract_client_vars: Vec<String>,
     storage_accessor_vars: Vec<String>,
@@ -1421,6 +1422,7 @@ struct SemanticVisitor<'a> {
     lifecycle: Option<LifecycleKind>,
     address_params: Vec<String>,
     address_vec_params: Vec<String>,
+    address_option_params: Vec<String>,
     token_client_vars: Vec<String>,
     contract_client_vars: Vec<String>,
     storage_accessor_vars: Vec<String>,
@@ -1446,6 +1448,7 @@ impl<'a> SemanticVisitor<'a> {
             lifecycle: None,
             address_params: Vec::new(),
             address_vec_params: Vec::new(),
+            address_option_params: Vec::new(),
             token_client_vars: Vec::new(),
             contract_client_vars: Vec::new(),
             storage_accessor_vars: Vec::new(),
@@ -1490,6 +1493,10 @@ impl<'a> SemanticVisitor<'a> {
                 &mut self.address_vec_params,
                 address_vec_params(sig),
             ),
+            address_option_params: std::mem::replace(
+                &mut self.address_option_params,
+                address_option_params(sig),
+            ),
             token_client_vars: std::mem::replace(
                 &mut self.token_client_vars,
                 token_client_params(sig),
@@ -1506,6 +1513,7 @@ impl<'a> SemanticVisitor<'a> {
         self.lifecycle = previous.lifecycle;
         self.address_params = previous.address_params;
         self.address_vec_params = previous.address_vec_params;
+        self.address_option_params = previous.address_option_params;
         self.token_client_vars = previous.token_client_vars;
         self.contract_client_vars = previous.contract_client_vars;
         self.storage_accessor_vars = previous.storage_accessor_vars;
@@ -2091,6 +2099,34 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 
         visit::visit_expr_for_loop(self, node);
         self.address_params.truncate(old_len);
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        // Match-arm bindings are lexical: visit the scrutinee once, then visit
+        // each arm with a temporary candidate scope that is discarded before
+        // the next arm. We only infer bindings from Option<Address> parameters;
+        // arbitrary pattern type inference remains intentionally out of scope.
+        visit::visit_expr(self, &node.expr);
+        let option_address = receiver_ident(&node.expr)
+            .is_some_and(|name| self.address_option_params.contains(&name));
+
+        for arm in &node.arms {
+            let old_len = self.address_params.len();
+            if option_address {
+                if let Some(binding) = option_address_binding(&arm.pat) {
+                    if !self.address_params.contains(&binding) {
+                        self.address_params.push(binding);
+                    }
+                }
+            }
+
+            visit::visit_pat(self, &arm.pat);
+            if let Some((_, guard)) = &arm.guard {
+                visit::visit_expr(self, guard);
+            }
+            visit::visit_expr(self, &arm.body);
+            self.address_params.truncate(old_len);
+        }
     }
 
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
@@ -2732,6 +2768,11 @@ fn run() -> Result<()> {
             no_cache,
             clear_cache,
         } => {
+            let baseline_timeout_source = if test_timeout.is_some() {
+                "--test-timeout"
+            } else {
+                "--timeout"
+            };
             let timeouts = Timeouts::resolve(timeout, compile_timeout, test_timeout);
             let mut test_command = resolve_runner_command(runner, &test_command)?;
             if !package.is_empty() {
@@ -2986,7 +3027,14 @@ fn run() -> Result<()> {
                     .into());
                 }
                 ProcessResult::Timeout => {
-                    return Err(BaselineFailure("baseline tests timed out").into())
+                    return Err(BaselineFailure(Box::leak(
+                        format!(
+                            "baseline tests timed out after {}s (effective timeout from {})",
+                            timeouts.test, baseline_timeout_source
+                        )
+                        .into_boxed_str(),
+                    ))
+                    .into())
                 }
             }
 
@@ -5213,6 +5261,66 @@ fn type_display_name(ty: &Type) -> String {
     }
 }
 
+fn address_option_params(sig: &Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(pat_type) if type_is_option_of_address(&pat_type.ty) => {
+                match pat_type.pat.as_ref() {
+                    Pat::Ident(ident) => Some(ident.ident.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn type_is_option_of_address(ty: &Type) -> bool {
+    match ty {
+        Type::Path(path) => {
+            let Some(segment) = path.path.segments.last() else {
+                return false;
+            };
+            if segment.ident != "Option" {
+                return false;
+            }
+            let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                return false;
+            };
+            arguments.args.iter().any(|argument| {
+                matches!(argument, syn::GenericArgument::Type(inner) if type_is_address(inner))
+            })
+        }
+        Type::Reference(reference) => type_is_option_of_address(&reference.elem),
+        _ => false,
+    }
+}
+
+fn option_address_binding(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::TupleStruct(tuple)
+            if tuple
+                .path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "Some")
+                && tuple.elems.len() == 1 =>
+        {
+            match tuple.elems.first() {
+                Some(Pat::Ident(ident)) => Some(ident.ident.to_string()),
+                Some(Pat::Reference(reference)) => match reference.pat.as_ref() {
+                    Pat::Ident(ident) => Some(ident.ident.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        Pat::Reference(reference) => option_address_binding(&reference.pat),
+        _ => None,
+    }
+}
+
 fn address_vec_params(sig: &Signature) -> Vec<String> {
     sig.inputs
         .iter()
@@ -6929,6 +7037,21 @@ mod tests {
                 "suffix changed outside case {case}"
             );
         }
+    }
+
+    #[test]
+    fn source_replacement_preserves_comments_indentation_and_crlf_exactly() {
+        let source =
+            "fn f() {\r\n    call(/* before */ admin.require_auth() /* after */); // tail\r\n}\r\n";
+        let target = "admin.require_auth()";
+        let start = source.find(target).unwrap();
+        let end = start + target.len();
+        let mutated = replace_source_range(source, start, end, target, "other.require_auth()")
+            .expect("minimal source replacement should succeed");
+        assert_eq!(
+            mutated,
+            "fn f() {\r\n    call(/* before */ other.require_auth() /* after */); // tail\r\n}\r\n"
+        );
     }
 
     #[test]
