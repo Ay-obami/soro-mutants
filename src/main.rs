@@ -7105,11 +7105,13 @@ mod tests {
                 test: 60,
             },
             &scratch,
+            &scratch,
             &target,
             &[],
+            false,
         )
         .unwrap();
-        assert_eq!(outcome, Outcome::Unviable);
+        assert_eq!(outcome.outcome, Outcome::Unviable);
         assert!(!scratch.exists(), "scratch worktree must be removed");
         assert!(fs::read_to_string(root.join("src/lib.rs"))
             .unwrap()
@@ -7132,11 +7134,13 @@ mod tests {
                 test: 60,
             },
             &scratch,
+            &scratch,
             &target,
             &[],
+            false,
         )
         .unwrap();
-        assert_eq!(outcome, Outcome::Killed);
+        assert_eq!(outcome.outcome, Outcome::Killed);
         assert!(!scratch.exists(), "scratch worktree must be removed");
         assert!(fs::read_to_string(root.join("src/lib.rs"))
             .unwrap()
@@ -8659,12 +8663,14 @@ mod tests {
             "cargo test -q",
             Timeouts::resolve(30, None, None),
             &root.join(".soro-mutants-worktree"),
+            &root.join(".soro-mutants-worktree"),
             &target,
             &[],
+            false,
         )
         .expect("mutant execution should succeed");
 
-        assert!(matches!(outcome, Outcome::Survived));
+        assert!(matches!(outcome.outcome, Outcome::Survived));
         assert!(!root.join(".soro-mutants-worktree").exists());
 
         let _ = fs::remove_dir_all(&root);
@@ -8688,7 +8694,14 @@ mod tests {
             assert!(!parallel.starts_with(&serial) && !serial.starts_with(&parallel));
 
             let workers = (0..4)
-                .map(|worker| worker_paths(root, target_dir, worker))
+                .map(|worker| {
+                    worker_paths(
+                        &root.join(".soro-mutants-worktree"),
+                        root,
+                        target_dir,
+                        worker,
+                    )
+                })
                 .collect::<Vec<_>>();
             for (index, (scratch, target)) in workers.iter().enumerate() {
                 assert!(scratch.starts_with(root.join(".soro-mutants-worktree")));
@@ -8713,7 +8726,7 @@ mod tests {
             .expect("clock should be after epoch")
             .as_nanos();
         let root = env::temp_dir().join(format!("soro-mutants-clean-parallel-{nonce}"));
-        let (_, worker_target) = worker_paths(&root, None, 0);
+        let (_, worker_target) = worker_paths(&root.join(".soro-mutants-worktree"), &root, None, 0);
         fs::create_dir_all(&worker_target).expect("worker cache should be created");
         fs::create_dir_all(root.join(".soro-mutants-target/baseline"))
             .expect("baseline directory should be created");
@@ -8832,7 +8845,9 @@ mod tests {
                     test_command: "cargo test -q",
                     timeouts: Timeouts::resolve(120, None, None),
                     target_dir: Some(&cache),
+                    scratch_root: &root.join(".soro-mutants-worktree"),
                     jobs,
+                    timing: false,
                 },
                 &mut |mutant, outcome| {
                     reported.push((mutant.id.clone(), outcome_label(outcome)));
@@ -8841,7 +8856,10 @@ mod tests {
             )
             .expect("mutant execution should succeed");
 
-            let labels = outcomes.iter().map(outcome_label).collect::<Vec<_>>();
+            let labels = outcomes
+                .iter()
+                .map(|execution| outcome_label(&execution.outcome))
+                .collect::<Vec<_>>();
             assert_eq!(labels, ["KILLED", "SURVIVED", "SURVIVED"], "jobs={jobs}");
             assert_eq!(
                 reported,
@@ -8867,7 +8885,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(baseline_entries, ["sentinel"]);
         for worker in 0..3 {
-            assert!(worker_paths(&root, Some(&cache), worker).1.exists());
+            assert!(worker_paths(
+                &root.join(".soro-mutants-worktree"),
+                &root,
+                Some(&cache),
+                worker,
+            )
+            .1
+            .exists());
         }
 
         let _ = fs::remove_dir_all(&root);
