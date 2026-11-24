@@ -99,3 +99,14 @@ When a test run matches no mutants, an empty results array is emitted with compl
   }
 }
 ```
+
+## Timing fields
+
+When `test --timing` is set, the test report adds optional timing data without changing `schema_version: 1`:
+
+- `metadata.timing.discovery_ms`, `baseline_ms`, and `mutant_wall_ms` are wall-clock durations in milliseconds.
+- `metadata.timing.compile_ms` and `test_ms` are sums across mutants that actually executed those phases. With `--jobs > 1`, either sum can be larger than `mutant_wall_ms`.
+- Each executed result adds `timing.total_ms`, plus `compile_ms` and `test_ms` when those phases ran.
+- Resumed and persistent-cache results have no per-mutant `timing` because no command ran in the current process.
+
+Without `--timing`, both timing objects are omitted, preserving the existing JSON shape for consumers that require byte-stable default output. Timing values themselves are intentionally nondeterministic wall-clock observations; field presence and types are the stable contract.
