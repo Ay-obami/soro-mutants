@@ -15,9 +15,9 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, BufRead, Write},
+    io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 use syn::{
@@ -1354,11 +1354,39 @@ fn test_report_with_metadata<'a>(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProcessResult {
     Passed,
     Failed,
     Timeout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessFailureKind {
+    Compile,
+    Test,
+    CommandNotFound,
+    Spawn,
+}
+
+impl ProcessFailureKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Compile => "compile_failure",
+            Self::Test => "test_failure",
+            Self::CommandNotFound => "command_not_found",
+            Self::Spawn => "spawn_failure",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProcessExecution {
+    result: ProcessResult,
+    failure_kind: Option<ProcessFailureKind>,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
 }
 
 #[derive(Clone, Debug)]
@@ -2450,11 +2478,17 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 }
 
 #[derive(Debug)]
-struct BaselineFailure(&'static str);
+struct BaselineFailure(String);
+
+impl BaselineFailure {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
 
 impl std::fmt::Display for BaselineFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.0)
+        formatter.write_str(&self.0)
     }
 }
 
