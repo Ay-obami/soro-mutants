@@ -258,3 +258,9 @@ before running mutation tests if appropriate. If filesystem path length limits
 are exceeded while preparing a scratch copy, the error includes the failing
 path and suggests a shorter checkout or target directory. No fixed artificial
 path-length cutoff is imposed.
+
+## Custom scratch directory is rejected
+
+If `--scratch-dir` reports that the directory is the project root or one of its parents, choose a separate directory such as `/tmp/soro-mutants`, a fast local disk, or a dedicated project subdirectory. Soro Mutants appends `.soro-mutants-worktree` beneath the selected directory and refuses layouts that could make cleanup encompass the project itself.
+
+If a custom scratch path is a symbolic link at cleanup time, the run fails safely rather than following the link. Remove the link or choose a normal directory and retry.

@@ -45,9 +45,29 @@ pub struct ReportMutant {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReportTiming {
+    pub total_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReportResult {
     pub mutant: ReportMutant,
     pub outcome: ReportOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<ReportTiming>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReportRunTiming {
+    pub discovery_ms: u64,
+    pub baseline_ms: u64,
+    pub mutant_wall_ms: u64,
+    pub compile_ms: u64,
+    pub test_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,6 +77,8 @@ pub struct ReportMetadata {
     pub test_command: String,
     pub compile_timeout_seconds: u64,
     pub test_timeout_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<ReportRunTiming>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

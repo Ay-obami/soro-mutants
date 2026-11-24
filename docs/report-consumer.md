@@ -96,3 +96,7 @@ Or run the LibFuzzer target:
 ```bash
 cargo fuzz run report_serialization -- -max_total_time=60
 ```
+
+### Optional timing extension
+
+Consumers should tolerate the optional `metadata.timing` object and optional per-result `timing` object produced by `test --timing`. These fields are additive within schema version 1 and are absent from default, cached, or resumed result records when no timing observation exists. Treat millisecond values as diagnostics, not deterministic report identity.
