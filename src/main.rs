@@ -2475,35 +2475,30 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
-        if node.method == "require_auth"
-            && (!self.env_params.is_empty() || !self.address_params.is_empty())
-        {
-            let receiver = receiver_ident(&node.receiver);
-
-            self.push_mutant(
-                "AUTH-001",
-                node.span(),
-                "()".to_string(),
-                match &receiver {
-                    Some(name) => format!("remove {}.require_auth()", name),
-                    None => "remove require_auth()".to_string(),
-                },
-            );
-
-            if let Some(receiver_name) = receiver {
-                for candidate in self
-                    .address_params
-                    .iter()
-                    .filter(|candidate| *candidate != &receiver_name)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                {
+        if node.method == "require_auth" && node.args.is_empty() {
+            if let Some(receiver_name) = receiver_ident(&node.receiver) {
+                if self.address_params.contains(&receiver_name) {
                     self.push_mutant(
-                        "AUTH-002",
+                        "AUTH-001",
                         node.span(),
-                        format!("{}.require_auth()", candidate),
-                        format!("authenticate {} instead of {}", candidate, receiver_name),
+                        "()".to_string(),
+                        format!("remove {}.require_auth()", receiver_name),
                     );
+
+                    for candidate in self
+                        .address_params
+                        .iter()
+                        .filter(|candidate| *candidate != &receiver_name)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                    {
+                        self.push_mutant(
+                            "AUTH-002",
+                            node.span(),
+                            format!("{}.require_auth()", candidate),
+                            format!("authenticate {} instead of {}", candidate, receiver_name),
+                        );
+                    }
                 }
             }
         }
