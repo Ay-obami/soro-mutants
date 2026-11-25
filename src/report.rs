@@ -5,6 +5,36 @@ use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
+pub const REPORT_FORMAT_VERSION: u32 = 1;
+const TOOL_NAME: &str = "soro-mutants";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportMeta {
+    pub tool: String,
+    pub tool_version: String,
+    pub format_version: u32,
+}
+
+impl ReportMeta {
+    pub fn current() -> Self {
+        Self {
+            tool: TOOL_NAME.into(),
+            tool_version: env!("CARGO_PKG_VERSION").into(),
+            format_version: REPORT_FORMAT_VERSION,
+        }
+    }
+
+    pub fn text_line(&self) -> String {
+        format!(
+            "{} {} (report format {})",
+            self.tool, self.tool_version, self.format_version
+        )
+    }
+
+    pub fn markdown_line(&self) -> String {
+        format!("_{}_", self.text_line())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -358,4 +388,70 @@ pub fn fuzz_serialize_all_reports(results: &[ReportResult]) {
     let _ = serialize_json_with_breakdowns(results, None);
     let _ = serialize_markdown(results);
     let _ = serialize_html(results);
+}
+
+#[cfg(test)]
+mod scalability_tests {
+    use super::*;
+
+    fn synthetic_results(count: usize) -> Vec<ReportResult> {
+        (0..count)
+            .map(|index| ReportResult {
+                mutant: ReportMutant {
+                    id: format!("AUTH-001-{index:05}"),
+                    operator: "AUTH-001".into(),
+                    file: format!("src/contract_{:03}.rs", index % 100),
+                    function: Some(format!("function_{}", index % 250)),
+                    span: ReportSpan {
+                        line: index + 1,
+                        column: 1,
+                    },
+                    original: "admin.require_auth()".into(),
+                    replacement: "()".into(),
+                    description: "synthetic scalability mutant".into(),
+                },
+                outcome: match index % 4 {
+                    0 => ReportOutcome::Killed,
+                    1 => ReportOutcome::Survived,
+                    2 => ReportOutcome::Unviable,
+                    _ => ReportOutcome::Timeout,
+                },
+                timing: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn human_report_metadata_is_deterministic() {
+        let meta = ReportMeta::current();
+        assert_eq!(meta.text_line(), ReportMeta::current().text_line());
+        assert_eq!(
+            meta.text_line(),
+            format!(
+                "soro-mutants {} (report format {})",
+                env!("CARGO_PKG_VERSION"),
+                REPORT_FORMAT_VERSION
+            )
+        );
+        assert_eq!(meta.markdown_line(), format!("_{}_", meta.text_line()));
+    }
+
+    #[test]
+    fn five_thousand_results_serialize_deterministically_across_report_formats() {
+        let results = synthetic_results(5_000);
+        let first_json = serialize_json_with_breakdowns(&results, None).unwrap();
+        let second_json = serialize_json_with_breakdowns(&results, None).unwrap();
+        assert_eq!(first_json, second_json);
+        assert!(first_json.len() < 12 * 1024 * 1024);
+
+        let first_markdown = serialize_markdown(&results).unwrap();
+        let second_markdown = serialize_markdown(&results).unwrap();
+        assert_eq!(first_markdown, second_markdown);
+        assert!(first_markdown.len() < 8 * 1024 * 1024);
+
+        let first_html = serialize_html(&results).unwrap();
+        let second_html = serialize_html(&results).unwrap();
+        assert_eq!(first_html, second_html);
+        assert!(first_html.len() < 12 * 1024 * 1024);
+    }
 }
