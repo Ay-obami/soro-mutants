@@ -116,9 +116,9 @@ mod nested {
     assert_eq!(count(&mutants, "TOKEN-001"), 1, "{mutants:#?}");
     assert_eq!(count(&mutants, "TTL-001"), 1, "{mutants:#?}");
     assert_eq!(count(&mutants, "STORAGE-001"), 2, "{mutants:#?}");
-    assert!(!mutants.iter().any(|m| {
-        m["original"].as_str().unwrap_or("").contains("wrapper.")
-    }));
+    assert!(!mutants
+        .iter()
+        .any(|m| { m["original"].as_str().unwrap_or("").contains("wrapper.") }));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -284,9 +284,9 @@ pub mod unrelated {
     assert_eq!(count(&mutants, "EVENT-001"), 1, "{mutants:#?}");
     assert_eq!(count(&mutants, "TOKEN-001"), 2, "{mutants:#?}");
     assert_eq!(count(&mutants, "TTL-001"), 1, "{mutants:#?}");
-    assert!(mutants.iter().all(|m| {
-        !m["function"].as_str().unwrap_or("").contains("unrelated")
-    }));
+    assert!(mutants
+        .iter()
+        .all(|m| { !m["function"].as_str().unwrap_or("").contains("unrelated") }));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -303,7 +303,10 @@ fn multiline_locations_agree_across_all_report_formats() {
     );
     let root = project(source);
     let mutants = list(&root);
-    let auth = mutants.iter().find(|m| m["operator"] == "AUTH-001").unwrap();
+    let auth = mutants
+        .iter()
+        .find(|m| m["operator"] == "AUTH-001")
+        .unwrap();
     assert_eq!(
         auth["span"],
         serde_json::json!({
@@ -316,9 +319,18 @@ fn multiline_locations_agree_across_all_report_formats() {
     let markdown = run(
         &root,
         "test",
-        &["--operator", "AUTH-001", "--test-command", "true", "--markdown"],
+        &[
+            "--operator",
+            "AUTH-001",
+            "--test-command",
+            "true",
+            "--markdown",
+        ],
     );
-    assert!(markdown.contains("[src/lib.rs:2:5-3:6](src/lib.rs#L2-L3)"), "{markdown}");
+    assert!(
+        markdown.contains("[src/lib.rs:2:5-3:6](src/lib.rs#L2-L3)"),
+        "{markdown}"
+    );
     let html = run(
         &root,
         "test",
@@ -328,7 +340,13 @@ fn multiline_locations_agree_across_all_report_formats() {
     let sarif: serde_json::Value = serde_json::from_str(&run(
         &root,
         "test",
-        &["--operator", "AUTH-001", "--test-command", "true", "--sarif"],
+        &[
+            "--operator",
+            "AUTH-001",
+            "--test-command",
+            "true",
+            "--sarif",
+        ],
     ))
     .unwrap();
     let region = &sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"];
@@ -372,7 +390,11 @@ fn multiline_event_token_and_ttl_mutations_retain_original_byte_ranges() {
         let start_line = span["line"].as_u64().unwrap() as usize;
         let end_line = span["end_line"].as_u64().unwrap() as usize;
         assert!(end_line > start_line, "{operator} needs a multiline span");
-        let start = byte_offset(source, start_line, span["column"].as_u64().unwrap() as usize);
+        let start = byte_offset(
+            source,
+            start_line,
+            span["column"].as_u64().unwrap() as usize,
+        );
         let end = byte_offset(
             source,
             end_line,
