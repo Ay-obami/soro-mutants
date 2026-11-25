@@ -4832,8 +4832,9 @@ struct SuppressedMutant {
 
 /// Stable candidate precedence: file and starting byte first, then operator
 /// and replacement. Exact-range alternative replacements are independent
-/// single-mutant experiments and remain valid. Partially overlapping or
-/// containing ranges are ambiguous across recognizers and are suppressed.
+/// single-mutant experiments and remain valid. Distinct operator IDs are
+/// also independent semantic experiments (e.g. TTL removal vs its arguments).
+/// Conflicting non-identical ranges *within one operator* are suppressed.
 fn mutant_order(a: &Mutant, b: &Mutant) -> std::cmp::Ordering {
     a.file
         .cmp(&b.file)
@@ -4856,7 +4857,7 @@ fn suppress_equivalent_mutants(mut mutants: Vec<Mutant>) -> (Vec<Mutant>, Vec<Su
     let mut retained = Vec::with_capacity(mutants.len());
     let mut suppressed = Vec::new();
     let mut file = None;
-    let mut active_spans: Vec<(usize, usize)> = Vec::new();
+    let mut active_spans: Vec<(usize, usize, String)> = Vec::new();
 
     for mutant in mutants {
         if file.as_ref() != Some(&mutant.file) {
@@ -4865,7 +4866,7 @@ fn suppress_equivalent_mutants(mut mutants: Vec<Mutant>) -> (Vec<Mutant>, Vec<Su
         }
         // Sorted starts make intervals ending before the next candidate safe
         // to forget; only concurrently active spans can overlap it.
-        active_spans.retain(|(_, end)| *end > mutant.start_byte);
+        active_spans.retain(|(_, end, _)| *end > mutant.start_byte);
 
         let duplicate = (
             mutant.file.clone(),
@@ -4878,8 +4879,9 @@ fn suppress_equivalent_mutants(mut mutants: Vec<Mutant>) -> (Vec<Mutant>, Vec<Su
             Some("unchanged replacement")
         } else if !seen.insert(duplicate) {
             Some("duplicate source edit")
-        } else if active_spans.iter().any(|(start, end)| {
-            *start < mutant.end_byte
+        } else if active_spans.iter().any(|(start, end, operator)| {
+            operator == &mutant.operator
+                && *start < mutant.end_byte
                 && mutant.start_byte < *end
                 && (*start != mutant.start_byte || *end != mutant.end_byte)
         }) {
@@ -4893,7 +4895,7 @@ fn suppress_equivalent_mutants(mut mutants: Vec<Mutant>) -> (Vec<Mutant>, Vec<Su
                 reason,
             });
         } else {
-            active_spans.push((mutant.start_byte, mutant.end_byte));
+            active_spans.push((mutant.start_byte, mutant.end_byte, mutant.operator.clone()));
             retained.push(mutant);
         }
     }
@@ -9390,11 +9392,11 @@ mod discovery_quality_regressions {
         let mut nested = base.clone();
         nested.start_byte += 2;
         nested.end_byte -= 2;
-        nested.operator = "TOKEN-001".to_owned();
+        nested.operator = base.operator.clone();
         let mut partial = base.clone();
         partial.start_byte = base.end_byte - 3;
         partial.end_byte = base.end_byte + 2;
-        partial.operator = "TOKEN-002".to_owned();
+        partial.operator = base.operator.clone();
         let other_file = Mutant {
             file: PathBuf::from("src/other.rs"),
             ..nested.clone()
@@ -9450,6 +9452,21 @@ mod discovery_quality_regressions {
         assert_eq!(retained.len(), 2);
         assert_eq!(suppressed.len(), 1);
         assert_eq!(suppressed[0].reason, "duplicate source edit");
+    }
+
+    #[test]
+    fn distinct_operators_keep_independent_nested_edits() {
+        let source = "fn guard(a: Address) { a.require_auth(); }";
+        let outer = in_memory(source).into_iter().next().unwrap();
+        let mut inner = outer.clone();
+        inner.operator = "TTL-002".to_owned();
+        inner.start_byte += 2;
+        inner.end_byte -= 2;
+        inner.replacement = "0".to_owned();
+        let (retained, suppressed) =
+            suppress_equivalent_mutants(vec![inner, outer]);
+        assert_eq!(retained.len(), 2);
+        assert!(suppressed.is_empty());
     }
 
     #[test]
