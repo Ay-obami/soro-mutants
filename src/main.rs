@@ -9463,8 +9463,7 @@ mod discovery_quality_regressions {
         inner.start_byte += 2;
         inner.end_byte -= 2;
         inner.replacement = "0".to_owned();
-        let (retained, suppressed) =
-            suppress_equivalent_mutants(vec![inner, outer]);
+        let (retained, suppressed) = suppress_equivalent_mutants(vec![inner, outer]);
         assert_eq!(retained.len(), 2);
         assert!(suppressed.is_empty());
     }
