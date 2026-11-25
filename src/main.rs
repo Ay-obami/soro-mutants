@@ -1445,9 +1445,216 @@ struct AuthHelper {
     sinks: Vec<(usize, String, bool)>,
 }
 
+#[derive(Clone)]
+struct LexicalScope {
+    address_params: Vec<String>,
+    address_vec_params: Vec<String>,
+    address_option_params: Vec<String>,
+    token_client_vars: Vec<String>,
+    contract_client_vars: Vec<String>,
+    storage_accessor_vars: Vec<String>,
+    numeric_params: Vec<String>,
+    env_params: Vec<String>,
+}
+
+fn pattern_names(pat: &Pat) -> Vec<String> {
+    #[derive(Default)]
+    struct Names(Vec<String>);
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            self.0.push(node.ident.to_string());
+            visit::visit_pat_ident(self, node);
+        }
+    }
+    let mut names = Names::default();
+    names.visit_pat(pat);
+    names.0
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SorobanAlias {
+    Address,
+    Env,
+    TokenClient,
+    StorageInstance,
+    StoragePersistent,
+    StorageTemporary,
+}
+
+/// Resolve only direct `use soroban_sdk::... as ...` aliases from this module.
+fn soroban_aliases(items: &[Item]) -> std::collections::HashMap<String, SorobanAlias> {
+    fn walk(
+        tree: &syn::UseTree,
+        prefix: &mut Vec<String>,
+        out: &mut std::collections::HashMap<String, SorobanAlias>,
+    ) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                walk(&path.tree, prefix, out);
+                prefix.pop();
+            }
+            syn::UseTree::Group(group) => {
+                for member in &group.items {
+                    walk(member, prefix, out);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut full = prefix.clone();
+                full.push(rename.ident.to_string());
+                let kind = match full.join("::").as_str() {
+                    "soroban_sdk::Address" => Some(SorobanAlias::Address),
+                    "soroban_sdk::Env" => Some(SorobanAlias::Env),
+                    "soroban_sdk::token::Client" | "soroban_sdk::token::TokenClient" => {
+                        Some(SorobanAlias::TokenClient)
+                    }
+                    "soroban_sdk::storage::Instance" => Some(SorobanAlias::StorageInstance),
+                    "soroban_sdk::storage::Persistent" => Some(SorobanAlias::StoragePersistent),
+                    "soroban_sdk::storage::Temporary" => Some(SorobanAlias::StorageTemporary),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    out.insert(rename.rename.to_string(), kind);
+                }
+            }
+            syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for item in items {
+        if let Item::Use(import) = item {
+            walk(&import.tree, &mut Vec::new(), &mut out);
+        }
+    }
+    out
+}
+
+fn normalize_soroban_type(
+    ty: &mut Type,
+    aliases: &std::collections::HashMap<String, SorobanAlias>,
+) {
+    match ty {
+        Type::Path(type_path) => {
+            if type_path.qself.is_none() && type_path.path.segments.len() == 1 {
+                let name = type_path.path.segments[0].ident.to_string();
+                if let Some(kind) = aliases.get(&name) {
+                    type_path.path = match kind {
+                        SorobanAlias::Address => syn::parse_quote!(soroban_sdk::Address),
+                        SorobanAlias::Env => syn::parse_quote!(soroban_sdk::Env),
+                        SorobanAlias::TokenClient => syn::parse_quote!(soroban_sdk::token::Client),
+                        SorobanAlias::StorageInstance => {
+                            syn::parse_quote!(soroban_sdk::storage::Instance)
+                        }
+                        SorobanAlias::StoragePersistent => {
+                            syn::parse_quote!(soroban_sdk::storage::Persistent)
+                        }
+                        SorobanAlias::StorageTemporary => {
+                            syn::parse_quote!(soroban_sdk::storage::Temporary)
+                        }
+                    };
+                }
+            }
+            for segment in &mut type_path.path.segments {
+                if let syn::PathArguments::AngleBracketed(args) = &mut segment.arguments {
+                    for arg in &mut args.args {
+                        if let syn::GenericArgument::Type(inner) = arg {
+                            normalize_soroban_type(inner, aliases);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Reference(reference) => normalize_soroban_type(&mut reference.elem, aliases),
+        Type::Ptr(pointer) => normalize_soroban_type(&mut pointer.elem, aliases),
+        Type::Paren(paren) => normalize_soroban_type(&mut paren.elem, aliases),
+        Type::Group(group) => normalize_soroban_type(&mut group.elem, aliases),
+        Type::Slice(slice) => normalize_soroban_type(&mut slice.elem, aliases),
+        Type::Array(array) => normalize_soroban_type(&mut array.elem, aliases),
+        Type::Tuple(tuple) => {
+            for element in &mut tuple.elems {
+                normalize_soroban_type(element, aliases);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalized_soroban_signature(
+    sig: &Signature,
+    aliases: &std::collections::HashMap<String, SorobanAlias>,
+) -> Signature {
+    let mut result = sig.clone();
+    for arg in &mut result.inputs {
+        if let FnArg::Typed(typed) = arg {
+            normalize_soroban_type(&mut typed.ty, aliases);
+        }
+    }
+    result
+}
+
+fn is_aliased_token_constructor(
+    expr: &Expr,
+    aliases: &std::collections::HashMap<String, SorobanAlias>,
+) -> bool {
+    match expr {
+        Expr::Call(call) => match call.func.as_ref() {
+            Expr::Path(path)
+                if path.qself.is_none()
+                    && path.path.segments.len() == 2
+                    && path.path.segments[1].ident == "new" =>
+            {
+                aliases.get(&path.path.segments[0].ident.to_string())
+                    == Some(&SorobanAlias::TokenClient)
+            }
+            _ => false,
+        },
+        Expr::Paren(paren) => is_aliased_token_constructor(&paren.expr, aliases),
+        Expr::Reference(reference) => is_aliased_token_constructor(&reference.expr, aliases),
+        _ => false,
+    }
+}
+
+fn type_is_sdk_storage_accessor(ty: &Type) -> bool {
+    match ty {
+        Type::Path(type_path) => {
+            let joined = type_path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            matches!(
+                joined.as_str(),
+                "soroban_sdk::storage::Instance"
+                    | "soroban_sdk::storage::Persistent"
+                    | "soroban_sdk::storage::Temporary"
+            )
+        }
+        Type::Reference(reference) => type_is_sdk_storage_accessor(&reference.elem),
+        _ => false,
+    }
+}
+
+fn storage_accessor_params(sig: &Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(typed) if type_is_sdk_storage_accessor(&typed.ty) => {
+                match typed.pat.as_ref() {
+                    Pat::Ident(binding) => Some(binding.ident.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 struct SemanticVisitor<'a> {
     source: &'a str,
     file: PathBuf,
+    sdk_aliases: std::collections::HashMap<String, SorobanAlias>,
     current_function: Option<String>,
     lifecycle: Option<LifecycleKind>,
     address_params: Vec<String>,
@@ -1474,6 +1681,7 @@ impl<'a> SemanticVisitor<'a> {
         Self {
             source,
             file,
+            sdk_aliases: std::collections::HashMap::new(),
             current_function: None,
             lifecycle: None,
             address_params: Vec::new(),
@@ -1496,7 +1704,49 @@ impl<'a> SemanticVisitor<'a> {
         }
     }
 
+    fn snapshot_scope(&self) -> LexicalScope {
+        LexicalScope {
+            address_params: self.address_params.clone(),
+            address_vec_params: self.address_vec_params.clone(),
+            address_option_params: self.address_option_params.clone(),
+            token_client_vars: self.token_client_vars.clone(),
+            contract_client_vars: self.contract_client_vars.clone(),
+            storage_accessor_vars: self.storage_accessor_vars.clone(),
+            numeric_params: self.numeric_params.clone(),
+            env_params: self.env_params.clone(),
+        }
+    }
+
+    fn restore_scope(&mut self, scope: LexicalScope) {
+        self.address_params = scope.address_params;
+        self.address_vec_params = scope.address_vec_params;
+        self.address_option_params = scope.address_option_params;
+        self.token_client_vars = scope.token_client_vars;
+        self.contract_client_vars = scope.contract_client_vars;
+        self.storage_accessor_vars = scope.storage_accessor_vars;
+        self.numeric_params = scope.numeric_params;
+        self.env_params = scope.env_params;
+    }
+
+    fn shadow_name(&mut self, name: &str) {
+        self.address_params.retain(|value| value != name);
+        self.address_vec_params.retain(|value| value != name);
+        self.address_option_params.retain(|value| value != name);
+        self.token_client_vars.retain(|value| value != name);
+        self.contract_client_vars.retain(|value| value != name);
+        self.storage_accessor_vars.retain(|value| value != name);
+        self.numeric_params.retain(|value| value != name);
+        self.env_params.retain(|value| value != name);
+    }
+
+    fn normalized_type(&self, ty: &Type) -> Type {
+        let mut normalized = ty.clone();
+        normalize_soroban_type(&mut normalized, &self.sdk_aliases);
+        normalized
+    }
+
     fn enter_signature(&mut self, sig: &Signature, body: &syn::Block) -> FunctionState {
+        let normalized = normalized_soroban_signature(sig, &self.sdk_aliases);
         let mut bindings = BindingNames::default();
         bindings.visit_block(body);
         FunctionState {
@@ -1525,24 +1775,36 @@ impl<'a> SemanticVisitor<'a> {
                 parts.push(name);
                 parts.join("::")
             }),
-            lifecycle: std::mem::replace(&mut self.lifecycle, recognized_lifecycle(sig, body)),
-            address_params: std::mem::replace(&mut self.address_params, address_params(sig)),
+            lifecycle: std::mem::replace(
+                &mut self.lifecycle,
+                recognized_lifecycle(&normalized, body),
+            ),
+            address_params: std::mem::replace(
+                &mut self.address_params,
+                address_params(&normalized),
+            ),
             address_vec_params: std::mem::replace(
                 &mut self.address_vec_params,
-                address_vec_params(sig),
+                address_vec_params(&normalized),
             ),
             address_option_params: std::mem::replace(
                 &mut self.address_option_params,
-                address_option_params(sig),
+                address_option_params(&normalized),
             ),
             token_client_vars: std::mem::replace(
                 &mut self.token_client_vars,
-                token_client_params(sig),
+                token_client_params(&normalized),
             ),
             contract_client_vars: std::mem::take(&mut self.contract_client_vars),
-            storage_accessor_vars: std::mem::take(&mut self.storage_accessor_vars),
-            numeric_params: std::mem::replace(&mut self.numeric_params, numeric_params(sig)),
-            env_params: std::mem::replace(&mut self.env_params, env_params(sig)),
+            storage_accessor_vars: std::mem::replace(
+                &mut self.storage_accessor_vars,
+                storage_accessor_params(&normalized),
+            ),
+            numeric_params: std::mem::replace(
+                &mut self.numeric_params,
+                numeric_params(&normalized),
+            ),
+            env_params: std::mem::replace(&mut self.env_params, env_params(&normalized)),
         }
     }
 
@@ -1792,8 +2054,10 @@ impl<'a> SemanticVisitor<'a> {
             {
                 continue;
             }
-            let annotated_address =
-                matches!(&local.pat, Pat::Type(typed) if type_is_address(&typed.ty));
+            let annotated_address = matches!(
+                &local.pat,
+                Pat::Type(typed) if type_is_address(&self.normalized_type(&typed.ty))
+            );
             let Some(turbofish_address) = stored_authority_lookup(init, &self.env_params) else {
                 continue;
             };
@@ -1894,6 +2158,7 @@ fn stored_authority_lookup(expr: &Expr, env_params: &[String]) -> Option<bool> {
 
 impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     fn visit_file(&mut self, node: &'ast syn::File) {
+        self.sdk_aliases = soroban_aliases(&node.items);
         self.impl_method_collisions = impl_method_collisions(node);
         self.typed_event_structs = node
             .items
@@ -1954,12 +2219,15 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         self.module_depth += 1;
-        let is_inline = node.content.is_some();
-        if is_inline {
+        let previous_aliases = self.sdk_aliases.clone();
+        if let Some((_, items)) = &node.content {
             self.module_path.push(node.ident.to_string());
+            // An inline module has its own direct import scope.
+            self.sdk_aliases = soroban_aliases(items);
         }
         visit::visit_item_mod(self, node);
-        if is_inline {
+        self.sdk_aliases = previous_aliases;
+        if node.content.is_some() {
             self.module_path.pop();
         }
         self.module_depth -= 1;
@@ -7039,14 +7307,25 @@ small { color: #516577; }
     }
     for result in results {
         let mutant = &result.mutant;
+        let location = if mutant.span.line == mutant.span.end_line {
+            format!("{}:{}", mutant.file.display(), mutant.span.line)
+        } else {
+            format!(
+                "{}:{}:{}-{}:{}",
+                mutant.file.display(),
+                mutant.span.line,
+                mutant.span.column,
+                mutant.span.end_line,
+                mutant.span.end_column
+            )
+        };
         writeln!(
             report,
-            "<article><h3>{} — {} — {}</h3><small>{}:{} (function: {})</small><p>{}</p><p>Original</p><pre><code>{}</code></pre><p>Replacement</p><pre><code>{}</code></pre></article>",
+            "<article><h3>{} — {} — {}</h3><small>{} (function: {})</small><p>{}</p><p>Original</p><pre><code>{}</code></pre><p>Replacement</p><pre><code>{}</code></pre></article>",
             escape_html(&mutant.id),
             escape_html(&mutant.operator),
             outcome_label(&result.outcome),
-            escape_html(&mutant.file.to_string_lossy()),
-            mutant.span.line,
+            escape_html(&location),
             escape_html(mutant.function.as_deref().unwrap_or("unknown")),
             escape_html(&mutant.description),
             escape_html(&mutant.original),
@@ -7126,16 +7405,27 @@ fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Re
                 .description
                 .replace(['\n', '\r'], " ")
                 .replace('`', "\\`");
+            let location_label = if mutant.span.line == mutant.span.end_line {
+                format!("{}:{}", link_label, mutant.span.line)
+            } else {
+                format!(
+                    "{}:{}:{}-{}:{}",
+                    link_label,
+                    mutant.span.line,
+                    mutant.span.column,
+                    mutant.span.end_line,
+                    mutant.span.end_column
+                )
+            };
+            let fragment = if mutant.span.line == mutant.span.end_line {
+                format!("#L{}", mutant.span.line)
+            } else {
+                format!("#L{}-L{}", mutant.span.line, mutant.span.end_line)
+            };
             writeln!(
                 report,
-                "- `{}` **{}** [{}:{}]({}#L{}) — {}",
-                mutant.id,
-                mutant.operator,
-                link_label,
-                mutant.span.line,
-                target,
-                mutant.span.line,
-                description
+                "- `{}` **{}** [{}]({}{}) — {}",
+                mutant.id, mutant.operator, location_label, target, fragment, description
             )?;
         }
         writeln!(report)?;
@@ -7256,6 +7546,14 @@ fn print_sarif_report(report: &mut dyn Write, results: &[MutantResult]) -> Resul
         .map(|result| {
             let mutant = &result.mutant;
             let path = mutant.file.to_string_lossy().replace('\\', "/");
+            let mut region = serde_json::json!({
+                "startLine": mutant.span.line,
+                "startColumn": mutant.span.column
+            });
+            if mutant.span.end_line != mutant.span.line {
+                region["endLine"] = serde_json::json!(mutant.span.end_line);
+                region["endColumn"] = serde_json::json!(mutant.span.end_column);
+            }
             serde_json::json!({
                 "ruleId": mutant.operator,
                 "level": "warning",
@@ -7268,10 +7566,7 @@ fn print_sarif_report(report: &mut dyn Write, results: &[MutantResult]) -> Resul
                 "locations": [{
                     "physicalLocation": {
                         "artifactLocation": {"uri": path},
-                        "region": {
-                            "startLine": mutant.span.line,
-                            "startColumn": mutant.span.column
-                        }
+                        "region": region
                     }
                 }],
                 "properties": {
