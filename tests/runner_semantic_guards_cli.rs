@@ -10,10 +10,7 @@ fn project(name: &str, source: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "soro-{name}-{}-{nonce}",
-        std::process::id()
-    ));
+    let root = std::env::temp_dir().join(format!("soro-{name}-{}-{nonce}", std::process::id()));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
         root.join("Cargo.toml"),
@@ -82,9 +79,9 @@ pub fn mixed(env: Env, admin: Address, recipient: Address, wrapper: Wrapper) {
     assert!(mutants.iter().any(|m| m["operator"] == "AUTH-001"));
     assert!(mutants.iter().any(|m| m["operator"] == "EVENT-001"));
     assert!(!mutants.iter().any(|m| {
-        m["original"]
-            .as_str()
-            .is_some_and(|original| original.contains("wrapper.") || original.contains("Sensitive::"))
+        m["original"].as_str().is_some_and(|original| {
+            original.contains("wrapper.") || original.contains("Sensitive::")
+        })
     }));
     let _ = fs::remove_dir_all(root);
 }
@@ -97,9 +94,10 @@ pub struct Address;
 impl Address { pub fn require_auth(&self) {} }
 
 pub fn scopes(owner: Address, alternate: Address) {
+    let non_move_alternate = alternate.clone();
     let non_move = |owner: u32| {
         let _ = owner;
-        alternate.require_auth();
+        non_move_alternate.require_auth();
     };
     let move_closure = move |inner: Address| {
         alternate.require_auth();
@@ -127,16 +125,14 @@ pub fn scopes(owner: Address, alternate: Address) {
     let mutants = report["mutants"].as_array().unwrap();
 
     assert!(!mutants.iter().any(|m| {
-        m["replacement"] == "owner.require_auth()"
-            && m["span"]["line"].as_u64() == Some(9)
+        m["replacement"] == "owner.require_auth()" && m["span"]["line"].as_u64() == Some(10)
     }));
     assert!(mutants.iter().any(|m| {
-        m["replacement"] == "inner.require_auth()"
-            && m["span"]["line"].as_u64() == Some(12)
+        m["replacement"] == "inner.require_auth()" && m["span"]["line"].as_u64() == Some(13)
     }));
     assert!(!mutants.iter().any(|m| {
         m["replacement"] == "inner.require_auth()"
-            && m["span"]["line"].as_u64().is_some_and(|line| line >= 16)
+            && m["span"]["line"].as_u64().is_some_and(|line| line >= 17)
     }));
 
     let test = cli(&[
@@ -233,7 +229,10 @@ fn symlinked_project_root_is_canonicalized_but_reports_project_relative_paths() 
         String::from_utf8_lossy(&tested.stderr)
     );
     assert_eq!(fs::read(real.join("src/lib.rs")).unwrap(), original);
-    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
     assert!(!real.join(".soro-mutants-worktree").exists());
 
     let _ = fs::remove_file(link);
