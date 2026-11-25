@@ -1504,9 +1504,17 @@ impl<'a> SemanticVisitor<'a> {
                 let name = sig.ident.to_string();
                 let mut parts = self.module_path.clone();
                 let collision_key = if parts.is_empty() {
-                    name.clone()
+                    ident_unraw(&sig.ident)
                 } else {
-                    format!("{}::{name}", parts.join("::"))
+                    format!(
+                        "{}::{}",
+                        parts
+                            .iter()
+                            .map(|part| strip_raw_prefix(part))
+                            .collect::<Vec<_>>()
+                            .join("::"),
+                        ident_unraw(&sig.ident)
+                    )
                 };
                 if self.impl_method_collisions.contains(&collision_key) {
                     if let Some(impl_type) = &self.impl_type {
@@ -1570,13 +1578,14 @@ impl<'a> SemanticVisitor<'a> {
             return;
         }
         let helper_name = path.path.segments[0].ident.to_string();
-        if self.local_bindings.contains(&helper_name)
-            || self.address_params.contains(&helper_name)
-            || self.env_params.contains(&helper_name)
+        let helper_key = strip_raw_prefix(&helper_name);
+        if self.local_bindings.contains(helper_key)
+            || contains_ident(&self.address_params, &helper_name)
+            || contains_ident(&self.env_params, &helper_name)
         {
             return;
         }
-        let Some(helper) = self.auth_helpers.get(&helper_name).cloned() else {
+        let Some(helper) = self.auth_helpers.get(helper_key).cloned() else {
             return;
         };
         if call.args.len() != helper.arity {
@@ -1590,13 +1599,15 @@ impl<'a> SemanticVisitor<'a> {
                 Expr::Reference(reference) if reference.mutability.is_none() => {
                     receiver_ident(&reference.expr)
                 }
-                Expr::MethodCall(clone) if clone.method == "clone" && clone.args.is_empty() => {
+                Expr::MethodCall(clone)
+                    if ident_eq(&clone.method, "clone") && clone.args.is_empty() =>
+                {
                     receiver_ident(&clone.receiver)
                 }
                 Expr::Path(_) => receiver_ident(arg),
                 _ => None,
             }?;
-            address_params.contains(&name).then_some(name)
+            contains_ident(&address_params, &name).then_some(name)
         };
 
         let sink_names = helper
@@ -1625,7 +1636,10 @@ impl<'a> SemanticVisitor<'a> {
             let Some(original) = caller_address(argument) else {
                 continue;
             };
-            for alternate in address_params.iter().filter(|name| *name != &original) {
+            for alternate in address_params
+                .iter()
+                .filter(|name| !same_ident(name, &original))
+            {
                 let replacement = if *is_ref {
                     format!("&{alternate}")
                 } else {
@@ -1684,7 +1698,8 @@ impl<'a> SemanticVisitor<'a> {
         };
         let typed_address_ref = |arg: &Expr| match arg {
             Expr::Reference(reference) if reference.mutability.is_none() => {
-                receiver_ident(&reference.expr).filter(|name| self.address_params.contains(name))
+                receiver_ident(&reference.expr)
+                    .filter(|name| contains_ident(&self.address_params, name))
             }
             _ => None,
         };
@@ -1693,7 +1708,7 @@ impl<'a> SemanticVisitor<'a> {
         else {
             return;
         };
-        if first_name == second_name {
+        if same_ident(&first_name, &second_name) {
             return;
         }
         let (
@@ -1718,7 +1733,7 @@ impl<'a> SemanticVisitor<'a> {
             &self.source[first_end..second_start],
             &self.source[first_start..first_end],
         );
-        let method = node.method.to_string();
+        let method = ident_unraw(&node.method);
         self.mutants.push(Mutant {
             id: String::new(),
             operator: "TOKEN-002".to_owned(),
@@ -1764,14 +1779,15 @@ impl<'a> SemanticVisitor<'a> {
             let Some((name, init)) = local_binding_name_and_init(local) else {
                 continue;
             };
+            let name_key = strip_raw_prefix(&name);
             if local
                 .init
                 .as_ref()
                 .is_some_and(|init| init.diverge.is_some())
-                || !scan.auth_receivers.contains(&name)
-                || scan.bound_names.get(&name).copied() != Some(1)
-                || self.address_params.contains(&name)
-                || self.env_params.contains(&name)
+                || !scan.auth_receivers.contains(name_key)
+                || scan.bound_names.get(name_key).copied() != Some(1)
+                || contains_ident(&self.address_params, &name)
+                || contains_ident(&self.env_params, &name)
             {
                 continue;
             }
@@ -1816,16 +1832,20 @@ impl<'ast> Visit<'ast> for AuthorityScan<'ast> {
     }
 
     fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
-        *self.bound_names.entry(node.ident.to_string()).or_default() += 1;
+        *self
+            .bound_names
+            .entry(ident_unraw(&node.ident))
+            .or_default() += 1;
         visit::visit_pat_ident(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
-        let is_auth_sink = (node.method == "require_auth" && node.args.is_empty())
-            || (node.method == "require_auth_for_args" && node.args.len() == 1);
+        let is_auth_sink = (ident_eq(&node.method, "require_auth") && node.args.is_empty())
+            || (ident_eq(&node.method, "require_auth_for_args") && node.args.len() == 1);
         if is_auth_sink {
             if let Some(name) = receiver_ident(&node.receiver) {
-                self.auth_receivers.insert(name);
+                self.auth_receivers
+                    .insert(strip_raw_prefix(&name).to_owned());
             }
         }
         visit::visit_expr_method_call(self, node);
@@ -1840,22 +1860,22 @@ fn stored_authority_lookup(expr: &Expr, env_params: &[String]) -> Option<bool> {
     let Expr::MethodCall(unwrap) = expr else {
         return None;
     };
-    let unwraps = (unwrap.method == "unwrap" && unwrap.args.is_empty())
-        || (unwrap.method == "expect" && unwrap.args.len() == 1);
+    let unwraps = (ident_eq(&unwrap.method, "unwrap") && unwrap.args.is_empty())
+        || (ident_eq(&unwrap.method, "expect") && unwrap.args.len() == 1);
     if !unwraps {
         return None;
     }
     let Expr::MethodCall(get) = unwrap.receiver.as_ref() else {
         return None;
     };
-    if get.method != "get" || get.args.len() != 1 {
+    if !ident_eq(&get.method, "get") || get.args.len() != 1 {
         return None;
     }
     let Expr::MethodCall(class) = get.receiver.as_ref() else {
         return None;
     };
     if !matches!(
-        class.method.to_string().as_str(),
+        ident_unraw(&class.method).as_str(),
         "instance" | "persistent" | "temporary"
     ) || !class.args.is_empty()
         || !is_direct_env_storage_receiver(&class.receiver, env_params)
@@ -1884,53 +1904,50 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                             .path()
                             .segments
                             .last()
-                            .is_some_and(|segment| segment.ident == "contractevent")
+                            .is_some_and(|segment| ident_eq(&segment.ident, "contractevent"))
                     }) =>
                 {
-                    Some(item.ident.to_string())
+                    Some(ident_unraw(&item.ident))
                 }
                 _ => None,
             })
             .collect();
-        self.typed_event_topic_fields = node
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Struct(item)
-                    if self.typed_event_structs.contains(&item.ident.to_string()) =>
-                {
-                    let fields = match &item.fields {
-                        syn::Fields::Named(fields) => fields
-                            .named
-                            .iter()
-                            .filter(|field| {
-                                field.attrs.iter().any(|attribute| {
-                                    attribute
-                                        .path()
-                                        .segments
-                                        .last()
-                                        .is_some_and(|segment| segment.ident == "topic")
+        self.typed_event_topic_fields =
+            node.items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Struct(item)
+                        if self.typed_event_structs.contains(&ident_unraw(&item.ident)) =>
+                    {
+                        let fields = match &item.fields {
+                            syn::Fields::Named(fields) => fields
+                                .named
+                                .iter()
+                                .filter(|field| {
+                                    field.attrs.iter().any(|attribute| {
+                                        attribute.path().segments.last().is_some_and(|segment| {
+                                            ident_eq(&segment.ident, "topic")
+                                        })
+                                    })
                                 })
-                            })
-                            .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
-                            .collect::<std::collections::HashSet<_>>(),
-                        _ => std::collections::HashSet::new(),
-                    };
-                    Some((item.ident.to_string(), fields))
-                }
-                _ => None,
-            })
-            .collect();
-        self.auth_helpers = node
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Fn(function) => {
-                    auth_helper(function).map(|helper| (function.sig.ident.to_string(), helper))
-                }
-                _ => None,
-            })
-            .collect();
+                                .filter_map(|field| field.ident.as_ref().map(ident_unraw))
+                                .collect::<std::collections::HashSet<_>>(),
+                            _ => std::collections::HashSet::new(),
+                        };
+                        Some((ident_unraw(&item.ident), fields))
+                    }
+                    _ => None,
+                })
+                .collect();
+        self.auth_helpers =
+            node.items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Fn(function) => auth_helper(function)
+                        .map(|helper| (ident_unraw(&function.sig.ident), helper)),
+                    _ => None,
+                })
+                .collect();
         visit::visit_file(self, node);
     }
 
@@ -1952,17 +1969,17 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             self.push_auth_helper_mutants(call);
         }
         if let Stmt::Expr(Expr::MethodCall(call), Some(_)) = node {
-            if call.method == "publish" && call.args.len() == 1 {
+            if ident_eq(&call.method, "publish") && call.args.len() == 1 {
                 let is_typed_event = match call.receiver.as_ref() {
                     Expr::Struct(event) => event
                         .path
                         .get_ident()
-                        .is_some_and(|name| self.typed_event_structs.contains(&name.to_string())),
+                        .is_some_and(|name| self.typed_event_structs.contains(&ident_unraw(name))),
                     _ => false,
                 };
                 let targets_env = match call.args.first() {
                     Some(Expr::Reference(reference)) => receiver_ident(&reference.expr)
-                        .is_some_and(|name| self.env_params.contains(&name)),
+                        .is_some_and(|name| contains_ident(&self.env_params, &name)),
                     _ => false,
                 };
                 if is_typed_event && targets_env {
@@ -1974,7 +1991,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                     );
 
                     if let Expr::Struct(event) = call.receiver.as_ref() {
-                        let event_name = event.path.get_ident().map(ToString::to_string);
+                        let event_name = event.path.get_ident().map(ident_unraw);
                         let topic_fields = event_name
                             .as_ref()
                             .and_then(|name| self.typed_event_topic_fields.get(name))
@@ -1985,13 +2002,14 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                                 syn::Member::Named(name) => name.to_string(),
                                 syn::Member::Unnamed(_) => continue,
                             };
+                            let field_key = strip_raw_prefix(&field_name);
 
                             if let Some(original_actor) = receiver_ident(&field.expr) {
-                                if self.address_params.contains(&original_actor) {
+                                if contains_ident(&self.address_params, &original_actor) {
                                     for alternate in self
                                         .address_params
                                         .iter()
-                                        .filter(|name| *name != &original_actor)
+                                        .filter(|name| !same_ident(name, &original_actor))
                                         .cloned()
                                         .collect::<Vec<_>>()
                                     {
@@ -2013,7 +2031,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                             }
 
                             if let Some(original_value) = receiver_ident(&field.expr) {
-                                if self.numeric_params.contains(&original_value) {
+                                if contains_ident(&self.numeric_params, &original_value) {
                                     let replacement = if field.colon_token.is_none() {
                                         format!("{field_name}: 0")
                                     } else {
@@ -2030,13 +2048,13 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                                 }
                             }
 
-                            if topic_fields.contains(&field_name) {
+                            if topic_fields.contains(field_key) {
                                 if let Some(original_topic) = receiver_ident(&field.expr) {
-                                    if self.address_params.contains(&original_topic) {
+                                    if contains_ident(&self.address_params, &original_topic) {
                                         for alternate in self
                                             .address_params
                                             .iter()
-                                            .filter(|name| *name != &original_topic)
+                                            .filter(|name| !same_ident(name, &original_topic))
                                             .cloned()
                                             .collect::<Vec<_>>()
                                         {
@@ -2087,17 +2105,20 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 
     fn visit_local(&mut self, node: &'ast Local) {
         if let Some((name, init)) = local_binding_name_and_init(node) {
-            if is_token_client_constructor(init) && !self.token_client_vars.contains(&name) {
+            if is_token_client_constructor(init) && !contains_ident(&self.token_client_vars, &name)
+            {
                 self.token_client_vars.push(name.clone());
             }
 
             if is_generated_contract_client_constructor(init)
-                && !self.contract_client_vars.contains(&name)
+                && !contains_ident(&self.contract_client_vars, &name)
             {
                 self.contract_client_vars.push(name.clone());
             }
 
-            if is_soroban_storage_accessor(init) && !self.storage_accessor_vars.contains(&name) {
+            if is_soroban_storage_accessor(init)
+                && !contains_ident(&self.storage_accessor_vars, &name)
+            {
                 self.storage_accessor_vars.push(name);
             }
         }
@@ -2109,19 +2130,17 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         let old_len = self.address_params.len();
         let loop_binding = match (node.pat.as_ref(), node.expr.as_ref()) {
             (Pat::Ident(binding), Expr::MethodCall(call))
-                if call.method == "iter" && call.args.is_empty() =>
+                if ident_eq(&call.method, "iter") && call.args.is_empty() =>
             {
                 receiver_ident(&call.receiver).and_then(|receiver| {
-                    self.address_vec_params
-                        .iter()
-                        .any(|candidate| candidate == &receiver)
+                    contains_ident(&self.address_vec_params, &receiver)
                         .then(|| binding.ident.to_string())
                 })
             }
             _ => None,
         };
         if let Some(binding) = loop_binding {
-            if !self.address_params.contains(&binding) {
+            if !contains_ident(&self.address_params, &binding) {
                 self.address_params.push(binding);
             }
         }
@@ -2137,13 +2156,13 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         // arbitrary pattern type inference remains intentionally out of scope.
         visit::visit_expr(self, &node.expr);
         let option_address = receiver_ident(&node.expr)
-            .is_some_and(|name| self.address_option_params.contains(&name));
+            .is_some_and(|name| contains_ident(&self.address_option_params, &name));
 
         for arm in &node.arms {
             let old_len = self.address_params.len();
             if option_address {
                 if let Some(binding) = option_address_binding(&arm.pat) {
-                    if !self.address_params.contains(&binding) {
+                    if !contains_ident(&self.address_params, &binding) {
                         self.address_params.push(binding);
                     }
                 }
@@ -2181,12 +2200,13 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let method_name = ident_unraw(&node.method);
         if matches!(
-            node.method.to_string().as_str(),
+            method_name.as_str(),
             "instance" | "persistent" | "temporary"
         ) && is_direct_env_storage_receiver(&node.receiver, &self.env_params)
         {
-            let original = node.method.to_string();
+            let original = method_name.as_str();
             if let Some(receiver) = source_for_span(self.source, node.receiver.span()) {
                 for alternate in ["instance", "persistent", "temporary"]
                     .into_iter()
@@ -2204,17 +2224,18 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 
         // Only mutate a direct env.invoke_contract call with a simple typed
         // Address parameter as its first argument. Avoid arbitrary typed inference.
-        if node.method == "invoke_contract"
+        if method_name == "invoke_contract"
             && node.args.len() == 3
-            && receiver_ident(&node.receiver).is_some_and(|name| self.env_params.contains(&name))
+            && receiver_ident(&node.receiver)
+                .is_some_and(|name| contains_ident(&self.env_params, &name))
         {
             if let Some(Expr::Reference(target_ref)) = node.args.first() {
                 if let Some(original_target) = receiver_ident(&target_ref.expr) {
-                    if self.address_params.contains(&original_target) {
+                    if contains_ident(&self.address_params, &original_target) {
                         for alternate in self
                             .address_params
                             .iter()
-                            .filter(|name| *name != &original_target)
+                            .filter(|name| !same_ident(name, &original_target))
                             .cloned()
                             .collect::<Vec<_>>()
                         {
@@ -2233,21 +2254,21 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         }
 
         if receiver_ident(&node.receiver)
-            .is_some_and(|name| self.contract_client_vars.contains(&name))
+            .is_some_and(|name| contains_ident(&self.contract_client_vars, &name))
         {
             for argument in &node.args {
                 if let Expr::Reference(reference) = argument {
                     if let Some(original) = receiver_ident(&reference.expr) {
-                        let candidates = if self.address_params.contains(&original) {
+                        let candidates = if contains_ident(&self.address_params, &original) {
                             self.address_params
                                 .iter()
-                                .filter(|name| *name != &original)
+                                .filter(|name| !same_ident(name, &original))
                                 .cloned()
                                 .collect::<Vec<_>>()
-                        } else if self.numeric_params.contains(&original) {
+                        } else if contains_ident(&self.numeric_params, &original) {
                             self.numeric_params
                                 .iter()
-                                .filter(|name| *name != &original)
+                                .filter(|name| !same_ident(name, &original))
                                 .cloned()
                                 .collect::<Vec<_>>()
                         } else {
@@ -2268,7 +2289,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
-        if node.method == "publish" && is_soroban_events_receiver(&node.receiver, &self.env_params)
+        if method_name == "publish" && is_soroban_events_receiver(&node.receiver, &self.env_params)
         {
             self.push_mutant(
                 "EVENT-001",
@@ -2278,7 +2299,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             );
         }
 
-        if node.method == "transfer"
+        if method_name == "transfer"
             && node.args.len() == 3
             && is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
         {
@@ -2292,11 +2313,11 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
 
             if let Some(original_client) = receiver_ident(&node.receiver) {
-                if self.token_client_vars.contains(&original_client) {
+                if contains_ident(&self.token_client_vars, &original_client) {
                     for alternate in self
                         .token_client_vars
                         .iter()
-                        .filter(|name| *name != &original_client)
+                        .filter(|name| !same_ident(name, &original_client))
                         .cloned()
                         .collect::<Vec<_>>()
                     {
@@ -2313,7 +2334,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             if let Some(amount_arg) = node.args.iter().nth(2) {
                 if let Expr::Reference(reference) = amount_arg {
                     if let Some(amount_name) = receiver_ident(&reference.expr) {
-                        if self.numeric_params.contains(&amount_name) {
+                        if contains_ident(&self.numeric_params, &amount_name) {
                             for (replacement, label) in [("&0", "zero"), ("&1", "one")] {
                                 self.push_mutant(
                                     "TOKEN-003",
@@ -2328,15 +2349,13 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
-        if let Some((role_a, role_b)) =
-            allowance_role_labels(&node.method.to_string(), node.args.len())
-        {
+        if let Some((role_a, role_b)) = allowance_role_labels(&method_name, node.args.len()) {
             if is_token_transfer_receiver(&node.receiver, &self.token_client_vars) {
                 self.push_allowance_role_swap(node, role_a, role_b);
             }
         }
 
-        if node.method == "extend_ttl"
+        if method_name == "extend_ttl"
             && is_ttl_receiver(&node.receiver, &self.storage_accessor_vars)
         {
             self.push_mutant(
@@ -2377,11 +2396,11 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
-        if node.method == "require_auth_for_args" && node.args.len() == 1 {
+        if method_name == "require_auth_for_args" && node.args.len() == 1 {
             if let (Some(receiver), Some(env_name)) =
                 (receiver_ident(&node.receiver), self.env_params.first())
             {
-                if self.address_params.contains(&receiver) {
+                if contains_ident(&self.address_params, &receiver) {
                     let replacement = format!("soroban_sdk::Vec::new(&{})", env_name);
                     let Some(arguments) = node.args.first() else {
                         return;
@@ -2400,10 +2419,10 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
-        if node.method == "require_auth" && node.args.is_empty() {
+        if method_name == "require_auth" && node.args.is_empty() {
             if let Some(kind) = self.lifecycle {
                 if let Some(receiver) = receiver_ident(&node.receiver) {
-                    if self.address_params.contains(&receiver) {
+                    if contains_ident(&self.address_params, &receiver) {
                         let operator = match kind {
                             LifecycleKind::Initialization => "AUTH-006",
                             LifecycleKind::Upgrade => "AUTH-007",
@@ -2423,7 +2442,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                         for alternate in self
                             .address_params
                             .iter()
-                            .filter(|name| *name != &receiver)
+                            .filter(|name| !same_ident(name, &receiver))
                             .cloned()
                             .collect::<Vec<_>>()
                         {
@@ -2441,7 +2460,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
-        if node.method == "require_auth"
+        if method_name == "require_auth"
             && (!self.env_params.is_empty() || !self.address_params.is_empty())
         {
             let receiver = receiver_ident(&node.receiver);
@@ -2460,7 +2479,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 for candidate in self
                     .address_params
                     .iter()
-                    .filter(|candidate| *candidate != &receiver_name)
+                    .filter(|candidate| !same_ident(candidate, &receiver_name))
                     .cloned()
                     .collect::<Vec<_>>()
                 {
@@ -4581,8 +4600,40 @@ fn normalized_args() -> Vec<OsString> {
     args
 }
 
+fn strip_raw_prefix(name: &str) -> &str {
+    name.strip_prefix("r#")
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(name)
+}
+
+fn ident_unraw(ident: &syn::Ident) -> String {
+    strip_raw_prefix(&ident.to_string()).to_owned()
+}
+
+fn ident_eq(ident: &syn::Ident, expected: &str) -> bool {
+    ident == expected || ident_unraw(ident) == expected
+}
+
+fn same_ident(a: &str, b: &str) -> bool {
+    strip_raw_prefix(a) == strip_raw_prefix(b)
+}
+
+fn contains_ident(list: &[String], target: &str) -> bool {
+    list.iter().any(|candidate| same_ident(candidate, target))
+}
+
+fn normalize_function_path(path: &str) -> String {
+    path.split("::")
+        .map(strip_raw_prefix)
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
 fn function_name_matches(qualified: &str, requested: &str) -> bool {
-    qualified == requested || qualified.rsplit("::").next() == Some(requested)
+    let qualified_norm = normalize_function_path(qualified);
+    let requested_norm = normalize_function_path(requested);
+    qualified_norm == requested_norm
+        || qualified_norm.rsplit("::").next() == Some(requested_norm.as_str())
 }
 
 fn filter_changed_mutants(
@@ -5171,7 +5222,7 @@ impl<'ast> Visit<'ast> for BindingNames {
     fn visit_item(&mut self, _node: &'ast Item) {}
 
     fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
-        self.0.insert(node.ident.to_string());
+        self.0.insert(ident_unraw(&node.ident));
         visit::visit_pat_ident(self, node);
     }
 }
@@ -5203,7 +5254,7 @@ fn auth_helper(function: &ItemFn) -> Option<AuthHelper> {
         if let (Pat::Ident(ident), true) = (pat_type.pat.as_ref(), type_is_address(&pat_type.ty)) {
             if ident.by_ref.is_none() && ident.subpat.is_none() {
                 let is_ref = matches!(pat_type.ty.as_ref(), Type::Reference(_));
-                address_params.insert(ident.ident.to_string(), (index, is_ref));
+                address_params.insert(ident_unraw(&ident.ident), (index, is_ref));
             }
         }
     }
@@ -5213,14 +5264,17 @@ fn auth_helper(function: &ItemFn) -> Option<AuthHelper> {
         let Stmt::Expr(Expr::MethodCall(call), Some(_)) = stmt else {
             return None;
         };
-        if call.method != "require_auth" || !call.args.is_empty() || call.turbofish.is_some() {
+        if !ident_eq(&call.method, "require_auth")
+            || !call.args.is_empty()
+            || call.turbofish.is_some()
+        {
             return None;
         }
         let Expr::Path(receiver) = call.receiver.as_ref() else {
             return None;
         };
         let name = receiver_ident(&Expr::Path(receiver.clone()))?;
-        let (index, is_ref) = *address_params.get(&name)?;
+        let (index, is_ref) = *address_params.get(strip_raw_prefix(&name))?;
         if !sinks.iter().any(|(existing, _, _)| *existing == index) {
             sinks.push((index, name, is_ref));
         }
@@ -5237,7 +5291,7 @@ fn recognized_lifecycle(sig: &Signature, body: &syn::Block) -> Option<LifecycleK
     if envs.is_empty() || address_params(sig).is_empty() {
         return None;
     }
-    match sig.ident.to_string().as_str() {
+    match ident_unraw(&sig.ident).as_str() {
         "initialize" | "init" | "__constructor" | "constructor" => {
             Some(LifecycleKind::Initialization)
         }
@@ -5253,12 +5307,12 @@ fn block_contains_upgrade_wasm(body: &syn::Block, env_names: &[String]) -> bool 
     }
     impl<'ast> Visit<'ast> for UpgradeScan<'_> {
         fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
-            if call.method == "update_current_contract_wasm" && call.args.len() == 1 {
+            if ident_eq(&call.method, "update_current_contract_wasm") && call.args.len() == 1 {
                 if let Expr::MethodCall(deployer) = call.receiver.as_ref() {
-                    if deployer.method == "deployer"
+                    if ident_eq(&deployer.method, "deployer")
                         && deployer.args.is_empty()
                         && receiver_ident(&deployer.receiver)
-                            .is_some_and(|name| self.env_names.contains(&name))
+                            .is_some_and(|name| contains_ident(self.env_names, &name))
                     {
                         self.found = true;
                     }
@@ -5301,7 +5355,7 @@ fn impl_method_collisions(file: &syn::File) -> std::collections::HashSet<String>
                 syn::Item::Impl(item_impl) => {
                     for impl_item in &item_impl.items {
                         if let syn::ImplItem::Fn(function) = impl_item {
-                            let name = function.sig.ident.to_string();
+                            let name = ident_unraw(&function.sig.ident);
                             let key = if module_path.is_empty() {
                                 name
                             } else {
@@ -5313,7 +5367,7 @@ fn impl_method_collisions(file: &syn::File) -> std::collections::HashSet<String>
                 }
                 syn::Item::Mod(item_mod) => {
                     if let Some((_, items)) = &item_mod.content {
-                        module_path.push(item_mod.ident.to_string());
+                        module_path.push(ident_unraw(&item_mod.ident));
                         visit_items(items, module_path, counts);
                         module_path.pop();
                     }
@@ -5366,7 +5420,7 @@ fn type_is_option_of_address(ty: &Type) -> bool {
             let Some(segment) = path.path.segments.last() else {
                 return false;
             };
-            if segment.ident != "Option" {
+            if !ident_eq(&segment.ident, "Option") {
                 return false;
             }
             let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
@@ -5388,7 +5442,7 @@ fn option_address_binding(pat: &Pat) -> Option<String> {
                 .path
                 .segments
                 .last()
-                .is_some_and(|segment| segment.ident == "Some")
+                .is_some_and(|segment| ident_eq(&segment.ident, "Some"))
                 && tuple.elems.len() == 1 =>
         {
             match tuple.elems.first() {
@@ -5426,7 +5480,7 @@ fn type_is_vec_of_address(ty: &Type) -> bool {
             let Some(segment) = path.path.segments.last() else {
                 return false;
             };
-            if segment.ident != "Vec" {
+            if !ident_eq(&segment.ident, "Vec") {
                 return false;
             }
             let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
@@ -5447,7 +5501,7 @@ fn type_is_address(ty: &Type) -> bool {
             .path
             .segments
             .last()
-            .map(|segment| segment.ident == "Address")
+            .map(|segment| ident_eq(&segment.ident, "Address"))
             .unwrap_or(false),
         Type::Reference(reference) => type_is_address(&reference.elem),
         _ => false,
@@ -5473,7 +5527,7 @@ fn type_is_numeric_primitive(ty: &Type) -> bool {
     match ty {
         Type::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
             matches!(
-                path.path.segments[0].ident.to_string().as_str(),
+                ident_unraw(&path.path.segments[0].ident).as_str(),
                 "i8" | "i16"
                     | "i32"
                     | "i64"
@@ -5511,7 +5565,7 @@ fn type_is_env(ty: &Type) -> bool {
             .path
             .segments
             .last()
-            .map(|segment| segment.ident == "Env")
+            .map(|segment| ident_eq(&segment.ident, "Env"))
             .unwrap_or(false),
         Type::Reference(reference) => type_is_env(&reference.elem),
         _ => false,
@@ -5545,7 +5599,7 @@ fn path_is_token_client(path: &syn::Path) -> bool {
     let names = path
         .segments
         .iter()
-        .map(|segment| segment.ident.to_string().to_ascii_lowercase())
+        .map(|segment| ident_unraw(&segment.ident).to_ascii_lowercase())
         .collect::<Vec<_>>();
     let Some(last) = names.last() else {
         return false;
@@ -5566,7 +5620,7 @@ fn is_token_client_constructor(expr: &Expr) -> bool {
                     .path
                     .segments
                     .iter()
-                    .map(|segment| segment.ident.to_string().to_ascii_lowercase())
+                    .map(|segment| ident_unraw(&segment.ident).to_ascii_lowercase())
                     .collect::<Vec<_>>();
                 names.last().map(|name| name == "new").unwrap_or(false)
                     && names[..names.len().saturating_sub(1)]
@@ -5593,7 +5647,7 @@ fn is_generated_contract_client_constructor(expr: &Expr) -> bool {
                     .path
                     .segments
                     .iter()
-                    .map(|segment| segment.ident.to_string())
+                    .map(|segment| ident_unraw(&segment.ident))
                     .collect::<Vec<_>>();
                 names.last().is_some_and(|name| name == "new")
                     && names.len() >= 2
@@ -5612,8 +5666,9 @@ fn is_generated_contract_client_constructor(expr: &Expr) -> bool {
 
 fn is_generated_contract_client_method_call(expr: &Expr, known_clients: &[String]) -> bool {
     match expr {
-        Expr::MethodCall(call) => receiver_ident(&call.receiver)
-            .is_some_and(|name| known_clients.iter().any(|candidate| candidate == &name)),
+        Expr::MethodCall(call) => {
+            receiver_ident(&call.receiver).is_some_and(|name| contains_ident(known_clients, &name))
+        }
         Expr::Paren(paren) => is_generated_contract_client_method_call(&paren.expr, known_clients),
         _ => false,
     }
@@ -5641,7 +5696,7 @@ fn is_token_transfer_receiver(expr: &Expr, known_clients: &[String]) -> bool {
     }
 
     receiver_ident(expr)
-        .map(|name| known_clients.iter().any(|candidate| candidate == &name))
+        .map(|name| contains_ident(known_clients, &name))
         .unwrap_or(false)
 }
 
@@ -5660,9 +5715,8 @@ fn local_binding_name_and_init(local: &Local) -> Option<(String, &Expr)> {
 
 fn is_direct_env_storage_receiver(expr: &Expr, env_params: &[String]) -> bool {
     match expr {
-        Expr::MethodCall(call) if call.method == "storage" && call.args.is_empty() => {
-            receiver_ident(&call.receiver)
-                .is_some_and(|name| env_params.iter().any(|candidate| candidate == &name))
+        Expr::MethodCall(call) if ident_eq(&call.method, "storage") && call.args.is_empty() => {
+            receiver_ident(&call.receiver).is_some_and(|name| contains_ident(env_params, &name))
         }
         Expr::Paren(paren) => is_direct_env_storage_receiver(&paren.expr, env_params),
         Expr::Reference(reference) => is_direct_env_storage_receiver(&reference.expr, env_params),
@@ -5674,7 +5728,7 @@ fn is_soroban_storage_accessor(expr: &Expr) -> bool {
     match expr {
         Expr::MethodCall(call)
             if matches!(
-                call.method.to_string().as_str(),
+                ident_unraw(&call.method).as_str(),
                 "instance" | "persistent" | "temporary"
             ) =>
         {
@@ -5689,7 +5743,7 @@ fn is_soroban_storage_accessor(expr: &Expr) -> bool {
 fn storage_chain_contains_storage(expr: &Expr) -> bool {
     match expr {
         Expr::MethodCall(call) => {
-            call.method == "storage" || storage_chain_contains_storage(&call.receiver)
+            ident_eq(&call.method, "storage") || storage_chain_contains_storage(&call.receiver)
         }
         Expr::Paren(paren) => storage_chain_contains_storage(&paren.expr),
         Expr::Reference(reference) => storage_chain_contains_storage(&reference.expr),
@@ -5703,15 +5757,17 @@ fn is_ttl_receiver(expr: &Expr, known_accessors: &[String]) -> bool {
     }
 
     receiver_ident(expr)
-        .map(|name| known_accessors.iter().any(|candidate| candidate == &name))
+        .map(|name| contains_ident(known_accessors, &name))
         .unwrap_or(false)
 }
 
 fn is_soroban_events_receiver(expr: &Expr, env_params: &[String]) -> bool {
     match expr {
-        Expr::MethodCall(call) if call.method == "events" => receiver_ident(&call.receiver)
-            .map(|name| env_params.iter().any(|candidate| candidate == &name))
-            .unwrap_or(false),
+        Expr::MethodCall(call) if ident_eq(&call.method, "events") => {
+            receiver_ident(&call.receiver)
+                .map(|name| contains_ident(env_params, &name))
+                .unwrap_or(false)
+        }
         Expr::Reference(reference) => is_soroban_events_receiver(&reference.expr, env_params),
         Expr::Paren(paren) => is_soroban_events_receiver(&paren.expr, env_params),
         _ => false,
