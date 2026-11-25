@@ -5757,17 +5757,20 @@ fn span_to_offsets(source: &str, span: Span) -> Option<(usize, usize, SourceSpan
     let start_byte = line_column_to_offset(source, start.line, start.column)?;
     let end_byte = line_column_to_offset(source, end.line, end.column)?;
 
-    // proc-macro2 reports byte columns, not Unicode scalar columns. Refuse
-    // any range that bisects UTF-8 (even if the parser supplied an odd span).
+    // proc-macro2 line/column positions count Unicode scalar values. The
+    // mutation engine uses UTF-8 byte offsets instead; report byte columns
+    // explicitly so all consumers see one stable, documented convention.
     source.get(start_byte..end_byte)?;
+    let first_on_start_line = line_column_to_offset(source, start.line, 0)?;
+    let first_on_end_line = line_column_to_offset(source, end.line, 0)?;
     Some((
         start_byte,
         end_byte,
         SourceSpan {
             line: start.line,
-            column: start.column + 1,
+            column: start_byte - first_on_start_line + 1,
             end_line: end.line,
-            end_column: end.column + 1,
+            end_column: end_byte - first_on_end_line + 1,
         },
     ))
 }
@@ -5781,8 +5784,14 @@ fn line_column_to_offset(source: &str, target_line: usize, target_column: usize)
     for (index, line) in source.split_inclusive('\n').enumerate() {
         let line_number = index + 1;
         if line_number == target_line {
-            return (target_column <= line.len() && line.is_char_boundary(target_column))
-                .then_some(offset + target_column);
+            // Span columns count Unicode characters. Convert the character
+            // boundary to its byte index before slicing source.
+            return line
+                .char_indices()
+                .map(|(byte, _)| byte)
+                .chain(std::iter::once(line.len()))
+                .nth(target_column)
+                .map(|byte| offset + byte);
         }
         offset += line.len();
     }
@@ -9502,8 +9511,9 @@ mod discovery_quality_regressions {
 
     #[test]
     fn utf8_column_conversion_rejects_mid_character_and_bad_ranges() {
-        assert_eq!(line_column_to_offset("λx\n", 1, 1), None);
-        assert_eq!(line_column_to_offset("λx\n", 1, 2), Some(2));
+        assert_eq!(line_column_to_offset("λx\n", 1, 1), Some(2));
+        assert_eq!(line_column_to_offset("λx\n", 1, 2), Some(3));
+        assert_eq!(line_column_to_offset("🦀\n", 1, 1), Some(4));
         assert_eq!(line_column_to_offset("🦀\n", 1, 3), None);
         assert!(replace_source_range("🐛require_auth()", 1, 10, "", "()").is_err());
     }
