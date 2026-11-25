@@ -2105,6 +2105,40 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         visit::visit_local(self, node);
     }
 
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let previous = self.address_params.clone();
+        let mut shadowed = std::collections::HashSet::new();
+        let mut typed_address_bindings = Vec::new();
+
+        for input in &node.inputs {
+            let mut bindings = BindingNames::default();
+            bindings.visit_pat(input);
+            shadowed.extend(bindings.0);
+
+            if let Pat::Type(pat_type) = input {
+                if type_is_address(&pat_type.ty) {
+                    if let Pat::Ident(ident) = pat_type.pat.as_ref() {
+                        typed_address_bindings.push(ident.ident.to_string());
+                    }
+                }
+            }
+        }
+
+        self.address_params
+            .retain(|candidate| !shadowed.contains(candidate));
+        for binding in typed_address_bindings {
+            if !self.address_params.contains(&binding) {
+                self.address_params.push(binding);
+            }
+        }
+
+        for input in &node.inputs {
+            visit::visit_pat(self, input);
+        }
+        visit::visit_expr(self, &node.body);
+        self.address_params = previous;
+    }
+
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
         let old_len = self.address_params.len();
         let loop_binding = match (node.pat.as_ref(), node.expr.as_ref()) {
@@ -2831,6 +2865,7 @@ fn run() -> Result<()> {
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
             let scratch_root = resolve_scratch_root(&root, scratch_dir.as_deref())?;
+            validate_scratch_root_writable(&scratch_root)?;
             if scratch_dir.is_some() {
                 metadata.scratch_dir = Some(scratch_root.display().to_string());
             }
@@ -5864,6 +5899,42 @@ fn resolve_scratch_root(root: &Path, scratch_dir: Option<&Path>) -> Result<PathB
     let scratch_root = base.join(pathguard::SCRATCH_NAME);
     pathguard::require_owned_scratch_path_under(&scratch_root, &scratch_root)?;
     Ok(scratch_root)
+}
+
+fn validate_scratch_root_writable(scratch_root: &Path) -> Result<()> {
+    pathguard::require_owned_scratch_path_under(scratch_root, scratch_root)?;
+    let existed = scratch_root.exists();
+    fs::create_dir_all(scratch_root).with_context(|| {
+        format!(
+            "scratch root {} cannot be created; choose a writable --scratch-dir",
+            scratch_root.display()
+        )
+    })?;
+
+    let probe = scratch_root.join(format!(
+        ".soro-mutants-write-probe-{}",
+        std::process::id()
+    ));
+    let probe_result = (|| -> Result<()> {
+        fs::write(&probe, b"soro-mutants scratch probe").with_context(|| {
+            format!(
+                "scratch root {} is not writable; choose a writable --scratch-dir",
+                scratch_root.display()
+            )
+        })?;
+        fs::remove_file(&probe).with_context(|| {
+            format!(
+                "scratch root {} does not permit deleting temporary files",
+                scratch_root.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if !existed {
+        let _ = fs::remove_dir(scratch_root);
+    }
+    probe_result
 }
 
 fn reject_cleanup_symlink(path: &Path) -> Result<()> {
