@@ -2211,6 +2211,32 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 );
             }
         }
+
+        if let Expr::Let(let_expr) = node.cond.as_ref() {
+            // A simple `if let Some(binding) = option_address` introduces an
+            // Address candidate only in the then branch. Visit the scrutinee
+            // outside that temporary scope and restore the candidate set
+            // before visiting the else branch.
+            visit::visit_expr(self, &let_expr.expr);
+            let old_len = self.address_params.len();
+            let option_address = receiver_ident(&let_expr.expr)
+                .is_some_and(|name| self.address_option_params.contains(&name));
+            if option_address {
+                if let Some(binding) = option_address_binding(&let_expr.pat) {
+                    if !self.address_params.contains(&binding) {
+                        self.address_params.push(binding);
+                    }
+                }
+            }
+            visit::visit_pat(self, &let_expr.pat);
+            visit::visit_block(self, &node.then_branch);
+            self.address_params.truncate(old_len);
+            if let Some((_, else_expr)) = &node.else_branch {
+                visit::visit_expr(self, else_expr);
+            }
+            return;
+        }
+
         visit::visit_expr_if(self, node);
     }
 
