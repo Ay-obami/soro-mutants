@@ -8,22 +8,26 @@ of AUTH, EVENT, TTL, TOKEN, CALL, or STORAGE operators.
 
 A mutant replaces one contiguous source span per run. Candidate discovery is
 sorted by project-relative file, starting byte offset, operator ID, replacement,
-end offset, original source, function and description. The first recognized
-range wins against a *different, intersecting* range. Later candidates whose
-ranges partially overlap or contain that accepted span are suppressed with the
-reason `overlapping source span`. Ranges that just touch at a boundary do
-not overlap.
+end offset, original source, function and description. Within a single
+operator, the first recognized range wins against an intersecting range
+with different boundaries. Subsequent contained or partially overlapping
+ranges from that operator are suppressed with reason `overlapping source span`.
+Ranges that only touch at a boundary do not overlap.
 
-Mutants with an **identical start and end offset** but distinct replacement
-texts are valid alternatives, because they execute in separate test runs.
+Mutants from **different semantic operator IDs** are also independent: for
+example, TTL-001 removes an `extend_ttl()` call, while TTL-002 mutates its
+threshold argument. Both remain discoverable despite overlapping spans,
+preserving established operator behavior. Mutants with an **identical start
+and end offset** but distinct replacements are likewise valid alternatives
+because they execute in separate test runs.
 Unchanged replacements are suppressed as `unchanged replacement`, and
 identical file/range/source/replacement edits as `duplicate source edit`.
 
 For example, a recognized local helper call
 `authorize(&admin)` can produce one edit replacing the whole call and
 another editing only `&admin`. When those ranges conflict, only the
-deterministically preferred range survives. The normal mutant list never
-includes a conflicting pair. Suppression reasons use the existing summary
+deterministically preferred range for that operator survives. No conflicting
+partial ranges from a single operator reach the normal mutant list. Suppression reasons use the existing summary
 output and optional JSON `suppression.details` field; the report schema and
 result statuses are unchanged. Mutant IDs are generated **after** suppression,
 in stable `M0001`, `M0002`, ... order.
