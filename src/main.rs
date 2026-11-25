@@ -2,6 +2,7 @@ mod command;
 mod diagnostics;
 mod pathguard;
 mod redaction;
+mod sdk_reexports;
 
 use anyhow::{bail, Context, Result};
 use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -4829,23 +4830,62 @@ struct SuppressedMutant {
     reason: &'static str,
 }
 
-fn suppress_equivalent_mutants(mutants: Vec<Mutant>) -> (Vec<Mutant>, Vec<SuppressedMutant>) {
+/// Stable candidate precedence: file and starting byte first, then operator
+/// and replacement. Exact-range alternative replacements are independent
+/// single-mutant experiments and remain valid. Distinct operator IDs are
+/// also independent semantic experiments (e.g. TTL removal vs its arguments).
+/// Conflicting non-identical ranges *within one operator* are suppressed.
+fn mutant_order(a: &Mutant, b: &Mutant) -> std::cmp::Ordering {
+    a.file
+        .cmp(&b.file)
+        .then(a.start_byte.cmp(&b.start_byte))
+        .then(a.operator.cmp(&b.operator))
+        .then(a.replacement.cmp(&b.replacement))
+        .then(a.end_byte.cmp(&b.end_byte))
+        .then(a.original.cmp(&b.original))
+        .then(a.function.cmp(&b.function))
+        .then(a.description.cmp(&b.description))
+}
+
+fn suppress_equivalent_mutants(mut mutants: Vec<Mutant>) -> (Vec<Mutant>, Vec<SuppressedMutant>) {
     use std::collections::HashSet;
+
+    // Selection must not inherit recognizer registration or filesystem order.
+    mutants.sort_by(mutant_order);
 
     let mut seen = HashSet::new();
     let mut retained = Vec::with_capacity(mutants.len());
     let mut suppressed = Vec::new();
+    let mut file = None;
+    let mut active_spans: Vec<(usize, usize, String)> = Vec::new();
+
     for mutant in mutants {
-        let reason = if mutant.original == mutant.replacement {
-            Some("unchanged replacement")
-        } else if !seen.insert((
+        if file.as_ref() != Some(&mutant.file) {
+            file = Some(mutant.file.clone());
+            active_spans.clear();
+        }
+        // Sorted starts make intervals ending before the next candidate safe
+        // to forget; only concurrently active spans can overlap it.
+        active_spans.retain(|(_, end, _)| *end > mutant.start_byte);
+
+        let duplicate = (
             mutant.file.clone(),
             mutant.start_byte,
             mutant.end_byte,
             mutant.original.clone(),
             mutant.replacement.clone(),
-        )) {
+        );
+        let reason = if mutant.original == mutant.replacement {
+            Some("unchanged replacement")
+        } else if !seen.insert(duplicate) {
             Some("duplicate source edit")
+        } else if active_spans.iter().any(|(start, end, operator)| {
+            operator == &mutant.operator
+                && *start < mutant.end_byte
+                && mutant.start_byte < *end
+                && (*start != mutant.start_byte || *end != mutant.end_byte)
+        }) {
+            Some("overlapping source span")
         } else {
             None
         };
@@ -4855,6 +4895,7 @@ fn suppress_equivalent_mutants(mutants: Vec<Mutant>) -> (Vec<Mutant>, Vec<Suppre
                 reason,
             });
         } else {
+            active_spans.push((mutant.start_byte, mutant.end_byte, mutant.operator.clone()));
             retained.push(mutant);
         }
     }
@@ -5064,7 +5105,7 @@ fn discover_mutants_detailed(
             .strip_prefix(&root)
             .unwrap_or(entry.path())
             .to_path_buf();
-        let syntax = match syn::parse_file(&source) {
+        let mut syntax = match syn::parse_file(&source) {
             Ok(file) => file,
             Err(_) => {
                 stats.unparsable_files.push(relative);
@@ -5073,6 +5114,9 @@ fn discover_mutants_detailed(
         };
         stats.files_scanned += 1;
 
+        // Resolve only explicit local pub use soroban_sdk re-exports inside
+        // this parsed file. Never consult other modules, crates, or glob imports.
+        sdk_reexports::normalize(&mut syntax);
         let mut visitor = SemanticVisitor::new(&source, relative);
         visitor.visit_file(&syntax);
         mutants.extend(visitor.mutants);
@@ -5103,17 +5147,7 @@ fn discover_mutants_detailed(
 
     // Total ordering must never inherit WalkDir's filesystem-dependent traversal order.
     // Keep the first four keys stable: IDs and shard assignments depend on them.
-    mutants.sort_by(|a, b| {
-        a.file
-            .cmp(&b.file)
-            .then(a.start_byte.cmp(&b.start_byte))
-            .then(a.operator.cmp(&b.operator))
-            .then(a.replacement.cmp(&b.replacement))
-            .then(a.end_byte.cmp(&b.end_byte))
-            .then(a.original.cmp(&b.original))
-            .then(a.function.cmp(&b.function))
-            .then(a.description.cmp(&b.description))
-    });
+    mutants.sort_by(mutant_order);
 
     for (index, mutant) in mutants.iter_mut().enumerate() {
         mutant.id = format!("M{:04}", index + 1);
@@ -5725,14 +5759,20 @@ fn span_to_offsets(source: &str, span: Span) -> Option<(usize, usize, SourceSpan
     let start_byte = line_column_to_offset(source, start.line, start.column)?;
     let end_byte = line_column_to_offset(source, end.line, end.column)?;
 
+    // proc-macro2 line/column positions count Unicode scalar values. The
+    // mutation engine uses UTF-8 byte offsets instead; report byte columns
+    // explicitly so all consumers see one stable, documented convention.
+    source.get(start_byte..end_byte)?;
+    let first_on_start_line = line_column_to_offset(source, start.line, 0)?;
+    let first_on_end_line = line_column_to_offset(source, end.line, 0)?;
     Some((
         start_byte,
         end_byte,
         SourceSpan {
             line: start.line,
-            column: start.column + 1,
+            column: start_byte - first_on_start_line + 1,
             end_line: end.line,
-            end_column: end.column + 1,
+            end_column: end_byte - first_on_end_line + 1,
         },
     ))
 }
@@ -5746,7 +5786,14 @@ fn line_column_to_offset(source: &str, target_line: usize, target_column: usize)
     for (index, line) in source.split_inclusive('\n').enumerate() {
         let line_number = index + 1;
         if line_number == target_line {
-            return (target_column <= line.len()).then_some(offset + target_column);
+            // Span columns count Unicode characters. Convert the character
+            // boundary to its byte index before slicing source.
+            return line
+                .char_indices()
+                .map(|(byte, _)| byte)
+                .chain(std::iter::once(line.len()))
+                .nth(target_column)
+                .map(|byte| offset + byte);
         }
         offset += line.len();
     }
@@ -7301,7 +7348,9 @@ mod tests {
         let mut second = first.clone();
         second.file = PathBuf::from("other/src/lib.rs");
         let mut third = first.clone();
-        third.start_byte += 1;
+        // A distinct, non-overlapping synthetic edit in the same file.
+        third.start_byte = first.end_byte;
+        third.end_byte = first.end_byte + 2;
         let (retained, reasons) = suppress_equivalent_mutants(vec![first, second, third]);
         assert_eq!(retained.len(), 3);
         assert!(reasons.is_empty());
@@ -9316,5 +9365,201 @@ mod tests {
             compile_command_for("cargo nextest run").as_deref(),
             Some("cargo test --no-run")
         );
+    }
+}
+
+#[cfg(test)]
+mod discovery_quality_regressions {
+    use super::*;
+
+    fn in_memory(source: &str) -> Vec<Mutant> {
+        let mut file = syn::parse_file(source).expect("fixture must parse");
+        sdk_reexports::normalize(&mut file);
+        let mut visitor = SemanticVisitor::new(source, PathBuf::from("src/lib.rs"));
+        visitor.visit_file(&file);
+        let (mut mutants, _) = suppress_equivalent_mutants(visitor.mutants);
+        mutants.sort_by(mutant_order);
+        for (index, mutant) in mutants.iter_mut().enumerate() {
+            mutant.id = format!("M{:04}", index + 1);
+        }
+        mutants
+    }
+
+    #[test]
+    fn overlap_suppresses_containment_and_partial_edits_deterministically() {
+        let source = "fn guard(a: Address, b: Address) { a.require_auth(); }";
+        let base = in_memory(source).into_iter().next().unwrap();
+        let mut nested = base.clone();
+        nested.start_byte += 2;
+        nested.end_byte -= 2;
+        nested.operator = base.operator.clone();
+        let mut partial = base.clone();
+        partial.start_byte = base.end_byte - 3;
+        partial.end_byte = base.end_byte + 2;
+        partial.operator = base.operator.clone();
+        let other_file = Mutant {
+            file: PathBuf::from("src/other.rs"),
+            ..nested.clone()
+        };
+
+        let expected = suppress_equivalent_mutants(vec![
+            partial.clone(),
+            other_file.clone(),
+            nested.clone(),
+            base.clone(),
+        ]);
+        for _ in 0..8 {
+            let (mut retained, suppressed) = suppress_equivalent_mutants(vec![
+                nested.clone(),
+                base.clone(),
+                partial.clone(),
+                other_file.clone(),
+            ]);
+            retained.sort_by(mutant_order);
+            let (mut canonical, reasons) = expected.clone();
+            canonical.sort_by(mutant_order);
+            assert_eq!(
+                retained
+                    .iter()
+                    .map(|m| (&m.file, m.start_byte, m.end_byte, &m.operator))
+                    .collect::<Vec<_>>(),
+                canonical
+                    .iter()
+                    .map(|m| (&m.file, m.start_byte, m.end_byte, &m.operator))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                suppressed.iter().map(|s| s.reason).collect::<Vec<_>>(),
+                reasons.iter().map(|s| s.reason).collect::<Vec<_>>()
+            );
+            assert!(suppressed
+                .iter()
+                .any(|s| s.reason == "overlapping source span"));
+        }
+    }
+
+    #[test]
+    fn exact_span_alternatives_are_preserved_and_duplicates_are_suppressed() {
+        // Each alternative is executed independently, so identical spans with
+        // distinct replacements are not the ambiguous *partial* overlap case.
+        let source = "fn guard(a: Address, b: Address) { a.require_auth(); }";
+        let original = in_memory(source).into_iter().next().unwrap();
+        let mut alternate = original.clone();
+        alternate.operator = "AUTH-002".to_string();
+        alternate.replacement = "b.require_auth()".to_string();
+        let (retained, suppressed) =
+            suppress_equivalent_mutants(vec![alternate, original.clone(), original]);
+        assert_eq!(retained.len(), 2);
+        assert_eq!(suppressed.len(), 1);
+        assert_eq!(suppressed[0].reason, "duplicate source edit");
+    }
+
+    #[test]
+    fn distinct_operators_keep_independent_nested_edits() {
+        let source = "fn guard(a: Address) { a.require_auth(); }";
+        let outer = in_memory(source).into_iter().next().unwrap();
+        let mut inner = outer.clone();
+        inner.operator = "TTL-002".to_owned();
+        inner.start_byte += 2;
+        inner.end_byte -= 2;
+        inner.replacement = "0".to_owned();
+        let (retained, suppressed) = suppress_equivalent_mutants(vec![inner, outer]);
+        assert_eq!(retained.len(), 2);
+        assert!(suppressed.is_empty());
+    }
+
+    #[test]
+    fn real_nested_recognizers_have_stable_ids_after_overlap_resolution() {
+        let source = "fn initialize(env: Env, admin: Address, replacement: Address) { admin.require_auth(); }";
+        let first = in_memory(source);
+        let second = in_memory(source);
+        assert_eq!(
+            first
+                .iter()
+                .map(|m| (&m.id, &m.operator, &m.replacement))
+                .collect::<Vec<_>>(),
+            second
+                .iter()
+                .map(|m| (&m.id, &m.operator, &m.replacement))
+                .collect::<Vec<_>>()
+        );
+        assert!(!first.is_empty());
+        assert_eq!(first[0].id, "M0001");
+    }
+
+    #[test]
+    fn unicode_offsets_and_spans_preserve_rust_source_and_parse() {
+        let cases = [
+            "use soroban_sdk::Address;\n// 🦀 before\nfn guarded(user: Address) { let café = \"日本語\"; user.require_auth(); // ✅ after\n}\n",
+            "use soroban_sdk::Address;\nfn guarded(user: Address) { let δεδομένα = \"🔥\"; /* 🍀 */ user.require_auth(); }\n",
+            "use soroban_sdk::Address;\nfn guarded(user: Address) { user.require_auth(); let résumé = \"🧪\"; }\n",
+        ];
+        for source in cases {
+            let mutants = in_memory(source);
+            assert!(!mutants.is_empty(), "must discover auth in Unicode source");
+            for mutant in &mutants {
+                let edited = replace_source_range(
+                    source,
+                    mutant.start_byte,
+                    mutant.end_byte,
+                    &mutant.original,
+                    &mutant.replacement,
+                )
+                .expect("byte-safe mutation");
+                assert!(
+                    syn::parse_file(&edited).is_ok(),
+                    "mutated fixture must parse"
+                );
+                assert_eq!(
+                    &edited.as_bytes()[..mutant.start_byte],
+                    &source.as_bytes()[..mutant.start_byte]
+                );
+                assert_eq!(
+                    &edited.as_bytes()[mutant.start_byte + mutant.replacement.len()..],
+                    &source.as_bytes()[mutant.end_byte..]
+                );
+                let current = source.lines().nth(mutant.span.line - 1).unwrap();
+                let byte_column = current.find(&mutant.original).unwrap() + 1;
+                assert_eq!(mutant.span.column, byte_column);
+            }
+        }
+    }
+
+    #[test]
+    fn utf8_column_conversion_rejects_mid_character_and_bad_ranges() {
+        assert_eq!(line_column_to_offset("λx\n", 1, 1), Some(2));
+        assert_eq!(line_column_to_offset("λx\n", 1, 2), Some(3));
+        assert_eq!(line_column_to_offset("🦀\n", 1, 1), Some(4));
+        assert_eq!(line_column_to_offset("🦀\n", 1, 3), None);
+        assert!(replace_source_range("🐛require_auth()", 1, 10, "", "()").is_err());
+    }
+
+    #[test]
+    fn sdk_local_reexports_are_conservative_and_operator_counts_repeatable() {
+        let renamed = "pub use soroban_sdk::{Address as Person, Env as Host};\n\
+             fn guard(_env: Host, user: Person) { user.require_auth(); }\n";
+        let direct = "pub use soroban_sdk::Address;\n\
+             fn guard(user: Address) { user.require_auth(); }\n";
+        let qualified = "mod sdk_types { pub use soroban_sdk::Address as Person; }\n\
+             fn guard(user: crate::sdk_types::Person) { user.require_auth(); }\n";
+        let unrelated = "pub use other_sdk::Address as Person;\n\
+             fn guard(user: Person) { user.require_auth(); }\n";
+        for source in [renamed, direct, qualified] {
+            let first = in_memory(source);
+            let second = in_memory(source);
+            assert!(first.iter().any(|m| m.operator == "AUTH-001"));
+            assert_eq!(first.len(), second.len());
+            assert_eq!(
+                first
+                    .iter()
+                    .map(|m| (&m.id, &m.operator))
+                    .collect::<Vec<_>>(),
+                second
+                    .iter()
+                    .map(|m| (&m.id, &m.operator))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(in_memory(unrelated).is_empty());
     }
 }
