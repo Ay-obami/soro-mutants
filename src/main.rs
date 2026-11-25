@@ -7126,10 +7126,7 @@ fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
         } else {
             format!(
                 "{}:{}-{}:{}",
-                mutant.span.line,
-                mutant.span.column,
-                mutant.span.end_line,
-                mutant.span.end_column
+                mutant.span.line, mutant.span.column, mutant.span.end_line, mutant.span.end_column
             )
         };
         writeln!(
