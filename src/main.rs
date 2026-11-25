@@ -2162,6 +2162,37 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         self.address_params = previous;
     }
 
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        if let Expr::Let(let_expr) = node.cond.as_ref() {
+            visit::visit_expr(self, &let_expr.expr);
+            let old_len = self.address_params.len();
+            let yields_address = receiver_ident(&let_expr.expr)
+                .is_some_and(|name| self.address_option_params.contains(&name))
+                || match let_expr.expr.as_ref() {
+                    Expr::MethodCall(call)
+                        if call.method == "pop" && call.args.is_empty() =>
+                    {
+                        receiver_ident(&call.receiver)
+                            .is_some_and(|name| self.address_vec_params.contains(&name))
+                    }
+                    _ => false,
+                };
+            if yields_address {
+                if let Some(binding) = option_address_binding(&let_expr.pat) {
+                    if !self.address_params.contains(&binding) {
+                        self.address_params.push(binding);
+                    }
+                }
+            }
+            visit::visit_pat(self, &let_expr.pat);
+            visit::visit_block(self, &node.body);
+            self.address_params.truncate(old_len);
+            return;
+        }
+
+        visit::visit_expr_while(self, node);
+    }
+
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
         let old_len = self.address_params.len();
         let loop_binding = match (node.pat.as_ref(), node.expr.as_ref()) {
@@ -2909,7 +2940,6 @@ fn run() -> Result<()> {
                 .canonicalize()
                 .with_context(|| format!("cannot resolve {}", path.display()))?;
             let scratch_root = resolve_scratch_root(&root, scratch_dir.as_deref())?;
-            validate_scratch_root_writable(&scratch_root)?;
             if scratch_dir.is_some() {
                 metadata.scratch_dir = Some(scratch_root.display().to_string());
             }
@@ -3013,6 +3043,8 @@ fn run() -> Result<()> {
                 ensure_min_score(&[], min_score)?;
                 return Ok(());
             }
+
+            validate_scratch_root_writable(&scratch_root)?;
 
             let cache_base = target_dir_base(&root, target_dir.as_deref());
             let (baseline_target_dir, mutant_target_root) =
