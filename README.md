@@ -38,18 +38,19 @@ The v0.1 recognizers are intentionally conservative. Generic methods that merely
 
 ## Deterministic discovery, UTF-8 and SDK re-exports
 
-Discovery resolves conflicting **partially overlapping source spans** by stable
-file/offset/operator ordering and records an `overlapping source span`
-suppression reason. Distinct mutations covering the *exact same* span remain
-independent single-mutant alternatives; duplicate edits are removed. IDs are
-assigned only after suppression.
+Discovery resolves conflicting, partially overlapping edits **within the same
+semantic operator** by stable file/offset/operator ordering and records an
+`overlapping source span` suppression reason. Mutants from distinct operators
+remain independent experiments even when their spans intersect (for example,
+TTL-001 versus TTL-002). Exact-span alternative edits also remain valid.
+Duplicate edits are removed and IDs assigned after suppression.
 
 Source replacements preserve the UTF-8 bytes outside their selected range.
 Report locations use 1-based lines and **1-based UTF-8 byte columns**; emoji
 and non-ASCII Rust identifiers do not shift mutation offsets.
 
-The recognizer also accepts explicitly declared local `pub use
-soroban_sdk::Address as Account;` and `Env` aliases, plus
+The recognizer also accepts explicit local
+`pub use soroban_sdk::Address as Account;` and `Env` aliases, plus
 `soroban_sdk::token::Client` aliases in the current parsed file/inline
 modules. Glob imports, external module loading and general Rust name
 resolution remain unsupported. See
