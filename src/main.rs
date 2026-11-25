@@ -2102,7 +2102,30 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
+        // Visit the initializer and let-else divergence before introducing the
+        // success binding. A simple `let Some(binding) = option_address else`
+        // keeps that Address binding in scope for the remainder of this block.
         visit::visit_local(self, node);
+        if let Some(init) = &node.init {
+            if init.diverge.is_some()
+                && receiver_ident(&init.expr)
+                    .is_some_and(|name| self.address_option_params.contains(&name))
+            {
+                if let Some(binding) = option_address_binding(&node.pat) {
+                    if !self.address_params.contains(&binding) {
+                        self.address_params.push(binding);
+                    }
+                }
+            }
+        }
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let old_len = self.address_params.len();
+        for statement in &node.stmts {
+            self.visit_stmt(statement);
+        }
+        self.address_params.truncate(old_len);
     }
 
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
