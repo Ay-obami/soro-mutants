@@ -88,12 +88,7 @@ fn mutant_source_copy_excludes_target_and_soro_managed_cache_trees() {
         "must-not-be-copied"
     );
     assert_eq!(
-        fs::read_to_string(
-            fixture
-                .path()
-                .join(".soro-mutants-target/sentinel")
-        )
-        .unwrap(),
+        fs::read_to_string(fixture.path().join(".soro-mutants-target/sentinel")).unwrap(),
         "must-not-be-copied"
     );
 }
