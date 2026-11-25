@@ -99,7 +99,10 @@ struct Normalizer {
 impl Normalizer {
     fn resolve(&self, path: &syn::Path) -> Option<SdkType> {
         if path.leading_colon.is_some()
-            || path.segments.iter().any(|segment| !segment.arguments.is_none())
+            || path
+                .segments
+                .iter()
+                .any(|segment| !segment.arguments.is_none())
         {
             return None;
         }
@@ -153,10 +156,7 @@ impl VisitMut for Normalizer {
     fn visit_expr_call_mut(&mut self, call: &mut syn::ExprCall) {
         if let Expr::Path(path) = call.func.as_mut() {
             let len = path.path.segments.len();
-            if len >= 2
-                && path.path.segments[len - 1].ident == "new"
-                && path.qself.is_none()
-            {
+            if len >= 2 && path.path.segments[len - 1].ident == "new" && path.qself.is_none() {
                 let mut prefix = path.path.clone();
                 prefix.segments.pop();
                 if self.resolve(&prefix) == Some(SdkType::TokenClient) {
@@ -195,9 +195,7 @@ mod tests {
                         for arg in &f.sig.inputs {
                             if let syn::FnArg::Typed(typed) = arg {
                                 if let syn::Type::Path(p) = typed.ty.as_ref() {
-                                    found.push(
-                                        p.path.segments.last().unwrap().ident.to_string(),
-                                    );
+                                    found.push(p.path.segments.last().unwrap().ident.to_string());
                                 }
                             }
                         }
@@ -263,12 +261,18 @@ mod tests {
                       }";
         let mut file = syn::parse_file(source).unwrap();
         normalize(&mut file);
-        let Item::Fn(function) = &file.items[1] else { panic!("expected function") };
-        let syn::Stmt::Local(local) = &function.block.stmts[0] else { panic!("expected let") };
+        let Item::Fn(function) = &file.items[1] else {
+            panic!("expected function")
+        };
+        let syn::Stmt::Local(local) = &function.block.stmts[0] else {
+            panic!("expected let")
+        };
         let Expr::Call(call) = local.init.as_ref().unwrap().expr.as_ref() else {
             panic!("expected constructor")
         };
-        let Expr::Path(path) = call.func.as_ref() else { panic!("expected path") };
+        let Expr::Path(path) = call.func.as_ref() else {
+            panic!("expected path")
+        };
         assert_eq!(path.path.segments[0].ident, "TokenClient");
         assert!(source.contains("TransferClient::new"));
     }
