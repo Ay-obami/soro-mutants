@@ -2124,7 +2124,93 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
+        // Visit the initializer and let-else divergence before introducing the
+        // success binding. A simple `let Some(binding) = option_address else`
+        // keeps that Address binding in scope for the remainder of this block.
         visit::visit_local(self, node);
+        if let Some(init) = &node.init {
+            if init.diverge.is_some()
+                && receiver_ident(&init.expr)
+                    .is_some_and(|name| self.address_option_params.contains(&name))
+            {
+                if let Some(binding) = option_address_binding(&node.pat) {
+                    if !self.address_params.contains(&binding) {
+                        self.address_params.push(binding);
+                    }
+                }
+            }
+        }
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let old_len = self.address_params.len();
+        for statement in &node.stmts {
+            self.visit_stmt(statement);
+        }
+        self.address_params.truncate(old_len);
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let previous = self.address_params.clone();
+        let mut shadowed = std::collections::HashSet::new();
+        let mut typed_address_bindings = Vec::new();
+
+        for input in &node.inputs {
+            let mut bindings = BindingNames::default();
+            bindings.visit_pat(input);
+            shadowed.extend(bindings.0);
+
+            if let Pat::Type(pat_type) = input {
+                if type_is_address(&pat_type.ty) {
+                    if let Pat::Ident(ident) = pat_type.pat.as_ref() {
+                        typed_address_bindings.push(ident.ident.to_string());
+                    }
+                }
+            }
+        }
+
+        self.address_params
+            .retain(|candidate| !shadowed.contains(candidate));
+        for binding in typed_address_bindings {
+            if !self.address_params.contains(&binding) {
+                self.address_params.push(binding);
+            }
+        }
+
+        for input in &node.inputs {
+            visit::visit_pat(self, input);
+        }
+        visit::visit_expr(self, &node.body);
+        self.address_params = previous;
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        if let Expr::Let(let_expr) = node.cond.as_ref() {
+            visit::visit_expr(self, &let_expr.expr);
+            let old_len = self.address_params.len();
+            let yields_address = receiver_ident(&let_expr.expr)
+                .is_some_and(|name| self.address_option_params.contains(&name))
+                || match let_expr.expr.as_ref() {
+                    Expr::MethodCall(call) if call.method == "pop" && call.args.is_empty() => {
+                        receiver_ident(&call.receiver)
+                            .is_some_and(|name| self.address_vec_params.contains(&name))
+                    }
+                    _ => false,
+                };
+            if yields_address {
+                if let Some(binding) = option_address_binding(&let_expr.pat) {
+                    if !self.address_params.contains(&binding) {
+                        self.address_params.push(binding);
+                    }
+                }
+            }
+            visit::visit_pat(self, &let_expr.pat);
+            visit::visit_block(self, &node.body);
+            self.address_params.truncate(old_len);
+            return;
+        }
+
+        visit::visit_expr_while(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
@@ -2197,6 +2283,32 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                 );
             }
         }
+
+        if let Expr::Let(let_expr) = node.cond.as_ref() {
+            // A simple `if let Some(binding) = option_address` introduces an
+            // Address candidate only in the then branch. Visit the scrutinee
+            // outside that temporary scope and restore the candidate set
+            // before visiting the else branch.
+            visit::visit_expr(self, &let_expr.expr);
+            let old_len = self.address_params.len();
+            let option_address = receiver_ident(&let_expr.expr)
+                .is_some_and(|name| self.address_option_params.contains(&name));
+            if option_address {
+                if let Some(binding) = option_address_binding(&let_expr.pat) {
+                    if !self.address_params.contains(&binding) {
+                        self.address_params.push(binding);
+                    }
+                }
+            }
+            visit::visit_pat(self, &let_expr.pat);
+            visit::visit_block(self, &node.then_branch);
+            self.address_params.truncate(old_len);
+            if let Some((_, else_expr)) = &node.else_branch {
+                visit::visit_expr(self, else_expr);
+            }
+            return;
+        }
+
         visit::visit_expr_if(self, node);
     }
 
@@ -2955,6 +3067,8 @@ fn run() -> Result<()> {
                 ensure_min_score(&[], min_score)?;
                 return Ok(());
             }
+
+            validate_scratch_root_writable(&scratch_root)?;
 
             let cache_base = target_dir_base(&root, target_dir.as_deref());
             let (baseline_target_dir, mutant_target_root) =
@@ -5922,6 +6036,39 @@ fn resolve_scratch_root(root: &Path, scratch_dir: Option<&Path>) -> Result<PathB
     let scratch_root = base.join(pathguard::SCRATCH_NAME);
     pathguard::require_owned_scratch_path_under(&scratch_root, &scratch_root)?;
     Ok(scratch_root)
+}
+
+fn validate_scratch_root_writable(scratch_root: &Path) -> Result<()> {
+    pathguard::require_owned_scratch_path_under(scratch_root, scratch_root)?;
+    let existed = scratch_root.exists();
+    fs::create_dir_all(scratch_root).with_context(|| {
+        format!(
+            "scratch root {} cannot be created; choose a writable --scratch-dir",
+            scratch_root.display()
+        )
+    })?;
+
+    let probe = scratch_root.join(format!(".soro-mutants-write-probe-{}", std::process::id()));
+    let probe_result = (|| -> Result<()> {
+        fs::write(&probe, b"soro-mutants scratch probe").with_context(|| {
+            format!(
+                "scratch root {} is not writable; choose a writable --scratch-dir",
+                scratch_root.display()
+            )
+        })?;
+        fs::remove_file(&probe).with_context(|| {
+            format!(
+                "scratch root {} does not permit deleting temporary files",
+                scratch_root.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if !existed {
+        let _ = fs::remove_dir(scratch_root);
+    }
+    probe_result
 }
 
 fn reject_cleanup_symlink(path: &Path) -> Result<()> {
