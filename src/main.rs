@@ -1444,7 +1444,6 @@ struct AuthHelper {
     sinks: Vec<(usize, String, bool)>,
 }
 
-
 #[derive(Clone)]
 struct LexicalScope {
     address_params: Vec<String>,
@@ -1703,7 +1702,6 @@ impl<'a> SemanticVisitor<'a> {
             mutants: Vec::new(),
         }
     }
-
 
     fn snapshot_scope(&self) -> LexicalScope {
         LexicalScope {
@@ -2364,13 +2362,10 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     fn visit_local(&mut self, node: &'ast Local) {
         // The initializer runs in the old scope; the pattern shadows it after.
         visit::visit_local(self, node);
-        let client = node
-            .init
-            .as_ref()
-            .is_some_and(|init| {
-                is_token_client_constructor(&init.expr)
-                    || is_aliased_token_constructor(&init.expr, &self.sdk_aliases)
-            });
+        let client = node.init.as_ref().is_some_and(|init| {
+            is_token_client_constructor(&init.expr)
+                || is_aliased_token_constructor(&init.expr, &self.sdk_aliases)
+        });
         let contract_client = !client
             && node
                 .init
@@ -2664,7 +2659,11 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         }
 
         if node.method == "extend_ttl"
-            && is_ttl_receiver(&node.receiver, &self.storage_accessor_vars, &self.env_params)
+            && is_ttl_receiver(
+                &node.receiver,
+                &self.storage_accessor_vars,
+                &self.env_params,
+            )
         {
             self.push_mutant(
                 "TTL-001",
@@ -6014,11 +6013,7 @@ fn is_soroban_storage_accessor(expr: &Expr, env_params: &[String]) -> bool {
     }
 }
 
-fn is_ttl_receiver(
-    expr: &Expr,
-    known_accessors: &[String],
-    env_params: &[String],
-) -> bool {
+fn is_ttl_receiver(expr: &Expr, known_accessors: &[String], env_params: &[String]) -> bool {
     if is_soroban_storage_accessor(expr, env_params) {
         return true;
     }
@@ -6973,8 +6968,7 @@ fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
         } else {
             format!(
                 "{}:{}-{}:{}",
-                mutant.span.line, mutant.span.column,
-                mutant.span.end_line, mutant.span.end_column
+                mutant.span.line, mutant.span.column, mutant.span.end_line, mutant.span.end_column
             )
         };
         writeln!(
@@ -7168,8 +7162,11 @@ small { color: #516577; }
         } else {
             format!(
                 "{}:{}:{}-{}:{}",
-                mutant.file.display(), mutant.span.line, mutant.span.column,
-                mutant.span.end_line, mutant.span.end_column
+                mutant.file.display(),
+                mutant.span.line,
+                mutant.span.column,
+                mutant.span.end_line,
+                mutant.span.end_column
             )
         };
         writeln!(
@@ -7258,8 +7255,11 @@ fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Re
             } else {
                 format!(
                     "{}:{}:{}-{}:{}",
-                    link_label, mutant.span.line, mutant.span.column,
-                    mutant.span.end_line, mutant.span.end_column
+                    link_label,
+                    mutant.span.line,
+                    mutant.span.column,
+                    mutant.span.end_line,
+                    mutant.span.end_column
                 )
             };
             let fragment = if mutant.span.line == mutant.span.end_line {
@@ -7270,12 +7270,7 @@ fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Re
             writeln!(
                 report,
                 "- `{}` **{}** [{}]({}{}) — {}",
-                mutant.id,
-                mutant.operator,
-                location_label,
-                target,
-                fragment,
-                description
+                mutant.id, mutant.operator, location_label, target, fragment, description
             )?;
         }
         writeln!(report)?;
