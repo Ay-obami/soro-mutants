@@ -1729,14 +1729,14 @@ impl<'a> SemanticVisitor<'a> {
     }
 
     fn shadow_name(&mut self, name: &str) {
-        self.address_params.retain(|value| value != name);
-        self.address_vec_params.retain(|value| value != name);
-        self.address_option_params.retain(|value| value != name);
-        self.token_client_vars.retain(|value| value != name);
-        self.contract_client_vars.retain(|value| value != name);
-        self.storage_accessor_vars.retain(|value| value != name);
-        self.numeric_params.retain(|value| value != name);
-        self.env_params.retain(|value| value != name);
+        self.address_params.retain(|value| !same_ident(value, name));
+        self.address_vec_params.retain(|value| !same_ident(value, name));
+        self.address_option_params.retain(|value| !same_ident(value, name));
+        self.token_client_vars.retain(|value| !same_ident(value, name));
+        self.contract_client_vars.retain(|value| !same_ident(value, name));
+        self.storage_accessor_vars.retain(|value| !same_ident(value, name));
+        self.numeric_params.retain(|value| !same_ident(value, name));
+        self.env_params.retain(|value| !same_ident(value, name));
     }
 
     fn normalized_type(&self, ty: &Type) -> Type {
@@ -2373,108 +2373,119 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 
     fn visit_local(&mut self, node: &'ast Local) {
-        if let Some((name, init)) = local_binding_name_and_init(node) {
-            if is_token_client_constructor(init) && !contains_ident(&self.token_client_vars, &name)
-            {
+        // Initializers and let-else divergence execute in the old scope.
+        visit::visit_local(self, node);
+
+        let client = node.init.as_ref().is_some_and(|init| {
+            is_token_client_constructor(&init.expr)
+                || is_aliased_token_constructor(&init.expr, &self.sdk_aliases)
+        });
+        let contract_client = !client
+            && node
+                .init
+                .as_ref()
+                .is_some_and(|init| is_generated_contract_client_constructor(&init.expr));
+        let accessor = node
+            .init
+            .as_ref()
+            .is_some_and(|init| is_soroban_storage_accessor(&init.expr, &self.env_params));
+
+        for name in pattern_names(&node.pat) {
+            self.shadow_name(&name);
+        }
+
+        if let Some((name, _)) = local_binding_name_and_init(node) {
+            if client {
                 self.token_client_vars.push(name.clone());
             }
-
-            if is_generated_contract_client_constructor(init)
-                && !contains_ident(&self.contract_client_vars, &name)
-            {
+            if contract_client {
                 self.contract_client_vars.push(name.clone());
             }
-
-            if is_soroban_storage_accessor(init)
-                && !contains_ident(&self.storage_accessor_vars, &name)
-            {
+            if accessor {
                 self.storage_accessor_vars.push(name);
             }
         }
 
-        // Visit the initializer and let-else divergence before introducing the
-        // success binding. A simple `let Some(binding) = option_address else`
-        // keeps that Address binding in scope for the remainder of this block.
-        visit::visit_local(self, node);
+        if let Pat::Type(typed) = &node.pat {
+            if let Pat::Ident(binding) = typed.pat.as_ref() {
+                let name = binding.ident.to_string();
+                let ty = self.normalized_type(&typed.ty);
+                if type_is_address(&ty) {
+                    self.address_params.push(name);
+                } else if type_is_env(&ty) {
+                    self.env_params.push(name);
+                } else if type_is_token_client(&ty) {
+                    self.token_client_vars.push(name);
+                } else if type_is_sdk_storage_accessor(&ty) {
+                    self.storage_accessor_vars.push(name);
+                }
+            }
+        }
+
         if let Some(init) = &node.init {
             if init.diverge.is_some()
                 && receiver_ident(&init.expr)
-                    .is_some_and(|name| self.address_option_params.contains(&name))
+                    .is_some_and(|name| contains_ident(&self.address_option_params, &name))
             {
                 if let Some(binding) = option_address_binding(&node.pat) {
-                    if !self.address_params.contains(&binding) {
-                        self.address_params.push(binding);
-                    }
+                    self.address_params.push(binding);
                 }
             }
         }
     }
 
     fn visit_block(&mut self, node: &'ast syn::Block) {
-        let old_len = self.address_params.len();
-        for statement in &node.stmts {
-            self.visit_stmt(statement);
-        }
-        self.address_params.truncate(old_len);
+        let previous = self.snapshot_scope();
+        visit::visit_block(self, node);
+        self.restore_scope(previous);
     }
 
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
-        let previous = self.address_params.clone();
-        let mut shadowed = std::collections::HashSet::new();
-        let mut typed_address_bindings = Vec::new();
-
-        for input in &node.inputs {
-            let mut bindings = BindingNames::default();
-            bindings.visit_pat(input);
-            shadowed.extend(bindings.0);
-
-            if let Pat::Type(pat_type) = input {
-                if type_is_address(&pat_type.ty) {
-                    if let Pat::Ident(ident) = pat_type.pat.as_ref() {
-                        typed_address_bindings.push(ident.ident.to_string());
+        let previous = self.snapshot_scope();
+        for pat in &node.inputs {
+            for name in pattern_names(pat) {
+                self.shadow_name(&name);
+            }
+            if let Pat::Type(typed) = pat {
+                if let Pat::Ident(binding) = typed.pat.as_ref() {
+                    if type_is_address(&self.normalized_type(&typed.ty)) {
+                        self.address_params.push(binding.ident.to_string());
                     }
                 }
             }
         }
-
-        self.address_params
-            .retain(|candidate| !shadowed.contains(candidate));
-        for binding in typed_address_bindings {
-            if !self.address_params.contains(&binding) {
-                self.address_params.push(binding);
-            }
-        }
-
-        for input in &node.inputs {
-            visit::visit_pat(self, input);
+        for pat in &node.inputs {
+            visit::visit_pat(self, pat);
         }
         visit::visit_expr(self, &node.body);
-        self.address_params = previous;
+        self.restore_scope(previous);
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
         if let Expr::Let(let_expr) = node.cond.as_ref() {
             visit::visit_expr(self, &let_expr.expr);
-            let old_len = self.address_params.len();
             let yields_address = receiver_ident(&let_expr.expr)
-                .is_some_and(|name| self.address_option_params.contains(&name))
+                .is_some_and(|name| contains_ident(&self.address_option_params, &name))
                 || match let_expr.expr.as_ref() {
-                    Expr::MethodCall(call) if call.method == "pop" && call.args.is_empty() => {
+                    Expr::MethodCall(call) if ident_eq(&call.method, "pop") && call.args.is_empty() => {
                         receiver_ident(&call.receiver)
-                            .is_some_and(|name| self.address_vec_params.contains(&name))
+                            .is_some_and(|name| contains_ident(&self.address_vec_params, &name))
                     }
                     _ => false,
                 };
+
+            let previous = self.snapshot_scope();
+            for name in pattern_names(&let_expr.pat) {
+                self.shadow_name(&name);
+            }
             if yields_address {
                 if let Some(binding) = option_address_binding(&let_expr.pat) {
-                    if !self.address_params.contains(&binding) {
-                        self.address_params.push(binding);
-                    }
+                    self.address_params.push(binding);
                 }
             }
             visit::visit_pat(self, &let_expr.pat);
             visit::visit_block(self, &node.body);
-            self.address_params.truncate(old_len);
+            self.restore_scope(previous);
             return;
         }
 
@@ -2482,7 +2493,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        let old_len = self.address_params.len();
+        visit::visit_expr(self, &node.expr);
         let loop_binding = match (node.pat.as_ref(), node.expr.as_ref()) {
             (Pat::Ident(binding), Expr::MethodCall(call))
                 if ident_eq(&call.method, "iter") && call.args.is_empty() =>
@@ -2494,45 +2505,68 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
             _ => None,
         };
-        if let Some(binding) = loop_binding {
-            if !contains_ident(&self.address_params, &binding) {
-                self.address_params.push(binding);
-            }
-        }
 
-        visit::visit_expr_for_loop(self, node);
-        self.address_params.truncate(old_len);
+        let previous = self.snapshot_scope();
+        for name in pattern_names(&node.pat) {
+            self.shadow_name(&name);
+        }
+        if let Some(binding) = loop_binding {
+            self.address_params.push(binding);
+        }
+        visit::visit_pat(self, &node.pat);
+        visit::visit_block(self, &node.body);
+        self.restore_scope(previous);
     }
 
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
-        // Match-arm bindings are lexical: visit the scrutinee once, then visit
-        // each arm with a temporary candidate scope that is discarded before
-        // the next arm. We only infer bindings from Option<Address> parameters;
-        // arbitrary pattern type inference remains intentionally out of scope.
         visit::visit_expr(self, &node.expr);
         let option_address = receiver_ident(&node.expr)
             .is_some_and(|name| contains_ident(&self.address_option_params, &name));
 
         for arm in &node.arms {
-            let old_len = self.address_params.len();
+            let previous = self.snapshot_scope();
+            for name in pattern_names(&arm.pat) {
+                self.shadow_name(&name);
+            }
             if option_address {
                 if let Some(binding) = option_address_binding(&arm.pat) {
-                    if !contains_ident(&self.address_params, &binding) {
-                        self.address_params.push(binding);
-                    }
+                    self.address_params.push(binding);
                 }
             }
-
             visit::visit_pat(self, &arm.pat);
             if let Some((_, guard)) = &arm.guard {
                 visit::visit_expr(self, guard);
             }
             visit::visit_expr(self, &arm.body);
-            self.address_params.truncate(old_len);
+            self.restore_scope(previous);
         }
     }
 
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        if let Expr::Let(let_expr) = node.cond.as_ref() {
+            visit::visit_expr(self, &let_expr.expr);
+            let option_address = receiver_ident(&let_expr.expr)
+                .is_some_and(|name| contains_ident(&self.address_option_params, &name));
+
+            let previous = self.snapshot_scope();
+            for name in pattern_names(&let_expr.pat) {
+                self.shadow_name(&name);
+            }
+            if option_address {
+                if let Some(binding) = option_address_binding(&let_expr.pat) {
+                    self.address_params.push(binding);
+                }
+            }
+            visit::visit_pat(self, &let_expr.pat);
+            visit::visit_block(self, &node.then_branch);
+            self.restore_scope(previous);
+
+            if let Some((_, else_expr)) = &node.else_branch {
+                visit::visit_expr(self, else_expr);
+            }
+            return;
+        }
+
         if let Expr::Binary(binary) = node.cond.as_ref() {
             if matches!(binary.op, syn::BinOp::Ne(_))
                 && (is_generated_contract_client_method_call(
@@ -2550,31 +2584,6 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
                     "bypass generated contract-client return mismatch check".to_owned(),
                 );
             }
-        }
-
-        if let Expr::Let(let_expr) = node.cond.as_ref() {
-            // A simple `if let Some(binding) = option_address` introduces an
-            // Address candidate only in the then branch. Visit the scrutinee
-            // outside that temporary scope and restore the candidate set
-            // before visiting the else branch.
-            visit::visit_expr(self, &let_expr.expr);
-            let old_len = self.address_params.len();
-            let option_address = receiver_ident(&let_expr.expr)
-                .is_some_and(|name| self.address_option_params.contains(&name));
-            if option_address {
-                if let Some(binding) = option_address_binding(&let_expr.pat) {
-                    if !self.address_params.contains(&binding) {
-                        self.address_params.push(binding);
-                    }
-                }
-            }
-            visit::visit_pat(self, &let_expr.pat);
-            visit::visit_block(self, &node.then_branch);
-            self.address_params.truncate(old_len);
-            if let Some((_, else_expr)) = &node.else_branch {
-                visit::visit_expr(self, else_expr);
-            }
-            return;
         }
 
         visit::visit_expr_if(self, node);
