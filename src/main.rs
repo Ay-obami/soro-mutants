@@ -2691,7 +2691,8 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 
         if method_name == "transfer"
             && node.args.len() == 3
-            && is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
+            && (is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
+                || is_aliased_token_constructor(&node.receiver, &self.sdk_aliases))
         {
             if let Some(replacement) = swapped_transfer_replacement(self.source, node) {
                 self.push_mutant(
@@ -2740,13 +2741,19 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         }
 
         if let Some((role_a, role_b)) = allowance_role_labels(&method_name, node.args.len()) {
-            if is_token_transfer_receiver(&node.receiver, &self.token_client_vars) {
+            if is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
+                || is_aliased_token_constructor(&node.receiver, &self.sdk_aliases)
+            {
                 self.push_allowance_role_swap(node, role_a, role_b);
             }
         }
 
         if method_name == "extend_ttl"
-            && is_ttl_receiver(&node.receiver, &self.storage_accessor_vars)
+            && is_ttl_receiver(
+                &node.receiver,
+                &self.storage_accessor_vars,
+                &self.env_params,
+            )
         {
             self.push_mutant(
                 "TTL-001",
@@ -6111,7 +6118,7 @@ fn is_direct_env_storage_receiver(expr: &Expr, env_params: &[String]) -> bool {
     }
 }
 
-fn is_soroban_storage_accessor(expr: &Expr) -> bool {
+fn is_soroban_storage_accessor(expr: &Expr, env_params: &[String]) -> bool {
     match expr {
         Expr::MethodCall(call)
             if matches!(
@@ -6119,27 +6126,16 @@ fn is_soroban_storage_accessor(expr: &Expr) -> bool {
                 "instance" | "persistent" | "temporary"
             ) =>
         {
-            storage_chain_contains_storage(&call.receiver)
+            is_direct_env_storage_receiver(&call.receiver, env_params)
         }
-        Expr::Paren(paren) => is_soroban_storage_accessor(&paren.expr),
-        Expr::Reference(reference) => is_soroban_storage_accessor(&reference.expr),
+        Expr::Paren(paren) => is_soroban_storage_accessor(&paren.expr, env_params),
+        Expr::Reference(reference) => is_soroban_storage_accessor(&reference.expr, env_params),
         _ => false,
     }
 }
 
-fn storage_chain_contains_storage(expr: &Expr) -> bool {
-    match expr {
-        Expr::MethodCall(call) => {
-            ident_eq(&call.method, "storage") || storage_chain_contains_storage(&call.receiver)
-        }
-        Expr::Paren(paren) => storage_chain_contains_storage(&paren.expr),
-        Expr::Reference(reference) => storage_chain_contains_storage(&reference.expr),
-        _ => false,
-    }
-}
-
-fn is_ttl_receiver(expr: &Expr, known_accessors: &[String]) -> bool {
-    if is_soroban_storage_accessor(expr) {
+fn is_ttl_receiver(expr: &Expr, known_accessors: &[String], env_params: &[String]) -> bool {
+    if is_soroban_storage_accessor(expr, env_params) {
         return true;
     }
 
@@ -7129,13 +7125,24 @@ fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
     print_report_banner(report)?;
     writeln!(report, "Discovered {} semantic mutants\n", mutants.len())?;
     for mutant in mutants {
+        let location = if mutant.span.line == mutant.span.end_line {
+            mutant.span.line.to_string()
+        } else {
+            format!(
+                "{}:{}-{}:{}",
+                mutant.span.line,
+                mutant.span.column,
+                mutant.span.end_line,
+                mutant.span.end_column
+            )
+        };
         writeln!(
             report,
             "{} {:<8} {}:{} {}",
             mutant.id,
             mutant.operator,
             mutant.file.display(),
-            mutant.span.line,
+            location,
             mutant.description
         )?;
         writeln!(report, "    - {}", mutant.original.trim())?;
