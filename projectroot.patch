@@ -1,0 +1,616 @@
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,6 +1,7 @@
+ mod command;
+ mod diagnostics;
+ mod pathguard;
++mod projectroot;
+ mod redaction;
+ 
+ use anyhow::{bail, Context, Result};
+@@ -2690,9 +2691,9 @@
+             count_only,
+             output,
+         } => {
+-            let root = path
+-                .canonicalize()
+-                .with_context(|| format!("cannot resolve {}", path.display()))?;
++            let project = projectroot::resolve(&path)?;
++            project.announce();
++            let root = project.resolved;
+             let package_dirs = resolve_package_filter(&root, &package)?;
+             let selection_filters = SelectionFilters {
+                 package: &package,
+@@ -2826,9 +2827,9 @@
+                 function.as_deref(),
+                 shard,
+             );
+-            let root = path
+-                .canonicalize()
+-                .with_context(|| format!("cannot resolve {}", path.display()))?;
++            let project = projectroot::resolve(&path)?;
++            project.announce();
++            let root = project.resolved;
+             let scratch_root = resolve_scratch_root(&root, scratch_dir.as_deref())?;
+             if scratch_dir.is_some() {
+                 metadata.scratch_dir = Some(scratch_root.display().to_string());
+@@ -3277,9 +3278,9 @@
+             target_dir,
+             dry_run,
+         } => {
+-            let root = path
+-                .canonicalize()
+-                .with_context(|| format!("cannot resolve {}", path.display()))?;
++            let project = projectroot::resolve(&path)?;
++            project.announce();
++            let root = project.resolved;
+             let paths = clean_generated_state(&root, target_dir.as_deref(), dry_run)?;
+             if paths.is_empty() {
+                 println!("No Soro Mutants generated state found.");
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -210,6 +210,10 @@
+ 
+ This workflow uses the current `main` branch for illustration; pin the tool to a reviewed commit or a release that includes `--github-summary` for reproducible CI. The command still runs the normal baseline and mutant tests, so its exit status is preserved. The GitHub summary file is appended to, not replaced.
+ 
++### Symlinked project paths
++
++The project path may be a symlink. It is resolved once to the real directory, so reports use project-relative paths, ordering and shards match the real path, and `clean` only removes Soro Mutants-managed paths inside the real project (never the link itself, and never through a symlinked managed path). A `note:` on stderr says when a symlink was used; a dangling link or a link cycle fails with an actionable `error: cannot resolve ...` message and exit code 1. See [symlinked project roots](docs/symlinked-project-roots.md).
++
+ ### Workspace package selection
+ 
+ In Cargo workspaces, scope mutation testing to one or more packages using `-p` / `--package`:
+@@ -506,6 +510,7 @@
+ - [Troubleshooting](docs/troubleshooting.md)
+ - [CI integration](docs/ci-integration.md)
+ - [Monorepo invocation patterns](docs/monorepo.md)
++- [Symlinked project roots](docs/symlinked-project-roots.md)
+ - [Performance tuning](docs/performance-tuning.md)
+ - [Report consumer guide](docs/report-consumer.md)
+ - [Roadmap](docs/roadmap.md)
+diff --git a/docs/troubleshooting.md b/docs/troubleshooting.md
+--- a/docs/troubleshooting.md
++++ b/docs/troubleshooting.md
+@@ -10,6 +10,7 @@
+ | --- | --- | --- |
+ | Invalid argument (exit 2) | Run `cargo soro-mutants test --help`. | Check operator IDs, glob syntax, mutually exclusive output modes, and one-based shard numbers. |
+ | Project path cannot be resolved (exit 1) | Check the path from the shell's working directory and confirm it points to the intended Cargo project or workspace. | Use an absolute path if the caller's working directory varies. Check that the project and test subdirectory are readable. |
++| Project path is a symlink that fails to resolve (exit 1) | Read the `error: cannot resolve` line: it names a missing link target or a symlink cycle. | Recreate the link or pass the real directory. See [symlinked project roots](symlinked-project-roots.md). |
+ | Filesystem path too long (exit 1) | Check the path printed in the copy or directory creation diagnostic. | Move the checkout nearer the filesystem root or choose a shorter `--target-dir` (where applicable); keep directory nesting and filenames short. |
+ | No matching mutants (usually exit 0) | Read the `note:` and `warning:` lines on stderr, then run `cargo soro-mutants list . --count-only` and add your filters one at a time. | See [empty selections](#empty-selections). An empty selection skips the baseline. A positive score threshold on an empty selection exits 4. |
+ | Mutants from the wrong project, or every mutant `UNVIABLE` in a repository with several projects | Check which directory you passed as `PATH`. | See [monorepo invocation patterns](monorepo.md). |
+diff --git a/src/projectroot.rs b/src/projectroot.rs
+new file mode 100644
+--- /dev/null
++++ b/src/projectroot.rs
+@@ -0,0 +1,284 @@
++//! Resolution of the project path given on the command line.
++//!
++//! `list`, `test`, and `clean` all treat the project path as a starting point
++//! and immediately resolve it to a canonical directory. Everything after that
++//! point (discovery, project-relative report paths, scratch worktrees, cache
++//! directories, and cleanup) uses the resolved root, so the result is the same
++//! whether the tool is invoked through a symlink or through the real directory.
++//!
++//! This module centralizes that step so the behavior is defined and tested in
++//! one place, failures are structured and actionable, and the use of a symlink
++//! is observable through a `note:` diagnostic.
++
++use std::{
++    error::Error,
++    fmt, fs, io,
++    path::{Path, PathBuf},
++};
++
++use crate::diagnostics;
++
++/// A project path that has been resolved to a canonical directory.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ProjectRoot {
++    /// The path exactly as the user supplied it.
++    pub requested: PathBuf,
++    /// Canonical root used for discovery, reporting, caches, and cleanup.
++    pub resolved: PathBuf,
++    /// Whether the requested path itself is a symbolic link.
++    pub symlinked: bool,
++}
++
++impl ProjectRoot {
++    /// Human-readable description of the symlink resolution, if one happened.
++    ///
++    /// Returns `None` when the requested path is not itself a symlink, so
++    /// existing invocations produce no new output.
++    pub fn symlink_note(&self) -> Option<String> {
++        self.symlinked.then(|| {
++            format!(
++                "project path {} is a symlink; using resolved root {} for discovery, reports, and cleanup",
++                self.requested.display(),
++                self.resolved.display()
++            )
++        })
++    }
++
++    /// Emits the symlink note on stderr. Reports on stdout are unaffected.
++    pub fn announce(&self) {
++        if let Some(note) = self.symlink_note() {
++            diagnostics::note(&note);
++        }
++    }
++}
++
++/// Why a project path could not be resolved.
++///
++/// Every message starts with `cannot resolve <path>` so the long-standing
++/// diagnostic prefix is unchanged for scripts that match on it.
++#[derive(Debug)]
++pub enum ProjectRootError {
++    /// The path is a symlink whose target does not exist.
++    DanglingSymlink { path: PathBuf, target: PathBuf },
++    /// The path is, or passes through, a cycle of symbolic links.
++    SymlinkLoop { path: PathBuf },
++    /// Any other failure; the underlying I/O error is the error's source.
++    Io { path: PathBuf, source: io::Error },
++}
++
++impl fmt::Display for ProjectRootError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::DanglingSymlink { path, target } => write!(
++                f,
++                "cannot resolve {}: symlink points to {}, which does not exist; \
++                 fix or recreate the link, or pass the real project directory",
++                path.display(),
++                target.display()
++            ),
++            Self::SymlinkLoop { path } => write!(
++                f,
++                "cannot resolve {}: too many levels of symbolic links; \
++                 the project path is part of a symlink cycle",
++                path.display()
++            ),
++            Self::Io { path, .. } => write!(f, "cannot resolve {}", path.display()),
++        }
++    }
++}
++
++impl Error for ProjectRootError {
++    fn source(&self) -> Option<&(dyn Error + 'static)> {
++        match self {
++            Self::Io { source, .. } => Some(source),
++            _ => None,
++        }
++    }
++}
++
++/// Resolves `requested` to a canonical project root.
++pub fn resolve(requested: &Path) -> Result<ProjectRoot, ProjectRootError> {
++    match requested.canonicalize() {
++        Ok(resolved) => Ok(ProjectRoot {
++            requested: requested.to_path_buf(),
++            resolved,
++            symlinked: is_symlink(requested),
++        }),
++        Err(error) => Err(classify(requested, error)),
++    }
++}
++
++/// `true` when the final component of `path` is a symbolic link.
++///
++/// Trailing separators and `.` components are dropped first, because a
++/// trailing slash would otherwise make the OS follow the link.
++fn is_symlink(path: &Path) -> bool {
++    let normalized: PathBuf = path.components().collect();
++    fs::symlink_metadata(normalized)
++        .map(|metadata| metadata.file_type().is_symlink())
++        .unwrap_or(false)
++}
++
++fn classify(path: &Path, error: io::Error) -> ProjectRootError {
++    if is_symlink_loop(&error) {
++        return ProjectRootError::SymlinkLoop {
++            path: path.to_path_buf(),
++        };
++    }
++    if error.kind() == io::ErrorKind::NotFound && is_symlink(path) {
++        let normalized: PathBuf = path.components().collect();
++        let target = fs::read_link(normalized).unwrap_or_default();
++        return ProjectRootError::DanglingSymlink {
++            path: path.to_path_buf(),
++            target,
++        };
++    }
++    ProjectRootError::Io {
++        path: path.to_path_buf(),
++        source: error,
++    }
++}
++
++/// Recognizes the OS error for "too many levels of symbolic links".
++fn is_symlink_loop(error: &io::Error) -> bool {
++    let Some(code) = error.raw_os_error() else {
++        return false;
++    };
++    (cfg!(any(target_os = "linux", target_os = "android")) && code == 40)
++        || (cfg!(any(
++            target_os = "macos",
++            target_os = "ios",
++            target_os = "freebsd",
++            target_os = "openbsd",
++            target_os = "netbsd",
++            target_os = "dragonfly"
++        )) && code == 62)
++        || (cfg!(windows) && code == 1921)
++}
++
++#[cfg(all(test, unix))]
++mod tests {
++    use super::*;
++    use std::{
++        os::unix::fs::symlink,
++        sync::atomic::{AtomicU64, Ordering},
++    };
++
++    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
++
++    struct TempDir(PathBuf);
++
++    impl TempDir {
++        fn new() -> Self {
++            let path = std::env::temp_dir().join(format!(
++                "soro-mutants-projectroot-{}-{}",
++                std::process::id(),
++                SEQUENCE.fetch_add(1, Ordering::Relaxed)
++            ));
++            fs::create_dir_all(&path).unwrap();
++            Self(path.canonicalize().unwrap())
++        }
++    }
++
++    impl Drop for TempDir {
++        fn drop(&mut self) {
++            let _ = fs::remove_dir_all(&self.0);
++        }
++    }
++
++    #[test]
++    fn plain_directory_is_not_reported_as_symlink() {
++        let tmp = TempDir::new();
++        let real = tmp.0.join("real");
++        fs::create_dir(&real).unwrap();
++
++        let root = resolve(&real).unwrap();
++        assert_eq!(root.resolved, real);
++        assert!(!root.symlinked);
++        assert!(root.symlink_note().is_none());
++    }
++
++    #[test]
++    fn symlinked_root_resolves_to_real_directory() {
++        let tmp = TempDir::new();
++        let real = tmp.0.join("real");
++        let link = tmp.0.join("link");
++        fs::create_dir(&real).unwrap();
++        symlink(&real, &link).unwrap();
++
++        let root = resolve(&link).unwrap();
++        assert_eq!(root.requested, link);
++        assert_eq!(root.resolved, real);
++        assert!(root.symlinked);
++        let note = root.symlink_note().unwrap();
++        assert!(note.contains(&link.display().to_string()));
++        assert!(note.contains(&real.display().to_string()));
++    }
++
++    #[test]
++    fn chained_symlinks_resolve_to_the_final_directory() {
++        let tmp = TempDir::new();
++        let real = tmp.0.join("real");
++        fs::create_dir(&real).unwrap();
++        symlink(&real, tmp.0.join("first")).unwrap();
++        symlink(tmp.0.join("first"), tmp.0.join("second")).unwrap();
++
++        let root = resolve(&tmp.0.join("second")).unwrap();
++        assert_eq!(root.resolved, real);
++        assert!(root.symlinked);
++    }
++
++    #[test]
++    fn trailing_separator_still_detects_the_symlink() {
++        let tmp = TempDir::new();
++        let real = tmp.0.join("real");
++        let link = tmp.0.join("link");
++        fs::create_dir(&real).unwrap();
++        symlink(&real, &link).unwrap();
++
++        let with_slash = PathBuf::from(format!("{}/", link.display()));
++        let root = resolve(&with_slash).unwrap();
++        assert_eq!(root.resolved, real);
++        assert!(root.symlinked);
++    }
++
++    #[test]
++    fn dangling_symlink_names_the_missing_target() {
++        let tmp = TempDir::new();
++        let link = tmp.0.join("dangling");
++        symlink(tmp.0.join("gone"), &link).unwrap();
++
++        let error = resolve(&link).unwrap_err();
++        assert!(matches!(error, ProjectRootError::DanglingSymlink { .. }));
++        let text = error.to_string();
++        assert!(text.starts_with("cannot resolve "), "{text}");
++        assert!(text.contains(&tmp.0.join("gone").display().to_string()));
++    }
++
++    #[test]
++    fn symlink_cycle_is_a_structured_error() {
++        let tmp = TempDir::new();
++        let a = tmp.0.join("a");
++        let b = tmp.0.join("b");
++        symlink(&b, &a).unwrap();
++        symlink(&a, &b).unwrap();
++
++        let error = resolve(&a).unwrap_err();
++        assert!(matches!(error, ProjectRootError::SymlinkLoop { .. }));
++        assert!(error.to_string().starts_with("cannot resolve "));
++    }
++
++    #[test]
++    fn missing_path_keeps_the_original_message_shape() {
++        let tmp = TempDir::new();
++        let missing = tmp.0.join("nope");
++
++        let error = resolve(&missing).unwrap_err();
++        assert!(matches!(error, ProjectRootError::Io { .. }));
++        assert_eq!(
++            error.to_string(),
++            format!("cannot resolve {}", missing.display())
++        );
++        assert!(error.source().is_some());
++    }
++}
+diff --git a/tests/symlinked_project_root_cli.rs b/tests/symlinked_project_root_cli.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/symlinked_project_root_cli.rs
+@@ -0,0 +1,175 @@
++//! Behavior when the project path is a symlink: project-relative reporting is
++//! unchanged, cleanup stays inside the real project, and failures are
++//! structured. Symlink creation needs Unix permissions, so this file is
++//! Unix-only.
++#![cfg(unix)]
++
++use std::{
++    fs,
++    os::unix::fs::symlink,
++    path::{Path, PathBuf},
++    process::{Command, Output},
++    sync::atomic::{AtomicU64, Ordering},
++};
++
++static SEQUENCE: AtomicU64 = AtomicU64::new(0);
++
++struct TempDir(PathBuf);
++
++impl TempDir {
++    fn new() -> Self {
++        let path = std::env::temp_dir().join(format!(
++            "soro-mutants-symlink-root-{}-{}",
++            std::process::id(),
++            SEQUENCE.fetch_add(1, Ordering::Relaxed)
++        ));
++        fs::create_dir_all(&path).unwrap();
++        Self(path.canonicalize().unwrap())
++    }
++}
++
++impl Drop for TempDir {
++    fn drop(&mut self) {
++        let _ = fs::remove_dir_all(&self.0);
++    }
++}
++
++fn cli(args: &[&str], path: &Path, extra: &[&str]) -> Output {
++    Command::new(env!("CARGO_BIN_EXE_cargo-soro-mutants"))
++        .args(args)
++        .arg(path)
++        .args(extra)
++        .output()
++        .expect("CLI should run")
++}
++
++fn fixture() -> PathBuf {
++    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/weak-auth")
++}
++
++fn stderr(output: &Output) -> String {
++    String::from_utf8_lossy(&output.stderr).into_owned()
++}
++
++#[test]
++fn list_output_is_identical_through_a_symlink() {
++    let tmp = TempDir::new();
++    let link = tmp.0.join("project-link");
++    symlink(fixture(), &link).unwrap();
++
++    let direct = cli(&["list"], &fixture(), &["--json"]);
++    let linked = cli(&["list"], &link, &["--json"]);
++    assert!(direct.status.success(), "{}", stderr(&direct));
++    assert!(linked.status.success(), "{}", stderr(&linked));
++    assert_eq!(direct.stdout, linked.stdout);
++
++    let json = String::from_utf8(linked.stdout).unwrap();
++    assert!(!json.contains("project-link"), "{json}");
++    assert!(json.contains("src/lib.rs"), "{json}");
++}
++
++#[test]
++fn symlink_use_is_reported_as_a_note_only_when_it_happens() {
++    let tmp = TempDir::new();
++    let link = tmp.0.join("project-link");
++    symlink(fixture(), &link).unwrap();
++
++    let linked = cli(&["list"], &link, &["--count-only"]);
++    let text = stderr(&linked);
++    assert!(text.starts_with("note: project path "), "{text}");
++    assert!(text.contains("is a symlink; using resolved root"), "{text}");
++    assert!(text.contains(&link.display().to_string()), "{text}");
++
++    let direct = cli(&["list"], &fixture(), &["--count-only"]);
++    assert_eq!(stderr(&direct), "");
++}
++
++#[test]
++fn clean_through_a_symlink_removes_only_managed_state_in_the_real_project() {
++    let tmp = TempDir::new();
++    let real = tmp.0.join("real");
++    let link = tmp.0.join("link");
++    fs::create_dir_all(real.join(".soro-mutants-target/baseline")).unwrap();
++    fs::create_dir_all(real.join(".soro-mutants-worktree")).unwrap();
++    fs::write(real.join("keep.txt"), "user data").unwrap();
++    symlink(&real, &link).unwrap();
++
++    let dry = cli(&["clean"], &link, &["--dry-run"]);
++    assert!(dry.status.success(), "{}", stderr(&dry));
++    let listed = String::from_utf8(dry.stdout).unwrap();
++    assert!(listed.contains("Would remove"), "{listed}");
++    assert!(
++        listed.contains(&real.display().to_string()),
++        "paths should be under the real root: {listed}"
++    );
++    assert!(real.join(".soro-mutants-worktree").exists());
++
++    let output = cli(&["clean"], &link, &[]);
++    assert!(output.status.success(), "{}", stderr(&output));
++    assert!(!real.join(".soro-mutants-target").exists());
++    assert!(!real.join(".soro-mutants-worktree").exists());
++    assert_eq!(fs::read_to_string(real.join("keep.txt")).unwrap(), "user data");
++    assert!(
++        fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
++        "the project symlink itself must survive cleanup"
++    );
++}
++
++#[test]
++fn clean_refuses_a_managed_path_that_is_a_symlink_out_of_the_project() {
++    let tmp = TempDir::new();
++    let real = tmp.0.join("real");
++    let outside = tmp.0.join("outside");
++    let link = tmp.0.join("link");
++    fs::create_dir_all(&real).unwrap();
++    fs::create_dir_all(&outside).unwrap();
++    fs::write(outside.join("precious.txt"), "keep").unwrap();
++    symlink(&outside, real.join(".soro-mutants-target")).unwrap();
++    symlink(&real, &link).unwrap();
++
++    let output = cli(&["clean"], &link, &[]);
++    assert_eq!(output.status.code(), Some(1));
++    assert!(
++        stderr(&output).contains("refusing to clean symlinked Soro Mutants path"),
++        "{}",
++        stderr(&output)
++    );
++    assert_eq!(
++        fs::read_to_string(outside.join("precious.txt")).unwrap(),
++        "keep"
++    );
++}
++
++#[test]
++fn dangling_symlink_is_a_structured_error() {
++    let tmp = TempDir::new();
++    let link = tmp.0.join("dangling");
++    let target = tmp.0.join("gone");
++    symlink(&target, &link).unwrap();
++
++    for command in ["list", "test", "clean"] {
++        let output = cli(&[command], &link, &[]);
++        assert_eq!(output.status.code(), Some(1), "{command}");
++        let text = stderr(&output);
++        assert!(text.starts_with("error: cannot resolve "), "{text}");
++        assert!(text.contains("symlink points to"), "{text}");
++        assert!(text.contains(&target.display().to_string()), "{text}");
++        assert!(!text.contains("panicked"), "{text}");
++    }
++}
++
++#[test]
++fn symlink_cycle_is_a_structured_error() {
++    let tmp = TempDir::new();
++    let a = tmp.0.join("a");
++    let b = tmp.0.join("b");
++    symlink(&b, &a).unwrap();
++    symlink(&a, &b).unwrap();
++
++    let output = cli(&["list"], &a, &[]);
++    assert_eq!(output.status.code(), Some(1));
++    let text = stderr(&output);
++    assert!(text.starts_with("error: cannot resolve "), "{text}");
++    assert!(text.contains("symlink cycle"), "{text}");
++    assert!(!text.contains("panicked"), "{text}");
++}
+diff --git a/docs/symlinked-project-roots.md b/docs/symlinked-project-roots.md
+new file mode 100644
+--- /dev/null
++++ b/docs/symlinked-project-roots.md
+@@ -0,0 +1,59 @@
++# Symlinked project roots
++
++`list`, `test`, and `clean` accept a project path that is a symbolic link. This
++page defines what that means. It is the behavior from v0.1.x, now covered by
++tests and made observable; there is no compatibility change.
++
++## Resolution
++
++The project path is resolved once, to a canonical directory (all symlinks
++followed), before anything else happens. Everything afterwards uses the
++resolved root:
++
++| Area | Behavior |
++| --- | --- |
++| Discovery | Walks the real directory. Symlinks found *inside* the project are not followed, as before. |
++| Reporting | File paths in text, JSON, Markdown, HTML, and SARIF reports are relative to the resolved root. The symlink's name never appears in them. |
++| Ordering, IDs, shards | Identical to invoking the tool on the real directory, because they depend only on project-relative paths. |
++| Caches and scratch | `.soro-mutants-target` and `.soro-mutants-worktree` are created inside the resolved root. A relative `--target-dir` is also joined to the resolved root. |
++| Result cache and resume identity | Built from the resolved root, so a run through the link and a run through the real path share a cache. |
++
++For identical source, configuration, and toolchain, a run through a symlink and
++a run through the real directory produce identical reports.
++
++## Cleanup safety
++
++`clean` removes only Soro Mutants-managed paths under the resolved root. The
++symlink you passed is never removed, and nothing outside the real project is
++touched. If a managed path inside the project, such as `.soro-mutants-target`,
++is itself a symlink, `clean` refuses with
++`refusing to clean symlinked Soro Mutants path ...` and exits 1 without deleting
++anything, so a link cannot redirect deletion to another directory.
++
++## Diagnostics
++
++When the project path itself is a symlink, stderr gets one line:
++
++```text
++note: project path ./contracts-link is a symlink; using resolved root /work/contracts for discovery, reports, and cleanup
++```
++
++The note is not printed for ordinary directories, and stdout (including
++`--json` and `--output` reports) is unchanged. A symlink in an *ancestor*
++directory is resolved silently.
++
++## Errors
++
++Failures exit 1 with an `error: cannot resolve <path>` line, never a panic:
++
++| Condition | Message |
++| --- | --- |
++| Target of the link no longer exists | `error: cannot resolve ./link: symlink points to /old/place, which does not exist; fix or recreate the link, or pass the real project directory` |
++| Link cycle | `error: cannot resolve ./a: too many levels of symbolic links; the project path is part of a symlink cycle` |
++| Any other failure | `error: cannot resolve ./path: <operating-system error>` (unchanged from earlier releases) |
++
++## Platforms
++
++Symlink behavior is tested on Unix. On Windows, creating symlinks needs
++developer mode or elevated rights; the resolution code path is the same, but the
++symlink tests are skipped there.
