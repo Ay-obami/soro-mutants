@@ -2461,6 +2461,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         }
 
         if method_name == "require_auth"
+            && self.lifecycle.is_none()
             && (!self.env_params.is_empty() || !self.address_params.is_empty())
         {
             let receiver = receiver_ident(&node.receiver);
