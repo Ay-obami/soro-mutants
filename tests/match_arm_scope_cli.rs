@@ -5,8 +5,7 @@ use std::{
 };
 
 fn unique_project() -> std::path::PathBuf {
-    static SEQUENCE: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
