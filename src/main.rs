@@ -6884,7 +6884,11 @@ fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Re
     };
 
     writeln!(report, "# Soro Mutants Report\n")?;
-    writeln!(\n        report,\n        "{}\\n",\n        report::ReportMeta::current().markdown_line()\n    )?;
+    writeln!(
+        report,
+        "{}\n",
+        report::ReportMeta::current().markdown_line()
+    )?;
     writeln!(report, "| Metric | Count |")?;
     writeln!(report, "| --- | ---: |")?;
     for (name, count) in [
