@@ -5906,10 +5906,7 @@ fn validate_scratch_root_writable(scratch_root: &Path) -> Result<()> {
         )
     })?;
 
-    let probe = scratch_root.join(format!(
-        ".soro-mutants-write-probe-{}",
-        std::process::id()
-    ));
+    let probe = scratch_root.join(format!(".soro-mutants-write-probe-{}", std::process::id()));
     let probe_result = (|| -> Result<()> {
         fs::write(&probe, b"soro-mutants scratch probe").with_context(|| {
             format!(
