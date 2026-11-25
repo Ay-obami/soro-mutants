@@ -1,0 +1,41 @@
+name: Verify issues 89 90 98
+on:
+  push:
+    branches: [fix/issues-89-90-98-semantic-discovery]
+permissions:
+  contents: write
+concurrency:
+  group: verify-89-90-98-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85.0"
+          components: rustfmt, clippy
+      - name: Normalize Rust formatting
+        run: cargo fmt --all
+      - name: Commit formatter output to contribution branch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.rs src/sdk_reexports.rs tests/semantic_discovery_v1_cli.rs
+          if ! git diff --cached --quiet; then
+            git commit -m "style: rustfmt semantic discovery regression implementation"
+            git push origin HEAD:fix/issues-89-90-98-semantic-discovery
+          fi
+      - name: Rustfmt check
+        run: cargo fmt --all -- --check
+      - name: Unit and integration tests
+        run: cargo test --locked --all
+      - name: Clippy (deny warnings)
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Cargo package
+        run: cargo package --locked
