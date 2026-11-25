@@ -31,7 +31,7 @@ fn discover(path: &std::path::Path) -> serde_json::Value {
 
 #[test]
 fn semantic_fixture_reports_stable_overlap_suppression_and_contiguous_ids() {
-    let source = include_str!("../fixtures/semantic-edge-cases/src/lib.rs");
+    let source = include_str!("../fixtures/equivalence-semantic-edge-cases/src/lib.rs");
     let root = fixture_with(source);
     let first = discover(&root);
     let second = discover(&root);
