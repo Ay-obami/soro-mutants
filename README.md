@@ -34,7 +34,7 @@ Soro Mutants targets those semantics.
 | `TOKEN-001` | Swap sender and recipient on recognized Soroban token-client transfers |
 | `TOKEN-002` | Swap owner and spender on recognized Soroban token-client allowance calls |
 
-The v0.1 recognizers are intentionally conservative. Generic methods that merely share names such as `require_auth`, `transfer`, `extend_ttl`, or `publish` are ignored unless the surrounding AST matches a supported Soroban pattern. See [the operator specification](docs/operators.md) for exact boundaries.
+The v0.1 recognizers are intentionally conservative. Generic methods that merely share names such as `require_auth`, `transfer`, `extend_ttl`, or `publish` are ignored unless the surrounding AST matches a supported Soroban pattern. See [the operator specification](docs/operators.md) for exact boundaries, and [semantic accuracy, SDK aliases, lexical shadowing, and original-source spans](docs/semantic-accuracy.md) for regression guarantees and worked examples.
 
 ## Deterministic discovery, UTF-8 and SDK re-exports
 
