@@ -2478,6 +2478,33 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        if let Expr::Let(let_expr) = node.cond.as_ref() {
+            // The scrutinee is evaluated in the outer scope. Pattern bindings
+            // become visible only in the then branch and must not leak into
+            // the else branch or following statements.
+            visit::visit_expr(self, &let_expr.expr);
+            let option_address = receiver_ident(&let_expr.expr)
+                .is_some_and(|name| self.address_option_params.contains(&name));
+
+            let previous = self.snapshot_scope();
+            for name in pattern_names(&let_expr.pat) {
+                self.shadow_name(&name);
+            }
+            if option_address {
+                if let Some(binding) = option_address_binding(&let_expr.pat) {
+                    self.address_params.push(binding);
+                }
+            }
+            visit::visit_pat(self, &let_expr.pat);
+            visit::visit_block(self, &node.then_branch);
+            self.restore_scope(previous);
+
+            if let Some((_, else_expr)) = &node.else_branch {
+                visit::visit_expr(self, else_expr);
+            }
+            return;
+        }
+
         if let Expr::Binary(binary) = node.cond.as_ref() {
             if matches!(binary.op, syn::BinOp::Ne(_))
                 && (is_generated_contract_client_method_call(
