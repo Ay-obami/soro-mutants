@@ -2169,9 +2169,7 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             let yields_address = receiver_ident(&let_expr.expr)
                 .is_some_and(|name| self.address_option_params.contains(&name))
                 || match let_expr.expr.as_ref() {
-                    Expr::MethodCall(call)
-                        if call.method == "pop" && call.args.is_empty() =>
-                    {
+                    Expr::MethodCall(call) if call.method == "pop" && call.args.is_empty() => {
                         receiver_ident(&call.receiver)
                             .is_some_and(|name| self.address_vec_params.contains(&name))
                     }
