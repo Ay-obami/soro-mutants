@@ -33,9 +33,13 @@ impl<'ast> Visit<'ast> for SafeAstVisitor {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        let name = node.method.to_string();
+        let raw_name = node.method.to_string();
+        let name = raw_name
+            .strip_prefix("r#")
+            .filter(|rest| !rest.is_empty())
+            .unwrap_or(&raw_name);
         if matches!(
-            name.as_str(),
+            name,
             "require_auth" | "extend_ttl" | "publish" | "transfer" | "transfer_from"
         ) {
             self.has_soroban_patterns = true;
