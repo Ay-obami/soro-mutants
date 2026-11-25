@@ -1445,9 +1445,216 @@ struct AuthHelper {
     sinks: Vec<(usize, String, bool)>,
 }
 
+#[derive(Clone)]
+struct LexicalScope {
+    address_params: Vec<String>,
+    address_vec_params: Vec<String>,
+    address_option_params: Vec<String>,
+    token_client_vars: Vec<String>,
+    contract_client_vars: Vec<String>,
+    storage_accessor_vars: Vec<String>,
+    numeric_params: Vec<String>,
+    env_params: Vec<String>,
+}
+
+fn pattern_names(pat: &Pat) -> Vec<String> {
+    #[derive(Default)]
+    struct Names(Vec<String>);
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            self.0.push(node.ident.to_string());
+            visit::visit_pat_ident(self, node);
+        }
+    }
+    let mut names = Names::default();
+    names.visit_pat(pat);
+    names.0
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SorobanAlias {
+    Address,
+    Env,
+    TokenClient,
+    StorageInstance,
+    StoragePersistent,
+    StorageTemporary,
+}
+
+/// Resolve only direct `use soroban_sdk::... as ...` aliases from this module.
+fn soroban_aliases(items: &[Item]) -> std::collections::HashMap<String, SorobanAlias> {
+    fn walk(
+        tree: &syn::UseTree,
+        prefix: &mut Vec<String>,
+        out: &mut std::collections::HashMap<String, SorobanAlias>,
+    ) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                walk(&path.tree, prefix, out);
+                prefix.pop();
+            }
+            syn::UseTree::Group(group) => {
+                for member in &group.items {
+                    walk(member, prefix, out);
+                }
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut full = prefix.clone();
+                full.push(rename.ident.to_string());
+                let kind = match full.join("::").as_str() {
+                    "soroban_sdk::Address" => Some(SorobanAlias::Address),
+                    "soroban_sdk::Env" => Some(SorobanAlias::Env),
+                    "soroban_sdk::token::Client" | "soroban_sdk::token::TokenClient" => {
+                        Some(SorobanAlias::TokenClient)
+                    }
+                    "soroban_sdk::storage::Instance" => Some(SorobanAlias::StorageInstance),
+                    "soroban_sdk::storage::Persistent" => Some(SorobanAlias::StoragePersistent),
+                    "soroban_sdk::storage::Temporary" => Some(SorobanAlias::StorageTemporary),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    out.insert(rename.rename.to_string(), kind);
+                }
+            }
+            syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for item in items {
+        if let Item::Use(import) = item {
+            walk(&import.tree, &mut Vec::new(), &mut out);
+        }
+    }
+    out
+}
+
+fn normalize_soroban_type(
+    ty: &mut Type,
+    aliases: &std::collections::HashMap<String, SorobanAlias>,
+) {
+    match ty {
+        Type::Path(type_path) => {
+            if type_path.qself.is_none() && type_path.path.segments.len() == 1 {
+                let name = type_path.path.segments[0].ident.to_string();
+                if let Some(kind) = aliases.get(&name) {
+                    type_path.path = match kind {
+                        SorobanAlias::Address => syn::parse_quote!(soroban_sdk::Address),
+                        SorobanAlias::Env => syn::parse_quote!(soroban_sdk::Env),
+                        SorobanAlias::TokenClient => syn::parse_quote!(soroban_sdk::token::Client),
+                        SorobanAlias::StorageInstance => {
+                            syn::parse_quote!(soroban_sdk::storage::Instance)
+                        }
+                        SorobanAlias::StoragePersistent => {
+                            syn::parse_quote!(soroban_sdk::storage::Persistent)
+                        }
+                        SorobanAlias::StorageTemporary => {
+                            syn::parse_quote!(soroban_sdk::storage::Temporary)
+                        }
+                    };
+                }
+            }
+            for segment in &mut type_path.path.segments {
+                if let syn::PathArguments::AngleBracketed(args) = &mut segment.arguments {
+                    for arg in &mut args.args {
+                        if let syn::GenericArgument::Type(inner) = arg {
+                            normalize_soroban_type(inner, aliases);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Reference(reference) => normalize_soroban_type(&mut reference.elem, aliases),
+        Type::Ptr(pointer) => normalize_soroban_type(&mut pointer.elem, aliases),
+        Type::Paren(paren) => normalize_soroban_type(&mut paren.elem, aliases),
+        Type::Group(group) => normalize_soroban_type(&mut group.elem, aliases),
+        Type::Slice(slice) => normalize_soroban_type(&mut slice.elem, aliases),
+        Type::Array(array) => normalize_soroban_type(&mut array.elem, aliases),
+        Type::Tuple(tuple) => {
+            for element in &mut tuple.elems {
+                normalize_soroban_type(element, aliases);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalized_soroban_signature(
+    sig: &Signature,
+    aliases: &std::collections::HashMap<String, SorobanAlias>,
+) -> Signature {
+    let mut result = sig.clone();
+    for arg in &mut result.inputs {
+        if let FnArg::Typed(typed) = arg {
+            normalize_soroban_type(&mut typed.ty, aliases);
+        }
+    }
+    result
+}
+
+fn is_aliased_token_constructor(
+    expr: &Expr,
+    aliases: &std::collections::HashMap<String, SorobanAlias>,
+) -> bool {
+    match expr {
+        Expr::Call(call) => match call.func.as_ref() {
+            Expr::Path(path)
+                if path.qself.is_none()
+                    && path.path.segments.len() == 2
+                    && path.path.segments[1].ident == "new" =>
+            {
+                aliases.get(&path.path.segments[0].ident.to_string())
+                    == Some(&SorobanAlias::TokenClient)
+            }
+            _ => false,
+        },
+        Expr::Paren(paren) => is_aliased_token_constructor(&paren.expr, aliases),
+        Expr::Reference(reference) => is_aliased_token_constructor(&reference.expr, aliases),
+        _ => false,
+    }
+}
+
+fn type_is_sdk_storage_accessor(ty: &Type) -> bool {
+    match ty {
+        Type::Path(type_path) => {
+            let joined = type_path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            matches!(
+                joined.as_str(),
+                "soroban_sdk::storage::Instance"
+                    | "soroban_sdk::storage::Persistent"
+                    | "soroban_sdk::storage::Temporary"
+            )
+        }
+        Type::Reference(reference) => type_is_sdk_storage_accessor(&reference.elem),
+        _ => false,
+    }
+}
+
+fn storage_accessor_params(sig: &Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .filter_map(|input| match input {
+            FnArg::Typed(typed) if type_is_sdk_storage_accessor(&typed.ty) => {
+                match typed.pat.as_ref() {
+                    Pat::Ident(binding) => Some(binding.ident.to_string()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 struct SemanticVisitor<'a> {
     source: &'a str,
     file: PathBuf,
+    sdk_aliases: std::collections::HashMap<String, SorobanAlias>,
     current_function: Option<String>,
     lifecycle: Option<LifecycleKind>,
     address_params: Vec<String>,
@@ -1474,6 +1681,7 @@ impl<'a> SemanticVisitor<'a> {
         Self {
             source,
             file,
+            sdk_aliases: std::collections::HashMap::new(),
             current_function: None,
             lifecycle: None,
             address_params: Vec::new(),
@@ -1496,7 +1704,49 @@ impl<'a> SemanticVisitor<'a> {
         }
     }
 
+    fn snapshot_scope(&self) -> LexicalScope {
+        LexicalScope {
+            address_params: self.address_params.clone(),
+            address_vec_params: self.address_vec_params.clone(),
+            address_option_params: self.address_option_params.clone(),
+            token_client_vars: self.token_client_vars.clone(),
+            contract_client_vars: self.contract_client_vars.clone(),
+            storage_accessor_vars: self.storage_accessor_vars.clone(),
+            numeric_params: self.numeric_params.clone(),
+            env_params: self.env_params.clone(),
+        }
+    }
+
+    fn restore_scope(&mut self, scope: LexicalScope) {
+        self.address_params = scope.address_params;
+        self.address_vec_params = scope.address_vec_params;
+        self.address_option_params = scope.address_option_params;
+        self.token_client_vars = scope.token_client_vars;
+        self.contract_client_vars = scope.contract_client_vars;
+        self.storage_accessor_vars = scope.storage_accessor_vars;
+        self.numeric_params = scope.numeric_params;
+        self.env_params = scope.env_params;
+    }
+
+    fn shadow_name(&mut self, name: &str) {
+        self.address_params.retain(|value| value != name);
+        self.address_vec_params.retain(|value| value != name);
+        self.address_option_params.retain(|value| value != name);
+        self.token_client_vars.retain(|value| value != name);
+        self.contract_client_vars.retain(|value| value != name);
+        self.storage_accessor_vars.retain(|value| value != name);
+        self.numeric_params.retain(|value| value != name);
+        self.env_params.retain(|value| value != name);
+    }
+
+    fn normalized_type(&self, ty: &Type) -> Type {
+        let mut normalized = ty.clone();
+        normalize_soroban_type(&mut normalized, &self.sdk_aliases);
+        normalized
+    }
+
     fn enter_signature(&mut self, sig: &Signature, body: &syn::Block) -> FunctionState {
+        let normalized = normalized_soroban_signature(sig, &self.sdk_aliases);
         let mut bindings = BindingNames::default();
         bindings.visit_block(body);
         FunctionState {
@@ -1525,24 +1775,36 @@ impl<'a> SemanticVisitor<'a> {
                 parts.push(name);
                 parts.join("::")
             }),
-            lifecycle: std::mem::replace(&mut self.lifecycle, recognized_lifecycle(sig, body)),
-            address_params: std::mem::replace(&mut self.address_params, address_params(sig)),
+            lifecycle: std::mem::replace(
+                &mut self.lifecycle,
+                recognized_lifecycle(&normalized, body),
+            ),
+            address_params: std::mem::replace(
+                &mut self.address_params,
+                address_params(&normalized),
+            ),
             address_vec_params: std::mem::replace(
                 &mut self.address_vec_params,
-                address_vec_params(sig),
+                address_vec_params(&normalized),
             ),
             address_option_params: std::mem::replace(
                 &mut self.address_option_params,
-                address_option_params(sig),
+                address_option_params(&normalized),
             ),
             token_client_vars: std::mem::replace(
                 &mut self.token_client_vars,
-                token_client_params(sig),
+                token_client_params(&normalized),
             ),
             contract_client_vars: std::mem::take(&mut self.contract_client_vars),
-            storage_accessor_vars: std::mem::take(&mut self.storage_accessor_vars),
-            numeric_params: std::mem::replace(&mut self.numeric_params, numeric_params(sig)),
-            env_params: std::mem::replace(&mut self.env_params, env_params(sig)),
+            storage_accessor_vars: std::mem::replace(
+                &mut self.storage_accessor_vars,
+                storage_accessor_params(&normalized),
+            ),
+            numeric_params: std::mem::replace(
+                &mut self.numeric_params,
+                numeric_params(&normalized),
+            ),
+            env_params: std::mem::replace(&mut self.env_params, env_params(&normalized)),
         }
     }
 
@@ -1792,8 +2054,10 @@ impl<'a> SemanticVisitor<'a> {
             {
                 continue;
             }
-            let annotated_address =
-                matches!(&local.pat, Pat::Type(typed) if type_is_address(&typed.ty));
+            let annotated_address = matches!(
+                &local.pat,
+                Pat::Type(typed) if type_is_address(&self.normalized_type(&typed.ty))
+            );
             let Some(turbofish_address) = stored_authority_lookup(init, &self.env_params) else {
                 continue;
             };
@@ -1894,6 +2158,7 @@ fn stored_authority_lookup(expr: &Expr, env_params: &[String]) -> Option<bool> {
 
 impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     fn visit_file(&mut self, node: &'ast syn::File) {
+        self.sdk_aliases = soroban_aliases(&node.items);
         self.impl_method_collisions = impl_method_collisions(node);
         self.typed_event_structs = node
             .items
@@ -1954,12 +2219,15 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         self.module_depth += 1;
-        let is_inline = node.content.is_some();
-        if is_inline {
+        let previous_aliases = self.sdk_aliases.clone();
+        if let Some((_, items)) = &node.content {
             self.module_path.push(node.ident.to_string());
+            // An inline module has its own direct import scope.
+            self.sdk_aliases = soroban_aliases(items);
         }
         visit::visit_item_mod(self, node);
-        if is_inline {
+        self.sdk_aliases = previous_aliases;
+        if node.content.is_some() {
             self.module_path.pop();
         }
         self.module_depth -= 1;
@@ -2105,30 +2373,127 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
     }
 
     fn visit_local(&mut self, node: &'ast Local) {
-        if let Some((name, init)) = local_binding_name_and_init(node) {
-            if is_token_client_constructor(init) && !contains_ident(&self.token_client_vars, &name)
-            {
+        // The initializer and let-else divergence run in the old scope.
+        visit::visit_local(self, node);
+        let client = node.init.as_ref().is_some_and(|init| {
+            is_token_client_constructor(&init.expr)
+                || is_aliased_token_constructor(&init.expr, &self.sdk_aliases)
+        });
+        let contract_client = !client
+            && node
+                .init
+                .as_ref()
+                .is_some_and(|init| is_generated_contract_client_constructor(&init.expr));
+        let accessor = node
+            .init
+            .as_ref()
+            .is_some_and(|init| is_soroban_storage_accessor(&init.expr, &self.env_params));
+
+        for name in pattern_names(&node.pat) {
+            self.shadow_name(&name);
+        }
+        if let Some((name, _)) = local_binding_name_and_init(node) {
+            if client {
                 self.token_client_vars.push(name.clone());
             }
-
-            if is_generated_contract_client_constructor(init)
-                && !contains_ident(&self.contract_client_vars, &name)
-            {
+            if contract_client {
                 self.contract_client_vars.push(name.clone());
             }
-
-            if is_soroban_storage_accessor(init)
-                && !contains_ident(&self.storage_accessor_vars, &name)
-            {
+            if accessor {
                 self.storage_accessor_vars.push(name);
             }
         }
+        if let Pat::Type(typed) = &node.pat {
+            if let Pat::Ident(binding) = typed.pat.as_ref() {
+                let name = binding.ident.to_string();
+                let ty = self.normalized_type(&typed.ty);
+                if type_is_address(&ty) {
+                    self.address_params.push(name);
+                } else if type_is_env(&ty) {
+                    self.env_params.push(name);
+                } else if type_is_token_client(&ty) {
+                    self.token_client_vars.push(name);
+                } else if type_is_sdk_storage_accessor(&ty) {
+                    self.storage_accessor_vars.push(name);
+                }
+            }
+        }
+        if let Some(init) = &node.init {
+            if init.diverge.is_some()
+                && receiver_ident(&init.expr)
+                    .is_some_and(|name| contains_ident(&self.address_option_params, &name))
+            {
+                if let Some(binding) = option_address_binding(&node.pat) {
+                    if !contains_ident(&self.address_params, &binding) {
+                        self.address_params.push(binding);
+                    }
+                }
+            }
+        }
+    }
 
-        visit::visit_local(self, node);
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        let previous = self.snapshot_scope();
+        for statement in &node.stmts {
+            self.visit_stmt(statement);
+        }
+        self.restore_scope(previous);
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        let previous = self.snapshot_scope();
+        for pat in &node.inputs {
+            for name in pattern_names(pat) {
+                self.shadow_name(&name);
+            }
+            if let Pat::Type(typed) = pat {
+                if let Pat::Ident(binding) = typed.pat.as_ref() {
+                    if type_is_address(&self.normalized_type(&typed.ty)) {
+                        self.address_params.push(binding.ident.to_string());
+                    }
+                }
+            }
+        }
+        for input in &node.inputs {
+            visit::visit_pat(self, input);
+        }
+        visit::visit_expr(self, &node.body);
+        self.restore_scope(previous);
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        if let Expr::Let(let_expr) = node.cond.as_ref() {
+            visit::visit_expr(self, &let_expr.expr);
+            let yields_address = receiver_ident(&let_expr.expr)
+                .is_some_and(|name| contains_ident(&self.address_option_params, &name))
+                || match let_expr.expr.as_ref() {
+                    Expr::MethodCall(call)
+                        if ident_eq(&call.method, "pop") && call.args.is_empty() =>
+                    {
+                        receiver_ident(&call.receiver)
+                            .is_some_and(|name| contains_ident(&self.address_vec_params, &name))
+                    }
+                    _ => false,
+                };
+            let previous = self.snapshot_scope();
+            for name in pattern_names(&let_expr.pat) {
+                self.shadow_name(&name);
+            }
+            if yields_address {
+                if let Some(binding) = option_address_binding(&let_expr.pat) {
+                    self.address_params.push(binding);
+                }
+            }
+            visit::visit_pat(self, &let_expr.pat);
+            visit::visit_block(self, &node.body);
+            self.restore_scope(previous);
+            return;
+        }
+        visit::visit_expr_while(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        let old_len = self.address_params.len();
+        visit::visit_expr(self, &node.expr);
         let loop_binding = match (node.pat.as_ref(), node.expr.as_ref()) {
             (Pat::Ident(binding), Expr::MethodCall(call))
                 if ident_eq(&call.method, "iter") && call.args.is_empty() =>
@@ -2140,45 +2505,65 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
             _ => None,
         };
-        if let Some(binding) = loop_binding {
-            if !contains_ident(&self.address_params, &binding) {
-                self.address_params.push(binding);
-            }
+        let previous = self.snapshot_scope();
+        for name in pattern_names(&node.pat) {
+            self.shadow_name(&name);
         }
-
-        visit::visit_expr_for_loop(self, node);
-        self.address_params.truncate(old_len);
+        if let Some(binding) = loop_binding {
+            self.address_params.push(binding);
+        }
+        visit::visit_pat(self, &node.pat);
+        visit::visit_block(self, &node.body);
+        self.restore_scope(previous);
     }
 
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
-        // Match-arm bindings are lexical: visit the scrutinee once, then visit
-        // each arm with a temporary candidate scope that is discarded before
-        // the next arm. We only infer bindings from Option<Address> parameters;
-        // arbitrary pattern type inference remains intentionally out of scope.
         visit::visit_expr(self, &node.expr);
         let option_address = receiver_ident(&node.expr)
             .is_some_and(|name| contains_ident(&self.address_option_params, &name));
 
         for arm in &node.arms {
-            let old_len = self.address_params.len();
+            let previous = self.snapshot_scope();
+            for name in pattern_names(&arm.pat) {
+                self.shadow_name(&name);
+            }
             if option_address {
                 if let Some(binding) = option_address_binding(&arm.pat) {
-                    if !contains_ident(&self.address_params, &binding) {
-                        self.address_params.push(binding);
-                    }
+                    self.address_params.push(binding);
                 }
             }
-
             visit::visit_pat(self, &arm.pat);
             if let Some((_, guard)) = &arm.guard {
                 visit::visit_expr(self, guard);
             }
             visit::visit_expr(self, &arm.body);
-            self.address_params.truncate(old_len);
+            self.restore_scope(previous);
         }
     }
 
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        if let Expr::Let(let_expr) = node.cond.as_ref() {
+            visit::visit_expr(self, &let_expr.expr);
+            let option_address = receiver_ident(&let_expr.expr)
+                .is_some_and(|name| contains_ident(&self.address_option_params, &name));
+            let previous = self.snapshot_scope();
+            for name in pattern_names(&let_expr.pat) {
+                self.shadow_name(&name);
+            }
+            if option_address {
+                if let Some(binding) = option_address_binding(&let_expr.pat) {
+                    self.address_params.push(binding);
+                }
+            }
+            visit::visit_pat(self, &let_expr.pat);
+            visit::visit_block(self, &node.then_branch);
+            self.restore_scope(previous);
+            if let Some((_, else_expr)) = &node.else_branch {
+                visit::visit_expr(self, else_expr);
+            }
+            return;
+        }
+
         if let Expr::Binary(binary) = node.cond.as_ref() {
             if matches!(binary.op, syn::BinOp::Ne(_))
                 && (is_generated_contract_client_method_call(
@@ -2302,7 +2687,8 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
 
         if method_name == "transfer"
             && node.args.len() == 3
-            && is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
+            && (is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
+                || is_aliased_token_constructor(&node.receiver, &self.sdk_aliases))
         {
             if let Some(replacement) = swapped_transfer_replacement(self.source, node) {
                 self.push_mutant(
@@ -2351,13 +2737,19 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
         }
 
         if let Some((role_a, role_b)) = allowance_role_labels(&method_name, node.args.len()) {
-            if is_token_transfer_receiver(&node.receiver, &self.token_client_vars) {
+            if is_token_transfer_receiver(&node.receiver, &self.token_client_vars)
+                || is_aliased_token_constructor(&node.receiver, &self.sdk_aliases)
+            {
                 self.push_allowance_role_swap(node, role_a, role_b);
             }
         }
 
         if method_name == "extend_ttl"
-            && is_ttl_receiver(&node.receiver, &self.storage_accessor_vars)
+            && is_ttl_receiver(
+                &node.receiver,
+                &self.storage_accessor_vars,
+                &self.env_params,
+            )
         {
             self.push_mutant(
                 "TTL-001",
@@ -2461,36 +2853,30 @@ impl<'ast> Visit<'ast> for SemanticVisitor<'_> {
             }
         }
 
-        if method_name == "require_auth"
-            && self.lifecycle.is_none()
-            && (!self.env_params.is_empty() || !self.address_params.is_empty())
-        {
-            let receiver = receiver_ident(&node.receiver);
-
-            self.push_mutant(
-                "AUTH-001",
-                node.span(),
-                "()".to_string(),
-                match &receiver {
-                    Some(name) => format!("remove {}.require_auth()", name),
-                    None => "remove require_auth()".to_string(),
-                },
-            );
-
-            if let Some(receiver_name) = receiver {
-                for candidate in self
-                    .address_params
-                    .iter()
-                    .filter(|candidate| !same_ident(candidate, &receiver_name))
-                    .cloned()
-                    .collect::<Vec<_>>()
-                {
+        if method_name == "require_auth" && node.args.is_empty() && self.lifecycle.is_none() {
+            if let Some(receiver_name) = receiver_ident(&node.receiver) {
+                if contains_ident(&self.address_params, &receiver_name) {
                     self.push_mutant(
-                        "AUTH-002",
+                        "AUTH-001",
                         node.span(),
-                        format!("{}.require_auth()", candidate),
-                        format!("authenticate {} instead of {}", candidate, receiver_name),
+                        "()".to_string(),
+                        format!("remove {}.require_auth()", receiver_name),
                     );
+
+                    for candidate in self
+                        .address_params
+                        .iter()
+                        .filter(|candidate| !same_ident(candidate, &receiver_name))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                    {
+                        self.push_mutant(
+                            "AUTH-002",
+                            node.span(),
+                            format!("{}.require_auth()", candidate),
+                            format!("authenticate {} instead of {}", candidate, receiver_name),
+                        );
+                    }
                 }
             }
         }
@@ -2955,6 +3341,8 @@ fn run() -> Result<()> {
                 ensure_min_score(&[], min_score)?;
                 return Ok(());
             }
+
+            validate_scratch_root_writable(&scratch_root)?;
 
             let cache_base = target_dir_base(&root, target_dir.as_deref());
             let (baseline_target_dir, mutant_target_root) =
@@ -5726,7 +6114,7 @@ fn is_direct_env_storage_receiver(expr: &Expr, env_params: &[String]) -> bool {
     }
 }
 
-fn is_soroban_storage_accessor(expr: &Expr) -> bool {
+fn is_soroban_storage_accessor(expr: &Expr, env_params: &[String]) -> bool {
     match expr {
         Expr::MethodCall(call)
             if matches!(
@@ -5734,27 +6122,16 @@ fn is_soroban_storage_accessor(expr: &Expr) -> bool {
                 "instance" | "persistent" | "temporary"
             ) =>
         {
-            storage_chain_contains_storage(&call.receiver)
+            is_direct_env_storage_receiver(&call.receiver, env_params)
         }
-        Expr::Paren(paren) => is_soroban_storage_accessor(&paren.expr),
-        Expr::Reference(reference) => is_soroban_storage_accessor(&reference.expr),
+        Expr::Paren(paren) => is_soroban_storage_accessor(&paren.expr, env_params),
+        Expr::Reference(reference) => is_soroban_storage_accessor(&reference.expr, env_params),
         _ => false,
     }
 }
 
-fn storage_chain_contains_storage(expr: &Expr) -> bool {
-    match expr {
-        Expr::MethodCall(call) => {
-            ident_eq(&call.method, "storage") || storage_chain_contains_storage(&call.receiver)
-        }
-        Expr::Paren(paren) => storage_chain_contains_storage(&paren.expr),
-        Expr::Reference(reference) => storage_chain_contains_storage(&reference.expr),
-        _ => false,
-    }
-}
-
-fn is_ttl_receiver(expr: &Expr, known_accessors: &[String]) -> bool {
-    if is_soroban_storage_accessor(expr) {
+fn is_ttl_receiver(expr: &Expr, known_accessors: &[String], env_params: &[String]) -> bool {
+    if is_soroban_storage_accessor(expr, env_params) {
         return true;
     }
 
@@ -5922,6 +6299,39 @@ fn resolve_scratch_root(root: &Path, scratch_dir: Option<&Path>) -> Result<PathB
     let scratch_root = base.join(pathguard::SCRATCH_NAME);
     pathguard::require_owned_scratch_path_under(&scratch_root, &scratch_root)?;
     Ok(scratch_root)
+}
+
+fn validate_scratch_root_writable(scratch_root: &Path) -> Result<()> {
+    pathguard::require_owned_scratch_path_under(scratch_root, scratch_root)?;
+    let existed = scratch_root.exists();
+    fs::create_dir_all(scratch_root).with_context(|| {
+        format!(
+            "scratch root {} cannot be created; choose a writable --scratch-dir",
+            scratch_root.display()
+        )
+    })?;
+
+    let probe = scratch_root.join(format!(".soro-mutants-write-probe-{}", std::process::id()));
+    let probe_result = (|| -> Result<()> {
+        fs::write(&probe, b"soro-mutants scratch probe").with_context(|| {
+            format!(
+                "scratch root {} is not writable; choose a writable --scratch-dir",
+                scratch_root.display()
+            )
+        })?;
+        fs::remove_file(&probe).with_context(|| {
+            format!(
+                "scratch root {} does not permit deleting temporary files",
+                scratch_root.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if !existed {
+        let _ = fs::remove_dir(scratch_root);
+    }
+    probe_result
 }
 
 fn reject_cleanup_symlink(path: &Path) -> Result<()> {
@@ -6711,13 +7121,21 @@ fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
     print_report_banner(report)?;
     writeln!(report, "Discovered {} semantic mutants\n", mutants.len())?;
     for mutant in mutants {
+        let location = if mutant.span.line == mutant.span.end_line {
+            mutant.span.line.to_string()
+        } else {
+            format!(
+                "{}:{}-{}:{}",
+                mutant.span.line, mutant.span.column, mutant.span.end_line, mutant.span.end_column
+            )
+        };
         writeln!(
             report,
             "{} {:<8} {}:{} {}",
             mutant.id,
             mutant.operator,
             mutant.file.display(),
-            mutant.span.line,
+            location,
             mutant.description
         )?;
         writeln!(report, "    - {}", mutant.original.trim())?;
@@ -6898,14 +7316,25 @@ small { color: #516577; }
     }
     for result in results {
         let mutant = &result.mutant;
+        let location = if mutant.span.line == mutant.span.end_line {
+            format!("{}:{}", mutant.file.display(), mutant.span.line)
+        } else {
+            format!(
+                "{}:{}:{}-{}:{}",
+                mutant.file.display(),
+                mutant.span.line,
+                mutant.span.column,
+                mutant.span.end_line,
+                mutant.span.end_column
+            )
+        };
         writeln!(
             report,
-            "<article><h3>{} — {} — {}</h3><small>{}:{} (function: {})</small><p>{}</p><p>Original</p><pre><code>{}</code></pre><p>Replacement</p><pre><code>{}</code></pre></article>",
+            "<article><h3>{} — {} — {}</h3><small>{} (function: {})</small><p>{}</p><p>Original</p><pre><code>{}</code></pre><p>Replacement</p><pre><code>{}</code></pre></article>",
             escape_html(&mutant.id),
             escape_html(&mutant.operator),
             outcome_label(&result.outcome),
-            escape_html(&mutant.file.to_string_lossy()),
-            mutant.span.line,
+            escape_html(&location),
             escape_html(mutant.function.as_deref().unwrap_or("unknown")),
             escape_html(&mutant.description),
             escape_html(&mutant.original),
@@ -6985,16 +7414,27 @@ fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Re
                 .description
                 .replace(['\n', '\r'], " ")
                 .replace('`', "\\`");
+            let location_label = if mutant.span.line == mutant.span.end_line {
+                format!("{}:{}", link_label, mutant.span.line)
+            } else {
+                format!(
+                    "{}:{}:{}-{}:{}",
+                    link_label,
+                    mutant.span.line,
+                    mutant.span.column,
+                    mutant.span.end_line,
+                    mutant.span.end_column
+                )
+            };
+            let fragment = if mutant.span.line == mutant.span.end_line {
+                format!("#L{}", mutant.span.line)
+            } else {
+                format!("#L{}-L{}", mutant.span.line, mutant.span.end_line)
+            };
             writeln!(
                 report,
-                "- `{}` **{}** [{}:{}]({}#L{}) — {}",
-                mutant.id,
-                mutant.operator,
-                link_label,
-                mutant.span.line,
-                target,
-                mutant.span.line,
-                description
+                "- `{}` **{}** [{}]({}{}) — {}",
+                mutant.id, mutant.operator, location_label, target, fragment, description
             )?;
         }
         writeln!(report)?;
@@ -7115,6 +7555,14 @@ fn print_sarif_report(report: &mut dyn Write, results: &[MutantResult]) -> Resul
         .map(|result| {
             let mutant = &result.mutant;
             let path = mutant.file.to_string_lossy().replace('\\', "/");
+            let mut region = serde_json::json!({
+                "startLine": mutant.span.line,
+                "startColumn": mutant.span.column
+            });
+            if mutant.span.end_line != mutant.span.line {
+                region["endLine"] = serde_json::json!(mutant.span.end_line);
+                region["endColumn"] = serde_json::json!(mutant.span.end_column);
+            }
             serde_json::json!({
                 "ruleId": mutant.operator,
                 "level": "warning",
@@ -7127,10 +7575,7 @@ fn print_sarif_report(report: &mut dyn Write, results: &[MutantResult]) -> Resul
                 "locations": [{
                     "physicalLocation": {
                         "artifactLocation": {"uri": path},
-                        "region": {
-                            "startLine": mutant.span.line,
-                            "startColumn": mutant.span.column
-                        }
+                        "region": region
                     }
                 }],
                 "properties": {
