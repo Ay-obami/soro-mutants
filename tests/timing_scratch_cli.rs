@@ -119,7 +119,11 @@ fn timing_reports_real_baseline_compile_test_and_mutant_durations() {
     assert!(mutant_timing["compile_ms"].is_u64());
     assert!(mutant_timing["test_ms"].is_u64());
 
-    let scratch_root = fixture.scratch_base.join(".soro-mutants-worktree");
+    let scratch_root = fixture
+        .scratch_base
+        .canonicalize()
+        .unwrap()
+        .join(".soro-mutants-worktree");
     assert_eq!(
         report["metadata"]["scratch_dir"],
         scratch_root.display().to_string()
