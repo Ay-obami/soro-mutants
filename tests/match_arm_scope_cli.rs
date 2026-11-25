@@ -5,12 +5,16 @@ use std::{
 };
 
 fn unique_project() -> std::path::PathBuf {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("soro-match-scope-{}-{nonce}", std::process::id()));
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "soro-match-scope-{}-{nonce}-{sequence}",
+        std::process::id()
+    ));
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(root.join("Cargo.toml"), "[package]\nname = \"match-scope-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n").unwrap();
     root

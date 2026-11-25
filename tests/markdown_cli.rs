@@ -32,6 +32,7 @@ fn markdown_report_is_deterministic_and_includes_links_and_score() {
     let report = String::from_utf8(first.stdout).unwrap();
     let expected = concat!(
         "# Soro Mutants Report\n\n",
+        "_soro-mutants 0.1.5 (report format 1)_\n\n",
         "| Metric | Count |\n| --- | ---: |\n",
         "| Generated | 1 |\n| Killed | 0 |\n| Survived | 1 |\n",
         "| Unviable | 0 |\n| Timeout | 0 |\n\n",
