@@ -2,6 +2,7 @@ mod command;
 mod diagnostics;
 mod pathguard;
 mod redaction;
+mod report;
 mod sdk_reexports;
 
 use anyhow::{bail, Context, Result};
@@ -6644,7 +6645,13 @@ fn run_process(
     }
     Ok(execution.result)
 }
+fn print_report_banner(report: &mut dyn Write) -> Result<()> {
+    writeln!(report, "{}", report::ReportMeta::current().text_line())?;
+    Ok(())
+}
+
 fn print_mutants(report: &mut dyn Write, mutants: &[Mutant]) -> Result<()> {
+    print_report_banner(report)?;
     writeln!(report, "Discovered {} semantic mutants\n", mutants.len())?;
     for mutant in mutants {
         writeln!(
@@ -6711,6 +6718,7 @@ fn print_suppression_summary(
 }
 
 fn print_summary(report: &mut dyn Write, results: &[MutantResult]) -> Result<()> {
+    print_report_banner(report)?;
     let killed = results
         .iter()
         .filter(|result| matches!(result.outcome, Outcome::Killed))
@@ -6876,6 +6884,7 @@ fn print_markdown_report(report: &mut dyn Write, results: &[MutantResult]) -> Re
     };
 
     writeln!(report, "# Soro Mutants Report\n")?;
+    writeln!(report, "{}\n", report::ReportMeta::current().markdown_line())?;
     writeln!(report, "| Metric | Count |")?;
     writeln!(report, "| --- | ---: |")?;
     for (name, count) in [
